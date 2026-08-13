@@ -1,0 +1,321 @@
+# DNP3 object groups and variations — the single source of truth.
+#
+# internal/gen reads this file and emits:
+#   objects/zz_generated_descriptors.go   the registry: sizes, kinds, metadata
+#   objects/zz_generated_codecs.go        parse and write functions
+#   internal/app/zz_generated_sizes.go    the ObjectSizer the framing layer needs
+#
+# Regenerate with `make generate`. The generated files are committed, so
+# consumers never run the generator, and CI fails if they drift.
+#
+# Fields
+#   group, variation  the on-the-wire identity
+#   name              the standard's name for the variation
+#   level             IEEE 1815 conformance subset level
+#   kind              static | event | command | command_event | time | class |
+#                     indication | deadband | string | file | attribute
+#   measurement       binary | doublebit | counter | frozencounter | analog |
+#                     binaryoutput | analogoutput | none
+#   packed            bits per object when objects share octets (1 or 2)
+#   variable          true when the size is not fixed and must be carried by a
+#                     size prefix on the wire
+#   fields            wire fields in order; the generator derives roles from
+#                     their types
+#
+# Field types and their widths
+#   flags 8   u8 8   status 8   i16 16   u16 16   i32 32   u32 32
+#   f32 32   f64 64   time48 48   time16 16
+#
+# A `flags` field carries the point's own state for binary measurements (bit 7)
+# and for double-bit measurements (bits 6 and 7); the generator handles that
+# from the measurement type rather than from an extra flag here.
+
+objects:
+  # ---------------------------------------------------------------- group 1/2
+  # Binary inputs: the breaker-closed, alarm-active, relay-tripped points that
+  # make up most of a substation's status data.
+  - {group: 1, variation: 1, name: BinaryInputPacked, level: 1, kind: static, measurement: binary, packed: 1}
+  - {group: 1, variation: 2, name: BinaryInputWithFlags, level: 1, kind: static, measurement: binary,
+     fields: [{name: Flags, type: flags}]}
+
+  - {group: 2, variation: 1, name: BinaryInputEventNoTime, level: 1, kind: event, measurement: binary,
+     fields: [{name: Flags, type: flags}]}
+  - {group: 2, variation: 2, name: BinaryInputEventAbsTime, level: 1, kind: event, measurement: binary,
+     fields: [{name: Flags, type: flags}, {name: Time, type: time48}]}
+  - {group: 2, variation: 3, name: BinaryInputEventRelTime, level: 1, kind: event, measurement: binary,
+     fields: [{name: Flags, type: flags}, {name: Time, type: time16}]}
+
+  # ---------------------------------------------------------------- group 3/4
+  # Double-bit binary inputs report two auxiliary contacts, so a breaker that
+  # is mid-travel or miswired is distinguishable from one that is simply open.
+  - {group: 3, variation: 1, name: DoubleBitInputPacked, level: 4, kind: static, measurement: doublebit, packed: 2}
+  - {group: 3, variation: 2, name: DoubleBitInputWithFlags, level: 4, kind: static, measurement: doublebit,
+     fields: [{name: Flags, type: flags}]}
+
+  - {group: 4, variation: 1, name: DoubleBitEventNoTime, level: 4, kind: event, measurement: doublebit,
+     fields: [{name: Flags, type: flags}]}
+  - {group: 4, variation: 2, name: DoubleBitEventAbsTime, level: 4, kind: event, measurement: doublebit,
+     fields: [{name: Flags, type: flags}, {name: Time, type: time48}]}
+  - {group: 4, variation: 3, name: DoubleBitEventRelTime, level: 4, kind: event, measurement: doublebit,
+     fields: [{name: Flags, type: flags}, {name: Time, type: time16}]}
+
+  # -------------------------------------------------------------- group 10/11
+  # Binary output status: what the control points are currently doing.
+  - {group: 10, variation: 1, name: BinaryOutputPacked, level: 1, kind: static, measurement: binaryoutput, packed: 1}
+  - {group: 10, variation: 2, name: BinaryOutputWithFlags, level: 1, kind: static, measurement: binaryoutput,
+     fields: [{name: Flags, type: flags}]}
+
+  - {group: 11, variation: 1, name: BinaryOutputEventNoTime, level: 2, kind: event, measurement: binaryoutput,
+     fields: [{name: Flags, type: flags}]}
+  - {group: 11, variation: 2, name: BinaryOutputEventAbsTime, level: 2, kind: event, measurement: binaryoutput,
+     fields: [{name: Flags, type: flags}, {name: Time, type: time48}]}
+
+  # ----------------------------------------------------------------- group 12
+  # Binary output commands. The CROB is how a master trips a breaker.
+  - {group: 12, variation: 1, name: ControlRelayOutputBlock, level: 1, kind: command, measurement: none,
+     fields: [{name: Code, type: u8}, {name: Count, type: u8}, {name: OnTime, type: u32},
+              {name: OffTime, type: u32}, {name: Status, type: status}]}
+  - {group: 12, variation: 2, name: PatternControlBlock, level: 4, kind: command, measurement: none,
+     fields: [{name: Code, type: u8}, {name: Count, type: u8}, {name: OnTime, type: u32},
+              {name: OffTime, type: u32}, {name: Status, type: status}]}
+  - {group: 12, variation: 3, name: PatternMask, level: 4, kind: command, measurement: none, packed: 1}
+
+  - {group: 13, variation: 1, name: BinaryOutputCmdEventNoTime, level: 4, kind: command_event, measurement: none,
+     fields: [{name: Status, type: status}]}
+  - {group: 13, variation: 2, name: BinaryOutputCmdEventAbsTime, level: 4, kind: command_event, measurement: none,
+     fields: [{name: Status, type: status}, {name: Time, type: time48}]}
+
+  # ----------------------------------------------------------------- group 20
+  # Counters: energy totals, operation counts, pulse accumulators.
+  - {group: 20, variation: 1, name: Counter32WithFlag, level: 1, kind: static, measurement: counter,
+     fields: [{name: Flags, type: flags}, {name: Value, type: u32}]}
+  - {group: 20, variation: 2, name: Counter16WithFlag, level: 1, kind: static, measurement: counter,
+     fields: [{name: Flags, type: flags}, {name: Value, type: u16}]}
+  - {group: 20, variation: 5, name: Counter32NoFlag, level: 1, kind: static, measurement: counter,
+     fields: [{name: Value, type: u32}]}
+  - {group: 20, variation: 6, name: Counter16NoFlag, level: 1, kind: static, measurement: counter,
+     fields: [{name: Value, type: u16}]}
+
+  # ----------------------------------------------------------------- group 21
+  # Frozen counters: a counter captured at a freeze command, which is how
+  # interval energy readings are taken.
+  - {group: 21, variation: 1, name: FrozenCounter32WithFlag, level: 2, kind: static, measurement: frozencounter,
+     fields: [{name: Flags, type: flags}, {name: Value, type: u32}]}
+  - {group: 21, variation: 2, name: FrozenCounter16WithFlag, level: 2, kind: static, measurement: frozencounter,
+     fields: [{name: Flags, type: flags}, {name: Value, type: u16}]}
+  - {group: 21, variation: 5, name: FrozenCounter32WithFlagTime, level: 2, kind: static, measurement: frozencounter,
+     fields: [{name: Flags, type: flags}, {name: Value, type: u32}, {name: Time, type: time48}]}
+  - {group: 21, variation: 6, name: FrozenCounter16WithFlagTime, level: 2, kind: static, measurement: frozencounter,
+     fields: [{name: Flags, type: flags}, {name: Value, type: u16}, {name: Time, type: time48}]}
+  - {group: 21, variation: 9, name: FrozenCounter32NoFlag, level: 2, kind: static, measurement: frozencounter,
+     fields: [{name: Value, type: u32}]}
+  - {group: 21, variation: 10, name: FrozenCounter16NoFlag, level: 2, kind: static, measurement: frozencounter,
+     fields: [{name: Value, type: u16}]}
+
+  # ----------------------------------------------------------------- group 22
+  - {group: 22, variation: 1, name: CounterEvent32WithFlag, level: 2, kind: event, measurement: counter,
+     fields: [{name: Flags, type: flags}, {name: Value, type: u32}]}
+  - {group: 22, variation: 2, name: CounterEvent16WithFlag, level: 2, kind: event, measurement: counter,
+     fields: [{name: Flags, type: flags}, {name: Value, type: u16}]}
+  - {group: 22, variation: 5, name: CounterEvent32WithFlagTime, level: 2, kind: event, measurement: counter,
+     fields: [{name: Flags, type: flags}, {name: Value, type: u32}, {name: Time, type: time48}]}
+  - {group: 22, variation: 6, name: CounterEvent16WithFlagTime, level: 2, kind: event, measurement: counter,
+     fields: [{name: Flags, type: flags}, {name: Value, type: u16}, {name: Time, type: time48}]}
+
+  # ----------------------------------------------------------------- group 23
+  - {group: 23, variation: 1, name: FrozenCounterEvent32WithFlag, level: 2, kind: event, measurement: frozencounter,
+     fields: [{name: Flags, type: flags}, {name: Value, type: u32}]}
+  - {group: 23, variation: 2, name: FrozenCounterEvent16WithFlag, level: 2, kind: event, measurement: frozencounter,
+     fields: [{name: Flags, type: flags}, {name: Value, type: u16}]}
+  - {group: 23, variation: 5, name: FrozenCounterEvent32WithFlagTime, level: 2, kind: event, measurement: frozencounter,
+     fields: [{name: Flags, type: flags}, {name: Value, type: u32}, {name: Time, type: time48}]}
+  - {group: 23, variation: 6, name: FrozenCounterEvent16WithFlagTime, level: 2, kind: event, measurement: frozencounter,
+     fields: [{name: Flags, type: flags}, {name: Value, type: u16}, {name: Time, type: time48}]}
+
+  # ----------------------------------------------------------------- group 30
+  # Analog inputs: volts, amps, watts, tap positions, temperatures.
+  - {group: 30, variation: 1, name: AnalogInput32WithFlag, level: 1, kind: static, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: i32}]}
+  - {group: 30, variation: 2, name: AnalogInput16WithFlag, level: 1, kind: static, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: i16}]}
+  - {group: 30, variation: 3, name: AnalogInput32NoFlag, level: 1, kind: static, measurement: analog,
+     fields: [{name: Value, type: i32}]}
+  - {group: 30, variation: 4, name: AnalogInput16NoFlag, level: 1, kind: static, measurement: analog,
+     fields: [{name: Value, type: i16}]}
+  - {group: 30, variation: 5, name: AnalogInputFloatWithFlag, level: 2, kind: static, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: f32}]}
+  - {group: 30, variation: 6, name: AnalogInputDoubleWithFlag, level: 4, kind: static, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: f64}]}
+
+  # ----------------------------------------------------------------- group 31
+  - {group: 31, variation: 1, name: FrozenAnalog32WithFlag, level: 4, kind: static, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: i32}]}
+  - {group: 31, variation: 2, name: FrozenAnalog16WithFlag, level: 4, kind: static, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: i16}]}
+  - {group: 31, variation: 3, name: FrozenAnalog32WithFlagTime, level: 4, kind: static, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: i32}, {name: Time, type: time48}]}
+  - {group: 31, variation: 4, name: FrozenAnalog16WithFlagTime, level: 4, kind: static, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: i16}, {name: Time, type: time48}]}
+  - {group: 31, variation: 5, name: FrozenAnalog32NoFlag, level: 4, kind: static, measurement: analog,
+     fields: [{name: Value, type: i32}]}
+  - {group: 31, variation: 6, name: FrozenAnalog16NoFlag, level: 4, kind: static, measurement: analog,
+     fields: [{name: Value, type: i16}]}
+  - {group: 31, variation: 7, name: FrozenAnalogFloatWithFlag, level: 4, kind: static, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: f32}]}
+  - {group: 31, variation: 8, name: FrozenAnalogDoubleWithFlag, level: 4, kind: static, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: f64}]}
+
+  # ----------------------------------------------------------------- group 32
+  - {group: 32, variation: 1, name: AnalogEvent32WithFlag, level: 2, kind: event, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: i32}]}
+  - {group: 32, variation: 2, name: AnalogEvent16WithFlag, level: 2, kind: event, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: i16}]}
+  - {group: 32, variation: 3, name: AnalogEvent32WithFlagTime, level: 2, kind: event, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: i32}, {name: Time, type: time48}]}
+  - {group: 32, variation: 4, name: AnalogEvent16WithFlagTime, level: 2, kind: event, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: i16}, {name: Time, type: time48}]}
+  - {group: 32, variation: 5, name: AnalogEventFloatWithFlag, level: 2, kind: event, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: f32}]}
+  - {group: 32, variation: 6, name: AnalogEventDoubleWithFlag, level: 4, kind: event, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: f64}]}
+  - {group: 32, variation: 7, name: AnalogEventFloatWithFlagTime, level: 2, kind: event, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: f32}, {name: Time, type: time48}]}
+  - {group: 32, variation: 8, name: AnalogEventDoubleWithFlagTime, level: 4, kind: event, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: f64}, {name: Time, type: time48}]}
+
+  # ----------------------------------------------------------------- group 33
+  - {group: 33, variation: 1, name: FrozenAnalogEvent32WithFlag, level: 4, kind: event, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: i32}]}
+  - {group: 33, variation: 2, name: FrozenAnalogEvent16WithFlag, level: 4, kind: event, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: i16}]}
+  - {group: 33, variation: 3, name: FrozenAnalogEvent32WithFlagTime, level: 4, kind: event, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: i32}, {name: Time, type: time48}]}
+  - {group: 33, variation: 4, name: FrozenAnalogEvent16WithFlagTime, level: 4, kind: event, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: i16}, {name: Time, type: time48}]}
+  - {group: 33, variation: 5, name: FrozenAnalogEventFloatWithFlag, level: 4, kind: event, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: f32}]}
+  - {group: 33, variation: 6, name: FrozenAnalogEventDoubleWithFlag, level: 4, kind: event, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: f64}]}
+  - {group: 33, variation: 7, name: FrozenAnalogEventFloatWithFlagTime, level: 4, kind: event, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: f32}, {name: Time, type: time48}]}
+  - {group: 33, variation: 8, name: FrozenAnalogEventDoubleWithFlagTime, level: 4, kind: event, measurement: analog,
+     fields: [{name: Flags, type: flags}, {name: Value, type: f64}, {name: Time, type: time48}]}
+
+  # ----------------------------------------------------------------- group 34
+  # Analog deadbands: how much a point must move before it generates an event.
+  - {group: 34, variation: 1, name: AnalogDeadband16, level: 4, kind: deadband, measurement: none,
+     fields: [{name: Value, type: u16}]}
+  - {group: 34, variation: 2, name: AnalogDeadband32, level: 4, kind: deadband, measurement: none,
+     fields: [{name: Value, type: u32}]}
+  - {group: 34, variation: 3, name: AnalogDeadbandFloat, level: 4, kind: deadband, measurement: none,
+     fields: [{name: Value, type: f32}]}
+
+  # ----------------------------------------------------------------- group 40
+  - {group: 40, variation: 1, name: AnalogOutputStatus32, level: 2, kind: static, measurement: analogoutput,
+     fields: [{name: Flags, type: flags}, {name: Value, type: i32}]}
+  - {group: 40, variation: 2, name: AnalogOutputStatus16, level: 2, kind: static, measurement: analogoutput,
+     fields: [{name: Flags, type: flags}, {name: Value, type: i16}]}
+  - {group: 40, variation: 3, name: AnalogOutputStatusFloat, level: 2, kind: static, measurement: analogoutput,
+     fields: [{name: Flags, type: flags}, {name: Value, type: f32}]}
+  - {group: 40, variation: 4, name: AnalogOutputStatusDouble, level: 4, kind: static, measurement: analogoutput,
+     fields: [{name: Flags, type: flags}, {name: Value, type: f64}]}
+
+  # ----------------------------------------------------------------- group 41
+  # Analog output commands: setpoints. Note the value comes before the status,
+  # the reverse of the status objects in group 40.
+  - {group: 41, variation: 1, name: AnalogOutput32, level: 2, kind: command, measurement: none,
+     fields: [{name: Value, type: i32}, {name: Status, type: status}]}
+  - {group: 41, variation: 2, name: AnalogOutput16, level: 2, kind: command, measurement: none,
+     fields: [{name: Value, type: i16}, {name: Status, type: status}]}
+  - {group: 41, variation: 3, name: AnalogOutputFloat, level: 2, kind: command, measurement: none,
+     fields: [{name: Value, type: f32}, {name: Status, type: status}]}
+  - {group: 41, variation: 4, name: AnalogOutputDouble, level: 4, kind: command, measurement: none,
+     fields: [{name: Value, type: f64}, {name: Status, type: status}]}
+
+  # ----------------------------------------------------------------- group 42
+  - {group: 42, variation: 1, name: AnalogOutputEvent32, level: 3, kind: event, measurement: analogoutput,
+     fields: [{name: Flags, type: flags}, {name: Value, type: i32}]}
+  - {group: 42, variation: 2, name: AnalogOutputEvent16, level: 3, kind: event, measurement: analogoutput,
+     fields: [{name: Flags, type: flags}, {name: Value, type: i16}]}
+  - {group: 42, variation: 3, name: AnalogOutputEvent32Time, level: 3, kind: event, measurement: analogoutput,
+     fields: [{name: Flags, type: flags}, {name: Value, type: i32}, {name: Time, type: time48}]}
+  - {group: 42, variation: 4, name: AnalogOutputEvent16Time, level: 3, kind: event, measurement: analogoutput,
+     fields: [{name: Flags, type: flags}, {name: Value, type: i16}, {name: Time, type: time48}]}
+  - {group: 42, variation: 5, name: AnalogOutputEventFloat, level: 3, kind: event, measurement: analogoutput,
+     fields: [{name: Flags, type: flags}, {name: Value, type: f32}]}
+  - {group: 42, variation: 6, name: AnalogOutputEventDouble, level: 4, kind: event, measurement: analogoutput,
+     fields: [{name: Flags, type: flags}, {name: Value, type: f64}]}
+  - {group: 42, variation: 7, name: AnalogOutputEventFloatTime, level: 3, kind: event, measurement: analogoutput,
+     fields: [{name: Flags, type: flags}, {name: Value, type: f32}, {name: Time, type: time48}]}
+  - {group: 42, variation: 8, name: AnalogOutputEventDoubleTime, level: 4, kind: event, measurement: analogoutput,
+     fields: [{name: Flags, type: flags}, {name: Value, type: f64}, {name: Time, type: time48}]}
+
+  # ----------------------------------------------------------------- group 43
+  - {group: 43, variation: 1, name: AnalogOutputCmdEvent32, level: 4, kind: command_event, measurement: none,
+     fields: [{name: Status, type: status}, {name: Value, type: i32}]}
+  - {group: 43, variation: 2, name: AnalogOutputCmdEvent16, level: 4, kind: command_event, measurement: none,
+     fields: [{name: Status, type: status}, {name: Value, type: i16}]}
+  - {group: 43, variation: 3, name: AnalogOutputCmdEvent32Time, level: 4, kind: command_event, measurement: none,
+     fields: [{name: Status, type: status}, {name: Value, type: i32}, {name: Time, type: time48}]}
+  - {group: 43, variation: 4, name: AnalogOutputCmdEvent16Time, level: 4, kind: command_event, measurement: none,
+     fields: [{name: Status, type: status}, {name: Value, type: i16}, {name: Time, type: time48}]}
+  - {group: 43, variation: 5, name: AnalogOutputCmdEventFloat, level: 4, kind: command_event, measurement: none,
+     fields: [{name: Status, type: status}, {name: Value, type: f32}]}
+  - {group: 43, variation: 6, name: AnalogOutputCmdEventDouble, level: 4, kind: command_event, measurement: none,
+     fields: [{name: Status, type: status}, {name: Value, type: f64}]}
+  - {group: 43, variation: 7, name: AnalogOutputCmdEventFloatTime, level: 4, kind: command_event, measurement: none,
+     fields: [{name: Status, type: status}, {name: Value, type: f32}, {name: Time, type: time48}]}
+  - {group: 43, variation: 8, name: AnalogOutputCmdEventDoubleTime, level: 4, kind: command_event, measurement: none,
+     fields: [{name: Status, type: status}, {name: Value, type: f64}, {name: Time, type: time48}]}
+
+  # ----------------------------------------------------------------- group 50
+  - {group: 50, variation: 1, name: TimeAndDate, level: 1, kind: time, measurement: none,
+     fields: [{name: Time, type: time48}]}
+  - {group: 50, variation: 2, name: TimeAndDateInterval, level: 4, kind: time, measurement: none,
+     fields: [{name: Time, type: time48}, {name: Interval, type: u32}]}
+  - {group: 50, variation: 3, name: TimeAndDateLastRecorded, level: 3, kind: time, measurement: none,
+     fields: [{name: Time, type: time48}]}
+  - {group: 50, variation: 4, name: TimeAndDateIndexed, level: 4, kind: time, measurement: none,
+     fields: [{name: Time, type: time48}, {name: Interval, type: u32}, {name: Units, type: u8}]}
+
+  # ----------------------------------------------------------------- group 51
+  # Common time of occurrence: the base a relative-time event is measured from.
+  - {group: 51, variation: 1, name: TimeAndDateCTO, level: 2, kind: time, measurement: none,
+     fields: [{name: Time, type: time48}]}
+  - {group: 51, variation: 2, name: UnsyncTimeAndDateCTO, level: 2, kind: time, measurement: none,
+     fields: [{name: Time, type: time48}]}
+
+  # ----------------------------------------------------------------- group 52
+  - {group: 52, variation: 1, name: TimeDelayCoarse, level: 1, kind: time, measurement: none,
+     fields: [{name: Value, type: u16}]}
+  - {group: 52, variation: 2, name: TimeDelayFine, level: 1, kind: time, measurement: none,
+     fields: [{name: Value, type: u16}]}
+
+  # ----------------------------------------------------------------- group 60
+  # Class objects carry no data. They name what to read, which is how every
+  # poll in DNP3 is expressed.
+  - {group: 60, variation: 1, name: Class0Data, level: 1, kind: class, measurement: none}
+  - {group: 60, variation: 2, name: Class1Data, level: 1, kind: class, measurement: none}
+  - {group: 60, variation: 3, name: Class2Data, level: 1, kind: class, measurement: none}
+  - {group: 60, variation: 4, name: Class3Data, level: 1, kind: class, measurement: none}
+
+  # ----------------------------------------------------------------- group 80
+  # Internal indications, addressable as single bits so a master can clear
+  # DEVICE_RESTART.
+  - {group: 80, variation: 1, name: InternalIndications, level: 1, kind: indication, measurement: none, packed: 1}
+
+  # ------------------------------------------------------- groups 110/111/112/113
+  # Octet strings and virtual terminal data. The variation is the length in
+  # octets, so these need no size table entry — the generator emits a rule
+  # rather than rows.
+  - {group: 110, variation: 0, name: OctetString, level: 2, kind: string, measurement: none, length_is_variation: true}
+  - {group: 111, variation: 0, name: OctetStringEvent, level: 2, kind: string, measurement: none, length_is_variation: true}
+  - {group: 112, variation: 0, name: VirtualTerminalOutput, level: 4, kind: string, measurement: none, length_is_variation: true}
+  - {group: 113, variation: 0, name: VirtualTerminalEvent, level: 4, kind: string, measurement: none, length_is_variation: true}
+
+  # --------------------------------------------------------------- groups 0/70
+  # Device attributes and file transfer are genuinely variable-length: their
+  # encodings carry an explicit size, so the parser must be told to walk them
+  # rather than look them up.
+  - {group: 0, variation: 0, name: DeviceAttribute, level: 4, kind: attribute, measurement: none, variable: true}
+  - {group: 70, variation: 0, name: FileTransfer, level: 0, kind: file, measurement: none, variable: true}

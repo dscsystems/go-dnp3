@@ -1,0 +1,49 @@
+go-dnp3
+Copyright (C) 2026 Ricardo Olsen / DSC Systems
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program. If not, see <https://www.gnu.org/licenses/>.
+
+The full text is in LICENSE.
+
+--------------------------------------------------------------------------------
+
+PROVENANCE
+
+This is a clean-room implementation of DNP3 (IEEE Std 1815-2012). No source
+code from any other implementation was copied or transliterated.
+
+--------------------------------------------------------------------------------
+
+DEPENDENCIES
+
+This project links the following, all under permissive licenses compatible
+with the GNU General Public License version 3:
+
+  gopkg.in/yaml.v3            MIT and Apache-2.0
+                              Used only by the code generator in internal/gen.
+  go.bug.st/serial            BSD-3-Clause
+                              Used only by channel/serial.go.
+  charm.land/bubbletea/v2     MIT
+  charm.land/lipgloss/v2      MIT
+                              Used only by cmd/dnp3-explorer.
+  golang.org/x/sys            BSD-3-Clause
+                              Indirect.
+
+--------------------------------------------------------------------------------
+
+TRADEMARKS AND AFFILIATION
+
+DNP3 is a protocol specified by IEEE Std 1815 and maintained by the DNP Users
+Group. This project is not affiliated with, endorsed by, or certified by the
+DNP Users Group or the IEEE. Conformance claims in this repository refer to the
+subset levels the implementation targets, not to certified conformance.

@@ -1,0 +1,21 @@
+# opendnp3, the reference implementation, built from source.
+#
+# It is archived (end of life September 2022) and pinned here to its final
+# release tag: an interop test against a moving target proves nothing, and
+# there is nothing left to move to.
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+RUN git clone --depth 1 --branch 3.1.2 https://github.com/dnp3/opendnp3.git
+
+WORKDIR /src/opendnp3/build
+RUN cmake -DCMAKE_BUILD_TYPE=Release -DDNP3_EXAMPLES=ON .. \
+    && make -j"$(nproc)" 2>&1 | tail -20
+
+# The demo binaries land under cpp/examples.
+RUN find /src/opendnp3/build -maxdepth 4 -type f -perm -u+x \
+        \( -name 'master-demo' -o -name 'outstation-demo' -o -name '*demo*' \) -print

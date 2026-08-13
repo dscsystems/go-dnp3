@@ -1,0 +1,8 @@
+coverage.out
+coverage.html
+/dist/
+/bin/
+.claude/
+
+# Fuzz corpus entries the toolchain caches outside the repo. Crashers written
+# under testdata/fuzz ARE committed — they are regression tests.
