@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -314,14 +315,14 @@ func (s *Snapshot) Status() []SiteStatus {
 
 // Summary renders a one-line-per-site overview for the console.
 func (s *Snapshot) Summary() string {
-	var b []byte
+	var b strings.Builder
 	for _, st := range s.Status() {
 		state := "down"
 		if st.Connected {
 			state = "up"
 		}
-		b = append(b, fmt.Sprintf("  %-16s %-4s %-24s tasks %d/%d  timeouts %d\n",
-			st.Name, state, st.Indications, st.TasksSucceeded, st.TasksRun, st.Timeouts)...)
+		fmt.Fprintf(&b, "  %-16s %-4s %-24s tasks %d/%d  timeouts %d\n",
+			st.Name, state, st.Indications, st.TasksSucceeded, st.TasksRun, st.Timeouts)
 	}
-	return string(b)
+	return b.String()
 }

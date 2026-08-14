@@ -128,31 +128,63 @@ v5 is out of scope; use TLS.
 
 ### `dnp3-explorer`
 
+A full-screen browser for one outstation, driven by the keyboard or the mouse.
 Point it at a device, or run `-demo` for a full outstation in-process over
 `channel.Pipe` — the real link, transport, application and object layers with
 no socket and no hardware:
 
 ```console
 $ dnp3-explorer -demo
-dnp3-explorer  demo (in-process outstation)  connected
- 1 Overview  2 Points  3 Events  4 Log
-
-  POINT            VALUE  QUALITY                    AGE        TIMESTAMP
-  BI 0                ON  ONLINE                     0s         19:43:49.947
-  BI 1               OFF  ONLINE                     0s         19:43:49.947
-  CT 0                 4  ONLINE                     0s         19:43:50.947
-  AI 0         11029.888  ONLINE                     0s         19:43:50.947
-  AI 1           175.518  ONLINE                     0s         19:43:50.947
-  BO 0                ON  ONLINE                     0s         19:43:49.947
-
-follow ON  1-4 screens · i integrity · p poll · t time · c/o close/open · / filter
+dnp3-explorer  demo (in-process outstation)  ● connected      up 1:36  13.4/s  12:04:29
+ 1 Overview  2 Points  3 Events  4 Log  5 Help                            20 points
+────────────────────────────────────────────────────────────────────────────────────
+ POINT ▲          VALUE TREND        QUALITY                AGE TIMESTAMP
+ BI 0                ON ▁▁▁▁████████ ONLINE                 0s  12:04:29.375
+ BI 5               OFF ▄▄▄▄▄▄▄▄▄▄▄▄ COMM_LOST              0s  12:04:29.375
+ CT 0             10422 ▁▂▃▄▄▅▆▆▇███ ONLINE                 0s  12:04:29.375
+ AI 0         11019.967 ▁▁▂▂▃▄▄▅▆▆▇█ ONLINE                 0s  12:04:29.375
+ AI 4             0.420 ▄▄▄▄▄▄▄▄▄▄▄▄ ONLINE|LOCAL_FORCED    0s  12:04:29.375
+ BO 0                ON ▁▁▁▁████████ ONLINE                 0s  12:04:29.375
+ OS 0  GO-DNP3 DEMO RTU              ONLINE                 3s  —
+────────────────────────────────────────────────────────────────────────────────────
+ [i Integrity] [p Poll] [/ Filter] [d Inspect] [c Close] [o Open] [S SBO] [e Export]
+ ↑↓ move · enter act · d inspect · / filter · < > r sort · b deadband · ? help
 ```
+
+Five screens: an overview of the session and the device's health, the point
+table, the sequence of events, the activity log, and a reference. Points can be
+filtered on anything in the row, sorted by value or by quality — worst first,
+which is how you find the broken points in a device with a thousand good ones —
+and inspected one at a time, with the flags named, the trend drawn and the
+group and variation each value arrived under. `e` exports what is on screen,
+after the filter and the sort, as CSV.
+
+Controls are the reason to be careful, so the tool is: `enter` on an output
+opens a dialog naming exactly what will be sent, select-before-operate by
+default, and a confirmation before anything moves. `-direct` and `-no-confirm`
+turn that off for the devices and the situations that need it — and while
+`-no-confirm` is in effect the toolbar says so, in the one mode where no dialog
+appears to say it for itself.
+
+The connection itself is editable while it runs. `C` opens an editor for the
+address, the two link addresses, the response timeout and the poll interval;
+applying it tears the session down and brings a new one up in place. That is
+there because a link address read off a drawing is a guess until something
+answers, and restarting the tool to try 11 instead of 10 is how ten minutes of
+commissioning becomes an afternoon. Pointing somewhere new drops the point
+table with it — those measurements came from a different device.
+
+The mouse works throughout — tabs, rows, column headings, footer buttons, the
+wheel and the scrollbar — and every click resolves to the key the keyboard
+would have pressed, so the two can never drift apart. `-mouse=false` turns it
+off, and `-inline` gives back inline rendering instead of the alternate screen.
 
 The DNP3 session runs in its own goroutine and never touches the model; every
 action is a `tea.Cmd` that returns a result message, so a poll that takes five
 seconds costs five seconds of that one command and nothing else. Key handling
-is a plain `HandleKey(string)`, which is what lets the whole interface be
-driven from tests without a terminal.
+is a plain `HandleKey(string)` and the pointer resolves against a layout
+computed from the terminal size, which is what lets the whole interface —
+clicks included — be driven from tests without a terminal.
 
 ### `dnp3-master`
 

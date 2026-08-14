@@ -4,7 +4,6 @@ import (
 	"io"
 	"time"
 
-	"github.com/dscsystems/go-dnp3"
 	"github.com/dscsystems/go-dnp3/internal/app"
 	"github.com/dscsystems/go-dnp3/objects"
 )
@@ -227,6 +226,3 @@ func (s *Session) onUnsolicitedConfirm(h app.Header) {
 	n := s.db.events.Confirm()
 	s.log.Debug("unsolicited events confirmed", "count", n)
 }
-
-// unsolicitedClassMask returns the classes enabled for unsolicited reporting.
-func (s *Session) unsolicitedClassMask() dnp3.Class { return s.unsolClasses }

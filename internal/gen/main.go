@@ -395,7 +395,7 @@ func writeExpr(typ, measure string) string {
 // readTime48 builds the expression that assembles a 48-bit little-endian
 // timestamp, which has no encoding/binary helper.
 func readTime48(off int) string {
-	var parts []string
+	parts := make([]string, 0, 6)
 	for i := range 6 {
 		parts = append(parts, fmt.Sprintf("uint64(buf[%d])<<%d", off+i, i*8))
 	}

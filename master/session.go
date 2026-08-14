@@ -187,15 +187,19 @@ func (s *Session) Run(ctx context.Context, ch channel.Channel) error {
 		MaxRxFragment: s.cfg.MaxRxFragment,
 	})
 
+	// Cancelling the context is how Run is asked to stop, and a closed channel
+	// is the same instruction arriving from the other direction. Both end the
+	// loop by returning nil: a shutdown that reports itself as a failure makes
+	// every caller write the same "unless I asked for it" check.
 	for {
 		if ctx.Err() != nil {
-			return nil
+			return nil //nolint:nilerr // cancellation is a clean shutdown
 		}
 
 		conn, err := ch.Connect(ctx)
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, channel.ErrClosed) {
-				return nil
+				return nil //nolint:nilerr // cancellation is a clean shutdown
 			}
 			return fmt.Errorf("master: connect: %w", err)
 		}

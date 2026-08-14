@@ -309,9 +309,9 @@ func TestReassemblerRestartOnUnexpectedFIR(t *testing.T) {
 
 func TestReassemblerSequenceWrap(t *testing.T) {
 	r := NewReassembler(0)
-	r.Accept([]byte{0x40 | 62, 0x01}) // FIR, seq 62
-	r.Accept([]byte{63, 0x02})        // seq 63
-	res := r.Accept([]byte{0x80 | 0, 0x03})
+	r.Accept([]byte{0x40 | 62, 0x01})   // FIR, seq 62
+	r.Accept([]byte{63, 0x02})          // seq 63
+	res := r.Accept([]byte{0x80, 0x03}) // FIN, seq 0 — wrapped
 
 	if !res.Complete() {
 		t.Fatal("the sequence did not wrap from 63 to 0")

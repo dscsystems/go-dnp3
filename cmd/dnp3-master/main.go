@@ -89,7 +89,15 @@ func main2() error {
 		if rec, err = NewRecorder(*record); err != nil {
 			return fmt.Errorf("opening the recording: %w", err)
 		}
-		defer rec.Close()
+		// Rows are flushed as they are written, so this reports only a failure
+		// to close the files. It is still worth saying: the whole point of a
+		// recording is that it can be trusted afterwards, and a recorder that
+		// could not close its own record should not exit quietly.
+		defer func() {
+			if err := rec.Close(); err != nil {
+				log.Error("closing the recording", "err", err)
+			}
+		}()
 	}
 	snap := NewSnapshot()
 
@@ -198,7 +206,9 @@ func operate(args []string, host, serialDev string, baud, local, remote int,
 	if err != nil {
 		return err
 	}
-	defer ch.Close()
+	// Best effort: the process is finishing, and there is nothing left to tell
+	// about a socket that objected to being shut.
+	defer func() { _ = ch.Close() }()
 
 	sess := master.New(master.Config{
 		LocalAddr:       uint16(local),

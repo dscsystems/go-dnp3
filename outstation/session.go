@@ -266,15 +266,19 @@ func (s *Session) Run(ctx context.Context, ch channel.Channel) error {
 		MaxRxFragment: s.cfg.MaxRxFragment,
 	})
 
+	// Cancelling the context is how Run is asked to stop, and a closed channel
+	// is the same instruction arriving from the other direction. Both end the
+	// loop by returning nil: a shutdown that reports itself as a failure makes
+	// every caller write the same "unless I asked for it" check.
 	for {
-		if err := ctx.Err(); err != nil {
-			return nil
+		if ctx.Err() != nil {
+			return nil //nolint:nilerr // cancellation is a clean shutdown
 		}
 
 		conn, err := ch.Connect(ctx)
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, channel.ErrClosed) {
-				return nil
+				return nil //nolint:nilerr // cancellation is a clean shutdown
 			}
 			return fmt.Errorf("outstation: connect: %w", err)
 		}
@@ -709,7 +713,7 @@ func (s *Session) onDelayMeasure(w io.Writer, r stack.Received, frag app.Fragmen
 // This is the first half of the standard's LAN time-synchronisation procedure:
 // the master sends it, the outstation records the arrival time, and the master
 // then reads that time back as group 50 variation 3 to work out how long the
-// message took to get there. An outstation that refuses it leaves that master 
+// message took to get there. An outstation that refuses it leaves that master
 // unable to set the clock at all.
 //
 // The standard says to record the time the *first octet* arrived. This records

@@ -134,7 +134,8 @@ func readInput(file string, args []string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		defer f.Close()
+		// Read-only: there is no buffered write for Close to fail to flush.
+		defer func() { _ = f.Close() }()
 		return readHex(f)
 
 	case len(args) == 1 && args[0] == "-":

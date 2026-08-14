@@ -229,12 +229,12 @@ func decodeCommands(h app.ObjectHeader, d objects.Descriptor) ([]Value, bool) {
 		off += size
 
 		var text string
-		switch {
-		case h.Group == 12:
+		switch h.Group {
+		case 12:
 			c := objects.ParseCROB(buf)
 			text = fmt.Sprintf("%s count=%d on=%dms off=%dms → %s",
 				c.Code, c.Count, c.OnTime, c.OffTime, c.Status)
-		case h.Group == 41:
+		case 41:
 			text = analogOutputText(h.Variation, buf)
 		default:
 			continue

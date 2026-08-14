@@ -260,7 +260,8 @@ func newWriteDeadbandTask(deadbands map[uint16]float32) *task {
 		funcCode: app.FuncWrite,
 		priority: priorityCommand,
 		build: func(b *app.Builder) error {
-			var data []byte
+			// One index byte and four value bytes per deadband.
+			data := make([]byte, 0, 5*len(indexes))
 			for _, i := range indexes {
 				bits := math.Float32bits(deadbands[i])
 				data = append(data, byte(i),

@@ -223,7 +223,8 @@ func serveAPI(ctx context.Context, addr string, snap *Snapshot, log *slog.Logger
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "ok")
+		// If the client has gone, the health check answered itself.
+		_, _ = fmt.Fprintln(w, "ok")
 	})
 
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {

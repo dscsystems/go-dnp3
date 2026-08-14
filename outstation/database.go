@@ -511,12 +511,7 @@ func (db *Database) FreezeCounters() {
 
 	n := min(len(db.counter), len(db.frozen))
 	for i := range n {
-		c := db.counter[i].value
-		db.frozen[i].value = dnp3.FrozenCounter{
-			Value: c.Value,
-			Flags: c.Flags,
-			Time:  c.Time,
-		}
+		db.frozen[i].value = dnp3.FrozenCounter(db.counter[i].value)
 	}
 }
 

@@ -27,7 +27,11 @@ linters:
       checks:
         - all
     misspell:
-      locale: US
+      # No locale. The prose here is British and the protocol vocabulary is
+      # not: IEEE 1815 spells it "Time Synchronized" and lipgloss spells it
+      # "Color", so neither locale can be enforced without demanding a rename
+      # of a spec term or a third-party API. Unset, misspell still catches
+      # genuine typos and stays out of the spelling argument.
 
   exclusions:
     rules:

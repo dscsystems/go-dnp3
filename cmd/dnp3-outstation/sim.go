@@ -112,7 +112,6 @@ type Simulator struct {
 	stormIndex  uint16
 	lastOffline time.Time
 	offlineNow  bool
-	restarted   bool
 }
 
 // NewSimulator builds a simulator from a configuration.

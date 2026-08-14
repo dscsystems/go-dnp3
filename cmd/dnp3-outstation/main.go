@@ -130,7 +130,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer ch.Close()
+	// Best effort: the process is finishing, and there is nothing left to tell
+	// about a socket that objected to being shut.
+	defer func() { _ = ch.Close() }()
 
 	ctx, stop := signal.NotifyContext(context.Background(),
 		os.Interrupt, syscall.SIGTERM)

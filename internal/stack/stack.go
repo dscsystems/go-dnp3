@@ -15,6 +15,7 @@
 package stack
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
@@ -251,7 +252,16 @@ func (s *Stack) drain(w io.Writer, fn func(Received)) error {
 	for {
 		f, err := s.parser.Next()
 		if err != nil {
-			return nil // ErrNeedMore; nothing more to decode yet
+			// ErrNeedMore is the ordinary case: the buffered octets do not
+			// yet make a frame, so there is nothing to do until more arrive.
+			// It is matched explicitly rather than treating every error as
+			// that one — Next resyncs past corruption itself and so returns
+			// nothing else today, but a parser that grows a real error should
+			// not have it silently become "carry on".
+			if errors.Is(err, link.ErrNeedMore) {
+				return nil
+			}
+			return fmt.Errorf("stack: decode: %w", err)
 		}
 
 		if !s.addressedToUs(f.Header.Dest) {

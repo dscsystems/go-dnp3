@@ -124,7 +124,7 @@ func decodeRun[T any](
 // the range rather than the object.
 func (s *Session) dispatchPacked(h app.ObjectHeader, d objects.Descriptor, info HeaderInfo) {
 	count := int(h.Count())
-	start := uint32(h.Range.Start)
+	start := h.Range.Start
 
 	switch d.Measurement {
 	case dnp3.TypeBinary:
