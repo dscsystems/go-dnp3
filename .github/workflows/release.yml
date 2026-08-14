@@ -1,0 +1,164 @@
+name: Release
+
+# Tag a commit (`git tag v1.2.3 && git push origin v1.2.3`) and this builds the
+# four commands for every platform the dependency tree supports, then publishes
+# the archives and their checksums as a GitHub release.
+on:
+  push:
+    tags: ['v*']
+  # Lets the matrix be exercised without cutting a release; the publish job is
+  # skipped unless the run was triggered by a tag.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: '1.26'
+
+jobs:
+  # Tag pushes do not match the CI workflow's branch filter, so the gate runs
+  # here too: a release should never ship code that fails its own tests.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # Every GOOS/GOARCH pair from `go tool dist list` that this module can be
+      # built for with CGO_ENABLED=0. The remaining 19 targets are excluded by
+      # dependencies rather than by choice:
+      #   - go.bug.st/serial has no implementation for aix, dragonfly, illumos,
+      #     netbsd, plan9, solaris or linux/ppc64;
+      #   - android/{386,amd64,arm} and ios/* require external (cgo) linking;
+      #   - bubbletea does not build for js/wasm or wasip1/wasm.
+      # Re-check with `GOOS=x GOARCH=y CGO_ENABLED=0 go build ./cmd/...` when a
+      # dependency is upgraded, and add the target here once it compiles.
+      matrix:
+        include:
+          - { goos: android, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: freebsd, goarch: '386' }
+          - { goos: freebsd, goarch: amd64 }
+          - { goos: freebsd, goarch: arm }
+          - { goos: freebsd, goarch: arm64 }
+          - { goos: linux, goarch: '386' }
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm }
+          - { goos: linux, goarch: arm64 }
+          - { goos: linux, goarch: loong64 }
+          - { goos: linux, goarch: mips }
+          - { goos: linux, goarch: mips64 }
+          - { goos: linux, goarch: mips64le }
+          - { goos: linux, goarch: mipsle }
+          - { goos: linux, goarch: ppc64le }
+          - { goos: linux, goarch: riscv64 }
+          - { goos: linux, goarch: s390x }
+          - { goos: openbsd, goarch: '386' }
+          - { goos: openbsd, goarch: amd64 }
+          - { goos: openbsd, goarch: arm }
+          - { goos: openbsd, goarch: arm64 }
+          - { goos: openbsd, goarch: ppc64 }
+          - { goos: openbsd, goarch: riscv64 }
+          - { goos: windows, goarch: '386' }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          # Static binaries: no libc to match on the target, and it is what
+          # makes most of this matrix cross-compilable at all.
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          stage="dist/go-dnp3_${version}_${GOOS}_${GOARCH}"
+          mkdir -p "$stage"
+          ext=""
+          if [ "$GOOS" = "windows" ]; then ext=".exe"; fi
+          for cmd in dnp3-decode dnp3-explorer dnp3-master dnp3-outstation; do
+            go build -trimpath -ldflags '-s -w' \
+              -o "$stage/${cmd}${ext}" "./cmd/${cmd}"
+          done
+          cp README.md LICENSE NOTICE "$stage/"
+
+      - name: Archive
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          name="go-dnp3_${version}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          cd dist
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip -qr "${name}.zip" "$name"
+          else
+            tar -czf "${name}.tar.gz" "$name"
+          fi
+          rm -rf "$name"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum ./*.tar.gz ./*.zip > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # A tag such as v1.0.0-rc1 carries a pre-release identifier; ship it
+          # as a pre-release so it is not served as "latest".
+          prerelease=""
+          case "$TAG" in *-*) prerelease="--prerelease";; esac
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            $prerelease \
+            dist/*
