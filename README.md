@@ -27,6 +27,15 @@ res, err := m.SelectAndOperate(ctx, master.Trip(3, 1000))
 res, err = m.DirectOperate(ctx, master.AnalogOutputFloat32(7, 13.75))
 ```
 
+## Documentation
+
+| | |
+| --- | --- |
+| [User guide](docs/user-guide.md) | How to build a master, an outstation, or a decoder with this. Start here. |
+| [API reference](docs/api.md) | Every exported type and function, package by package. |
+| [Device profile](docs/device-profile.md) | What is supported, in the shape a vendor ships — including the known gaps. |
+| [`SKILL.md`](SKILL.md) | The same ground, condensed for AI coding agents. |
+
 ## Why
 
 There is no comprehensive native Go DNP3 stack. [opendnp3][], the de-facto
@@ -69,9 +78,10 @@ no socket and no hardware. That is where the two halves are proven to agree.
 
 The library depends on the standard library plus one package: `go.bug.st/serial`,
 reached only from `channel/serial.go`. `gopkg.in/yaml.v3` is in `go.mod` for the
-code generator in `internal/gen` and no importable package reaches it, which
-`go list -deps` will confirm. The example applications and the terminal explorer
-carry their own dependencies and are not imported by the library.
+code generator in `internal/gen` and the configuration files of `dnp3-master`
+and `dnp3-outstation` — none of them importable, so no importable package
+reaches it, which `go list -deps` will confirm. The terminal explorer carries
+Bubble Tea, likewise reached from nothing the library exports.
 
 ### Conformance
 
@@ -119,12 +129,15 @@ v5 is out of scope; use TLS.
 
 ## Commands
 
+Each has a README of its own with the full flag reference, configuration file
+format and output shapes; [`cmd/`](cmd/README.md) indexes them.
+
 | Command | What it is | Status |
 | --- | --- | --- |
-| `dnp3-decode` | An offline frame decoder | **Working** |
-| `dnp3-outstation` | A simulated substation RTU with plant behind it and fault injection | **Working** |
-| `dnp3-explorer` | A terminal DNP3 browser built on Bubble Tea v2 | **Working** |
-| `dnp3-master` | A SCADA client, CSV recorder and control tool | **Working** |
+| [`dnp3-decode`](cmd/dnp3-decode/README.md) | An offline frame decoder | **Working** |
+| [`dnp3-outstation`](cmd/dnp3-outstation/README.md) | A simulated substation RTU with plant behind it and fault injection | **Working** |
+| [`dnp3-explorer`](cmd/dnp3-explorer/README.md) | A terminal DNP3 browser built on Bubble Tea v2 | **Working** |
+| [`dnp3-master`](cmd/dnp3-master/README.md) | A SCADA client, CSV recorder and control tool | **Working** |
 
 ### `dnp3-explorer`
 
@@ -220,13 +233,24 @@ binary input event, which the master receives.
 
 ```console
 $ dnp3-outstation -points
+Simulated plant
+
   Breakers (binary input / binary output)
     BI   0 / BO   0  Feeder 1 breaker (closed)
+    BI   1 / BO   1  Feeder 2 breaker (closed)
     BI   2 / BO   2  Bus tie (open)
-    BI   3 / BO   3  Earth switch (racked out)  [interlocked: commands refused]
+    BI   3 / BO   3  Earth switch (racked out) (open)  [interlocked: commands refused]
+
   Analogs
     AI   0  Bus voltage  sine 10.8..11.2 kV
     AI   1  Feeder 1 current  walk 0..400 A
+    AI   2  Feeder 2 current  walk 0..400 A
+    AI   3  Transformer temperature  ramp 35..85 degC
+    AI   4  Tap position  step 7..9
+
+  Counters
+    CT   0  Feeder 1 energy  12/s
+    CT   1  Feeder 2 energy  8/s
 ```
 
 The fault injections matter as much as the simulation: `-inject
@@ -251,7 +275,7 @@ $ go run ./cmd/dnp3-decode -f decoder/testdata/sample.hex
 --  link  OUTS→MSTR UNCONFIRMED_USER_DATA  10→1  len=30  frame=39B
       transport  seq=00 FIR|FIN
       application  RESPONSE seq=00 FIR FIN iin=CLASS_1_EVENTS|DEVICE_RESTART
-        g1v2   0x00(none,start-stop8) [0..3]         4 object(s)  4 octets
+        g1v2  0x00(none,start-stop8) [0..3]         4 object(s)  4 octets
           [0] ON  ONLINE
           [1] OFF  ONLINE
           [2] ON  ONLINE
