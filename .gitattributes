@@ -1,0 +1,8 @@
+# Test data is compared byte for byte, so it must reach the working tree
+# exactly as it was committed.
+#
+# Without this, a checkout on Windows translates LF to CRLF and the comparison
+# fails on a difference the test cannot see: decoder's golden hex dump no longer
+# matches what the decoder produces, and a fuzz corpus seed is no longer the
+# bytes that once found a bug.
+**/testdata/** -text

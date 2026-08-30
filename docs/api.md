@@ -22,6 +22,7 @@ signatures may change before 1.0.
 | `master` | `…/master` | The master role: polls outstations, receives events, issues controls |
 | `outstation` | `…/outstation` | The outstation role: holds measurements, answers polls, executes controls |
 | `channel` | `…/channel` | Transports: TCP, TLS, UDP, serial, in-process pipe |
+| `multidrop` | `…/multidrop` | One channel shared by several sessions: multi-drop serial, serial gateways |
 | `decoder` | `…/decoder` | Structured protocol traces for logging and tooling |
 | `objects` | `…/objects` | Group/variation codecs and the object descriptor table |
 
@@ -549,6 +550,107 @@ type UDPConfig struct {
     RemoteAddr string // empty replies to whoever writes first — what an outstation wants
 }
 ```
+
+---
+
+# Package multidrop
+
+```go
+import "github.com/dscsystems/go-dnp3/multidrop"
+```
+
+One channel shared by several sessions. A session owns its channel, which is
+right for TCP — every outstation gets its own socket — and impossible on a
+multi-drop serial line: one RS-485 pair carries every station on it, and a
+serial port cannot be opened twice. The same applies to several RTUs reached
+through one TCP connection to a serial gateway.
+
+A `Bus` opens the shared channel once and hands each session a `channel.Channel`
+of its own, so nothing above it changes: a session still connects, still
+reconnects, still owns its stack.
+
+## Bus
+
+```go
+func New(ch channel.Channel, cfg Config) *Bus
+func (b *Bus) Add(s Station) (channel.Channel, error)
+func (b *Bus) Stats() Stats
+func (b *Bus) Close() error
+```
+
+The bus takes ownership of `ch`: `Close` closes it, and every session on it then
+sees `channel.ErrClosed` from its next connect, which both roles treat as a
+clean shutdown. Nothing is opened by `New` — the channel is connected when the
+first station connects.
+
+`Add` fails when a station cannot be told apart from one already on the bus —
+two masters polling the same outstation, or two outstations at one address —
+because both would match the same frames and there is no answer to which should
+have them. Closing the channel `Add` returned takes that one station off the
+bus and leaves the line up for the rest.
+
+## Station
+
+```go
+type Station struct {
+    LocalAddr  uint16
+    RemoteAddr uint16
+    Master     bool
+}
+```
+
+The addresses must match the session's own configuration; they are what the bus
+routes on. `Master` decides two things:
+
+- **Routing.** Masters on one line normally share a link address, so a master is
+  routed by source address — whose reply this is. An outstation is routed by
+  destination and answers whichever master addressed it, so its `RemoteAddr`
+  says where unsolicited responses go rather than filtering what it accepts.
+- **Arbitration.** Only a master takes the line, because it is the one that
+  starts an exchange. Outstations transmit when addressed and never wait.
+
+## Config
+
+```go
+type Config struct {
+    Turnaround time.Duration // 0 → DefaultTurnaround (2s); negative disables arbitration
+    Queue      int           // 0 → DefaultQueue, 16 frames per station
+    Log        *slog.Logger  // nil discards
+}
+```
+
+A multi-drop line is half duplex: two masters transmitting at once means two
+outstations answering at once and both replies lost. `Turnaround` is how long a
+master keeps the line after transmitting, waiting for its reply. The hold ends
+as soon as the reply arrives complete, so this governs only the stations that do
+not answer — it bounds how long one dead outstation stalls everyone else.
+
+What the bus does not do is schedule the sessions against each other. Each
+master still polls on its own clock; the bus only stops their exchanges from
+overlapping. Masters polling faster than the line can carry will spend their
+time waiting for each other.
+
+## Stats
+
+```go
+type Stats struct {
+    Connections    uint64 // times the underlying channel connected
+    FramesRouted   uint64
+    FramesUnrouted uint64 // addressed to nobody on this bus
+    FramesDropped  uint64 // a station queue was full: a session that stopped reading
+
+    FramesDecoded   uint64
+    BytesDiscarded  uint64
+    HeaderCRCErrors uint64
+    BodyCRCErrors   uint64
+    BadLength       uint64
+    Resyncs         uint64
+}
+```
+
+The last group is the link parser's own, accumulated across connections. A
+session's `Stats` cannot report them on a bus: the bus decodes the stream, so
+the sessions never see the octets that failed to make a frame.
 
 ---
 

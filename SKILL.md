@@ -36,6 +36,7 @@ test cheap — see [Verify your work](#verify-your-work).
 | `…/master` | the polling side |
 | `…/outstation` | the device side |
 | `…/channel` | TCP, TLS, UDP, serial, in-process pipe |
+| `…/multidrop` | one channel shared by several sessions: multi-drop serial, serial gateways |
 | `…/decoder` | structured traces for logs and tooling |
 | `…/objects` | group/variation codecs, object descriptor table |
 
@@ -258,6 +259,21 @@ channel.Pipe()                                    // (a, b Channel) in memory
 
 TLS is **mutual-auth only**, TLS 1.2 floor — by design, not an oversight. Over
 serial also set `UseLinkConfirms: true`, `LinkRetries`, `LinkTimeout`.
+
+**Several sessions on one line** — a serial port cannot be opened twice, so a
+multi-drop line (or several RTUs behind one terminal server) needs a bus between
+the sessions and the port:
+
+```go
+bus := multidrop.New(port, multidrop.Config{})   // takes ownership of the channel
+defer bus.Close()
+ch, err := bus.Add(multidrop.Station{LocalAddr: 1, RemoteAddr: 10, Master: true})
+go m.Run(ctx, ch)                                // Master: false for an outstation session
+```
+
+The addresses must match the session's own config. The bus routes inbound frames
+by address, serialises transmission, and holds the half-duplex line for one
+master's exchange at a time. It does not pace the polls — that is still yours.
 
 **Decode octets**
 

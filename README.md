@@ -63,6 +63,7 @@ internal/stack      link + transport plumbing shared by both roles
 objects             group/variation codecs, generated from a spec table
 master, outstation  session state machines built on the layers above
 channel             TCP, TLS, UDP, serial and an in-process pipe
+multidrop           one channel shared by several sessions, for multi-drop lines
 decoder             structured protocol traces for logging and tooling
 ```
 

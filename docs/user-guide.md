@@ -505,6 +505,50 @@ master.Config{
 And use `SyncTimeWithDelay` rather than `SyncTime` — see
 [Time synchronisation](#time-synchronisation).
 
+### Several stations on one line
+
+A session owns its channel, and a serial port cannot be opened twice. So a
+multi-drop line — one RS-485 pair with several outstations on it — needs
+something between the sessions and the port. That is `multidrop.Bus`: it opens
+the port once and hands each session a channel of its own.
+
+```go
+port := channel.SerialChannel(channel.SerialConfig{Device: "/dev/ttyUSB0", Baud: 9600},
+	channel.DefaultRetry)
+
+bus := multidrop.New(port, multidrop.Config{})
+defer bus.Close()
+
+for _, addr := range []uint16{10, 11, 12} {
+	ch, err := bus.Add(multidrop.Station{LocalAddr: 1, RemoteAddr: addr, Master: true})
+	if err != nil {
+		log.Fatal(err) // two sessions the bus cannot tell apart
+	}
+	m := master.New(master.Config{
+		LocalAddr:       1,
+		RemoteAddr:      addr,
+		UseLinkConfirms: true,
+	}, handler)
+	go func() { _ = m.Run(ctx, ch) }()
+}
+```
+
+Nothing above the bus changes: each session still connects, reconnects and owns
+its own stack, and it cannot tell the difference between its channel and a
+socket. Set `Master: false` for an outstation session — the bus routes a master
+by source address and an outstation by destination, and only masters wait their
+turn to transmit.
+
+The line is half duplex, so the bus lets one master's exchange finish before the
+next one starts; `Config.Turnaround` bounds how long a silent outstation holds
+everyone else up. What the bus does not do is pace the polls: three masters
+asking for a class 0 poll every second on a 9600 baud line will queue behind
+each other no matter what sits underneath them.
+
+The same applies to a terminal server — several RTUs behind one TCP connection
+to a serial gateway is the same line with a longer wire. Give the bus a
+`channel.TCPClient` instead of a serial port.
+
 ### TLS
 
 ```go

@@ -55,7 +55,7 @@ var peers = []peer{
 		port:    "20500",
 		address: 10,
 		points:  10,
-	}
+	},
 }
 
 // start runs a peer's outstation and returns when it is listening.
