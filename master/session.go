@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dscsystems/go-dnp3"
@@ -41,6 +42,12 @@ type Config struct {
 	// MaxTxFragment and MaxRxFragment cap request and response fragments.
 	MaxTxFragment int
 	MaxRxFragment int
+
+	// FileBlockSize is the largest file transfer block the master will ask an
+	// outstation for. Zero derives one from MaxRxFragment, which is what a
+	// device that answers honestly can send; set it lower for one that
+	// accepts a block size it cannot actually fill.
+	FileBlockSize uint16
 
 	// UseLinkConfirms enables link-layer confirmation, normally off over TCP.
 	UseLinkConfirms bool
@@ -118,6 +125,10 @@ type Session struct {
 
 	sched    scheduler
 	inflight *task
+
+	// fileSeq issues file transfer request identifiers. It is atomic because
+	// the file methods run on their caller's goroutine, not the session's.
+	fileSeq atomic.Uint32
 
 	submit chan *task
 	mu     sync.Mutex

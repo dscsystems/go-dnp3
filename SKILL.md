@@ -275,6 +275,25 @@ The addresses must match the session's own config. The bus routes inbound frames
 by address, serialises transmission, and holds the half-duplex line for one
 master's exchange at a time. It does not pace the polls — that is still yours.
 
+**Transfer files** (group 70)
+
+```go
+data, err := m.ReadFileBytes(ctx, "/config.xml")   // or ReadFile(ctx, name, w)
+err = m.WriteFileBytes(ctx, "/config.xml", data)   // WriteFile needs the size up front
+entries, err := m.ReadDirectory(ctx, "/")          // []dnp3.FileInfo
+err = m.DeleteFile(ctx, "/old.log")
+
+// Outstation: off unless a handler is set. OpenDir is rooted at os.Root, so
+// "../.." cannot escape it.
+files, err := outstation.OpenDir("/var/lib/rtu/public")
+files.ReadOnly = true
+cfg.Files = outstation.FileConfig{Handler: files}
+```
+
+A refusal wraps `dnp3.ErrFileTransfer` and names the status; a device without
+file transfer gives `dnp3.ErrNotSupported`. **A transfer holds the session for
+its whole duration** — polls wait behind it.
+
 **Decode octets**
 
 ```go
@@ -300,9 +319,12 @@ unimplemented rather than writing a call that will not compile.
   outstation answers those function codes; the master API does not send them.
   (`Database.FreezeCounters()` and `Database.AssignClass()` are outstation-local
   calls, not protocol requests.)
-- **No file transfer** (group 70), **no device attributes** (group 0), **no
-  datasets** (groups 85–87), **no `FREEZE_AT_TIME`**, **no Secure Authentication
-  v5** (out of scope — use TLS), **no self-address** (0xFFFC).
+- **No device attributes** (group 0), **no datasets** (groups 85–87), **no
+  `FREEZE_AT_TIME`**, **no Secure Authentication v5** (out of scope — use TLS),
+  **no self-address** (0xFFFC).
+- **File transfer is implemented** (group 70) — read, write, list, delete — but
+  there is **no `AUTHENTICATE_FILE` handshake**, and an outstation serves **one
+  transfer at a time**.
 - **No multi-master TCP server.** `TCPServer`/`TLSServer` serve one connection at
   a time; concurrent sessions would need a session per connection, which is not
   implemented.

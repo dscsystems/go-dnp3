@@ -44,6 +44,10 @@ type Config struct {
 	// Unsolicited paces unsolicited reporting.
 	Unsolicited UnsolicitedConfig
 
+	// Files parameterises file transfer. Without a handler the outstation
+	// answers the file function codes the way a device that has no files does.
+	Files FileConfig
+
 	// UseLinkConfirms enables link-layer confirmation, normally off over TCP.
 	UseLinkConfirms bool
 	// LinkRetries is how many times a confirmed frame is retransmitted.
@@ -73,6 +77,7 @@ func (c *Config) applyDefaults() {
 		c.LinkTimeout = time.Second
 	}
 	c.Unsolicited.applyDefaults()
+	c.Files.applyDefaults()
 	if c.Log == nil {
 		c.Log = slog.New(slog.DiscardHandler)
 	}
@@ -153,6 +158,12 @@ type Session struct {
 	// linkDeadline is when an unacknowledged link frame should be retried.
 	linkDeadline time.Time
 
+	// file is the transfer in flight, and handleSeq issues the handles. A
+	// handle is never reused within a session, so a master holding a stale one
+	// is told it is invalid rather than being given somebody else's file.
+	file      *transfer
+	handleSeq uint32
+
 	// recordedTime is when the last RECORD_CURRENT_TIME request arrived, which
 	// a master reads back as group 50 variation 3 to work out the transit
 	// delay before setting the clock.
@@ -178,6 +189,16 @@ type Stats struct {
 	CommandsRejected    uint64
 	UnsolicitedSent     uint64
 	UnsolicitedTimeouts uint64
+
+	// File transfer. FileErrors counts the operations refused with a status
+	// code — a missing file, a denied write — which is a configuration
+	// problem far more often than a protocol one.
+	FilesOpened        uint64
+	FileBlocksSent     uint64
+	FileBlocksReceived uint64
+	FileErrors         uint64
+	FileTimeouts       uint64
+	FilesAborted       uint64
 }
 
 // New returns an outstation session.
@@ -305,7 +326,15 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 
 	s.connected = true
 	s.unsol.reset()
-	defer func() { s.connected = false }()
+	defer func() {
+		s.connected = false
+		// A transfer belongs to the connection it started on: the master that
+		// opened it cannot come back to the same handle, and holding the file
+		// open would deny the next one.
+		if err := s.closeFile(); err != nil {
+			s.log.Warn("closing a transfer on disconnect failed", "err", err)
+		}
+	}()
 
 	// Announce ourselves before servicing anything. The null unsolicited
 	// response exists to tell a master "I am here and I have restarted", and
@@ -355,6 +384,7 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 			s.checkLinkTimeout(conn)
 			s.checkConfirmTimeout()
 			s.checkSelectTimeout(now)
+			s.checkFileTimeout(now)
 			if err := s.pollUnsolicited(conn, now); err != nil {
 				s.log.Warn("unsolicited transmission failed", "err", err)
 				return
@@ -459,6 +489,21 @@ func (s *Session) handle(w io.Writer, r stack.Received) error {
 	case app.FuncRecordCurrentTime:
 		return s.onRecordCurrentTime(w, r, frag)
 
+	case app.FuncOpenFile:
+		return s.onOpenFile(w, r, frag)
+
+	case app.FuncCloseFile:
+		return s.onCloseFile(w, r, frag)
+
+	case app.FuncDeleteFile:
+		return s.onDeleteFile(w, r, frag)
+
+	case app.FuncGetFileInfo:
+		return s.onGetFileInfo(w, r, frag)
+
+	case app.FuncAbortFile:
+		return s.onAbortFile(w, r, frag)
+
 	case app.FuncColdRestart, app.FuncWarmRestart:
 		return s.onRestart(w, r, frag)
 
@@ -506,6 +551,12 @@ func (s *Session) onConfirm(h app.Header) {
 
 // onRead answers a read request.
 func (s *Session) onRead(w io.Writer, r stack.Received, frag app.Fragment) error {
+	// A read naming a group 70 object is asking for the next block of a file,
+	// not for measurements. It cannot be both: the object header says which.
+	if h, ok := fileObject(frag); ok {
+		return s.onFileRead(w, r, frag, h)
+	}
+
 	ctx := objects.Context{Synchronized: s.synchronized}
 	b := newResponseBuilder(s.cfg.MaxTxFragment, ctx)
 
@@ -560,6 +611,10 @@ func (s *Session) onRead(w io.Writer, r stack.Received, frag app.Fragment) error
 
 // onWrite handles the write function code.
 func (s *Session) onWrite(w io.Writer, r stack.Received, frag app.Fragment) error {
+	if h, ok := fileObject(frag); ok {
+		return s.onFileWrite(w, r, frag, h)
+	}
+
 	for _, h := range frag.Objects {
 		switch {
 		case h.Group == 80 && h.Variation == 1:

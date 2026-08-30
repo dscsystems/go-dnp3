@@ -27,6 +27,10 @@ var (
 	// ErrTaskFailed means a master task exhausted its retries.
 	ErrTaskFailed = errors.New("dnp3: task failed")
 
+	// ErrFileTransfer means an outstation rejected a file operation. The
+	// wrapped message carries the status code it reported.
+	ErrFileTransfer = errors.New("dnp3: file transfer failed")
+
 	// ErrNoConnection means the channel has no established connection.
 	ErrNoConnection = errors.New("dnp3: no connection")
 )

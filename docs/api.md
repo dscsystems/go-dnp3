@@ -379,6 +379,43 @@ func AnalogFitsIn32(v float64) bool
 
 An outstation needs these when a master requests a narrow variation.
 
+## File transfer
+
+The vocabulary of group 70. The wire encodings live in `objects`, the sequencing
+in `master` and `outstation`.
+
+```go
+type FileInfo struct {
+    Name        string    // in a listing, the entry's own name rather than a path
+    Type        FileType
+    Size        uint32
+    Created     time.Time // zero when the device keeps no creation time
+    Permissions FilePermissions
+}
+
+func (f FileInfo) IsDir() bool
+```
+
+```go
+type FileType uint16   // FileTypeDirectory, FileTypeSimple
+type FileMode uint16   // FileModeNull, FileModeRead, FileModeWrite, FileModeAppend
+type FileStatus uint8  // FileSuccess, FileNotFound, FilePermissionDenied, FileLocked, …
+type FilePermissions uint16
+```
+
+`FileStatus` keeps the standard's numbering, gap and all, so a capture reads
+against IEEE 1815 table 4-8. `Err()` returns nil for `FileSuccess` and an error
+wrapping `ErrFileTransfer` otherwise:
+
+```go
+if err := status.Err(); err != nil {
+    // errors.Is(err, dnp3.ErrFileTransfer), and the message names the status
+}
+```
+
+`FilePermissions.String()` renders the nine bits the way `ls` does — `rw-r--r--`
+— so a directory listing from a device reads like one from a filesystem.
+
 ## Errors
 
 Layer packages define their own detailed errors and wrap them in these, so a
@@ -393,6 +430,7 @@ var (
     ErrNotSupported = errors.New("dnp3: not supported by peer")
     ErrBadConfig    = errors.New("dnp3: invalid configuration")
     ErrTaskFailed   = errors.New("dnp3: task failed")
+    ErrFileTransfer = errors.New("dnp3: file transfer failed")
     ErrNoConnection = errors.New("dnp3: no connection")
 )
 ```
@@ -806,6 +844,57 @@ A multi-command request can partially succeed. `OK` is false unless every status
 is `CommandSuccess`, because treating a partial success as success would tell an
 operator a breaker operated when it did not.
 
+## File transfer
+
+```go
+func (s *Session) ReadFile(ctx context.Context, name string, dst io.Writer) (int64, error)
+func (s *Session) ReadFileBytes(ctx context.Context, name string) ([]byte, error)
+func (s *Session) WriteFile(ctx context.Context, name string, src io.Reader, size uint32) error
+func (s *Session) WriteFileBytes(ctx context.Context, name string, data []byte) error
+func (s *Session) ReadDirectory(ctx context.Context, name string) ([]dnp3.FileInfo, error)
+func (s *Session) FileInfo(ctx context.Context, name string) (dnp3.FileInfo, error)
+func (s *Session) DeleteFile(ctx context.Context, name string) error
+
+const MaxFileSize = 16 << 20 // the cap on reading a file into memory
+```
+
+A transfer is a conversation — open, a block at a time, close — not a request,
+and the steps are chained so nothing can be scheduled between them. **A transfer
+holds the session for its whole duration**: polls queued behind a large file
+wait for it, which on a serial link is minutes for a firmware image.
+
+`ReadFile` streams to a writer and returns the octet count even when the
+transfer fails, so a file that arrived short is distinguishable from one that
+never started. `ReadFileBytes` and `ReadDirectory` accumulate in memory and stop
+at `MaxFileSize`.
+
+`WriteFile` takes the size up front because the open command carries it: an
+outstation deciding whether it has room asks before the first block, not after
+the last.
+
+A failure part way through still closes the file, even when the caller's context
+is already cancelled. An outstation left holding a handle refuses the next
+transfer until its own timeout expires, so skipping the close would lock the
+master out of the device it was talking to.
+
+Errors come back in two kinds. A transport failure — a timeout, a dropped link —
+wraps the usual sentinels. An outstation that refused the operation wraps
+`dnp3.ErrFileTransfer` and names the status it reported:
+
+```go
+if _, err := m.ReadFileBytes(ctx, "/config.xml"); err != nil {
+    switch {
+    case errors.Is(err, dnp3.ErrFileTransfer): // the outstation said no; the text says why
+    case errors.Is(err, dnp3.ErrNotSupported): // the device has no file transfer at all
+    case errors.Is(err, dnp3.ErrTimeout):      // it did not answer
+    }
+}
+```
+
+`Config.FileBlockSize` caps the block size the master asks for; zero derives one
+from `MaxRxFragment`. The outstation may answer with something smaller, and its
+answer wins.
+
 ## Time and configuration
 
 ```go
@@ -1141,6 +1230,58 @@ Defaults, chosen as the widest lossless encoding for each type:
 The analog defaults are 32-bit **integer** variations. A point that needs
 fractions must be configured for a float variation — see
 [Variations and precision](user-guide.md#variations-and-precision).
+
+## File transfer
+
+```go
+type FileConfig struct {
+    Handler      FileHandler   // nil answers the file function codes with NO_FUNC_CODE_SUPPORT
+    MaxBlockSize uint16        // 0 → DefaultFileBlockSize (1024)
+    Timeout      time.Duration // 0 → DefaultFileTimeout (60s), closing an idle transfer
+}
+
+type FileHandler interface {
+    Info(name string) (dnp3.FileInfo, dnp3.FileStatus)
+    List(name string) ([]dnp3.FileInfo, dnp3.FileStatus)
+    OpenRead(name string) (io.ReadCloser, dnp3.FileInfo, dnp3.FileStatus)
+    OpenWrite(name string, mode dnp3.FileMode, size uint32) (io.WriteCloser, dnp3.FileStatus)
+    Delete(name string) dnp3.FileStatus
+}
+```
+
+Set `Config.Files.Handler` to serve files; leave it nil and the outstation
+answers the way a device without a filesystem does. Every method returns a
+status rather than an error because the status is what goes on the wire: a
+master distinguishes a missing file from a denied one, and flattening both into
+"failed" leaves it unable to tell whether retrying could ever work.
+
+The session calls the handler from its own goroutine, one call at a time, so an
+implementation needs no locking. It also encodes directory listings itself — a
+handler returns `[]dnp3.FileInfo` from `List` and never sees the wire format.
+
+Two implementations ship:
+
+```go
+type RejectingFileHandler struct{}   // refuses everything, with PERMISSION_DENIED
+
+func OpenDir(dir string) (*DirFileHandler, error)
+func (h *DirFileHandler) Close() error
+type DirFileHandler struct { ReadOnly bool }
+```
+
+`DirFileHandler` serves one directory and nothing above it. It is built on
+`os.Root`, so a master asking for `../../etc/passwd` — or for a symlink pointing
+there — is refused by the operating system rather than by string matching this
+package would have to get right.
+
+An outstation serves **one transfer at a time**; a second open is answered with
+`TOO_MANY_OPEN`. Blocks must arrive in order, because the handler's reader and
+writer are streams that cannot rewind; out-of-order blocks get
+`BLOCK_SEQUENCE`. A transfer that goes quiet for `Timeout` is closed, and one
+still open when the connection drops is closed with it.
+
+`Stats` counts `FilesOpened`, `FileBlocksSent`, `FileBlocksReceived`,
+`FileErrors`, `FileTimeouts` and `FilesAborted`.
 
 ## Application
 
@@ -1552,6 +1693,35 @@ func ParseTimeDelay(variation uint8, buf []byte) uint32 // always milliseconds
 `ParseTimeDelay` handles group 52: variation 1 counts seconds and variation 2
 counts milliseconds, and both are returned in milliseconds so callers need not
 care — which is the whole reason the two variations exist separately on the wire.
+
+## File transfer objects
+
+Group 70 is the one group whose objects are variable length, so these are the
+only codecs here that can fail: the object measures itself, and a device that
+declares a name longer than the object holding it has to be refused rather than
+sliced. Errors wrap `dnp3.ErrMalformed`.
+
+```go
+func ParseFileCommand(buf []byte) (FileCommand, error)             // g70v3: open, delete
+func ParseFileCommandStatus(buf []byte) (FileCommandStatus, error) // g70v4: the answer
+func ParseFileTransport(buf []byte) (FileTransport, error)         // g70v5: one block
+func ParseFileTransportStatus(buf []byte) (FileTransportStatus, error) // g70v6
+func ParseFileDescriptor(buf []byte) (FileDescriptor, error)       // g70v7: what a file is
+func ParseFileAuth(buf []byte) (FileAuth, error)                   // g70v2
+```
+
+Each has an `Append` counterpart. `FileTransport.Last` is the top bit of the
+block number on the wire, unpacked into a field, because it is the only thing
+that says a transfer has ended.
+
+```go
+func ParseDirectory(data []byte) ([]dnp3.FileInfo, error)
+func DescriptorFor(info dnp3.FileInfo, requestID uint16) FileDescriptor
+```
+
+Reading a directory is reading a file: what comes back is a run of descriptors
+laid end to end, each saying how long it is. That is why a descriptor carries a
+name offset at all — it is what makes the run walkable.
 
 ## Packed objects
 

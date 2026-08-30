@@ -67,6 +67,13 @@ func DecodeValues(h app.ObjectHeader, ctx objects.Context) ([]Value, bool) {
 		return decodeOctetStrings(h), true
 	}
 
+	// File transfer likewise: its objects are self-describing and carry no
+	// point index, so there is no descriptor row to look up and nothing the
+	// measurement path below could do with them.
+	if h.Group == 70 {
+		return decodeFileObjects(h)
+	}
+
 	d, ok := objects.Lookup(gv)
 	if !ok {
 		return nil, false

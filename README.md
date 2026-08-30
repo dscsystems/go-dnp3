@@ -61,7 +61,8 @@ internal/transport  FIR/FIN/SEQ segmentation and reassembly
 internal/app        application headers, function codes, IIN, qualifiers
 internal/stack      link + transport plumbing shared by both roles
 objects             group/variation codecs, generated from a spec table
-master, outstation  session state machines built on the layers above
+master, outstation  session state machines built on the layers above, including
+                    group 70 file transfer on both sides
 channel             TCP, TLS, UDP, serial and an in-process pipe
 multidrop           one channel shared by several sessions, for multi-drop lines
 decoder             structured protocol traces for logging and tooling
@@ -117,10 +118,11 @@ registry entry, and the size the framing layer needs to walk a fragment. The
 output is committed, so consumers never run the generator, and CI fails if it
 drifts from the spec.
 
-Two things stay hand-written because the table cannot express them: bit-packed
-objects, whose unit of encoding is the range rather than the object, and
+Three things stay hand-written because the table cannot express them:
+bit-packed objects, whose unit of encoding is the range rather than the object;
 commands, whose fields map onto purpose-built structs rather than a measurement
-type.
+type; and group 70 file transfer, whose objects are variable length and carry
+their own size.
 
 ## Scope
 

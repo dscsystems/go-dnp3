@@ -77,7 +77,13 @@ Default maximum receive fragment: 2048 octets, configurable.
 | 22 | ASSIGN_CLASS | — | Yes |
 | 23 | DELAY_MEASURE | Yes | Yes |
 | 24 | RECORD_CURRENT_TIME | — | Yes |
-| 25–31 | File and configuration | **No** | **No** |
+| 25 | OPEN_FILE | Yes | Yes |
+| 26 | CLOSE_FILE | Yes | Yes |
+| 27 | DELETE_FILE | Yes | Yes |
+| 28 | GET_FILE_INFO | Yes | Yes |
+| 29 | AUTHENTICATE_FILE | **No** | **No** |
+| 30 | ABORT_FILE | — | Yes |
+| 31 | ACTIVATE_CONFIG | **No** | **No** |
 | 32/33 | Authentication | **No** | **No** |
 | 129 | RESPONSE | Receives | Sends |
 | 130 | UNSOLICITED_RESPONSE | Receives | Sends |
@@ -129,7 +135,7 @@ Sizes and field layouts for all of these are generated from
 | 110, 111 | any length | Yes | Yes | Octet strings, static and event |
 | 112, 113 | — | Sizes only | — | Virtual terminal |
 | 0 | — | **No** | **No** | Device attributes |
-| 70 | — | **No** | **No** | File transfer |
+| 70 | 2–8 | Yes | Yes | File transfer |
 | 85–87 | — | **No** | **No** | Datasets |
 | 120–121 | — | **No** | **No** | Secure Authentication v5 — use TLS |
 
@@ -213,9 +219,21 @@ Listed rather than left to be discovered:
 
 - **Self-address** (0xFFFC) is not implemented, so a master cannot address an
   outstation whose configured address it does not know.
-- **Device attributes** (group 0) and **file transfer** (group 70) are not
-  implemented. The framing layer knows they are variable-length and will walk
-  past them without misparsing the rest of a fragment.
+- **Device attributes** (group 0) are not implemented. The framing layer knows
+  they are variable-length and will walk past them without misparsing the rest
+  of a fragment.
+- **File transfer** (group 70) is implemented for reading, writing, listing and
+  deleting: `OPEN_FILE`, `CLOSE_FILE`, `DELETE_FILE`, `ABORT_FILE`,
+  `GET_FILE_INFO`, and the `READ`/`WRITE` of group 70 variation 5 blocks.
+  Variations 2 through 8 all decode. What is not implemented: the
+  `AUTHENTICATE_FILE` exchange (variation 2 is encoded and decoded, but a
+  session never performs the handshake, so an outstation demanding one cannot
+  be talked to), and an outstation serves one transfer at a time. Blocks must
+  arrive in order — the outstation cannot rewind a stream, so a master that
+  re-requests an earlier block is answered with `BLOCK_SEQUENCE`.
+  `GET_FILE_INFO` follows this implementation's reading of the standard, with
+  the file named in a variation 7 descriptor; it has not been exercised against
+  another vendor's device.
 - **Datasets** (groups 85–87) are not implemented.
 - **Secure Authentication v5** is out of scope by design; use TLS.
 - **`FREEZE_AT_TIME`** is not implemented, and the framing layer's rule for

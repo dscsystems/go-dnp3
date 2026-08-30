@@ -96,6 +96,19 @@ func readUintLE(buf []byte, width int) uint32 {
 func objectDataLen(sizer ObjectSizer, h ObjectHeader, buf []byte, carriesData bool) (int, error) {
 	prefix := h.Qualifier.IndexPrefix()
 
+	// A size prefix makes the data self-describing, so it can be walked
+	// without knowing anything about the group — and, unlike everything below,
+	// without knowing the function code either.
+	//
+	// That exception is what file transfer needs. A READ request carries no
+	// object data by the general rule, but a read of a file block carries a
+	// group 70 object holding the handle and the block number; so do the
+	// delete and file-info requests. The object says how long it is, so there
+	// is nothing to infer and nothing to get wrong.
+	if prefix.IsSize() && h.Range.Count > 0 && h.Variation != 0 {
+		return walkSizePrefixed(prefix.Octets(), h.Range.Count, buf)
+	}
+
 	if !carriesData {
 		return 0, nil
 	}
@@ -111,13 +124,6 @@ func objectDataLen(sizer ObjectSizer, h ObjectHeader, buf []byte, carriesData bo
 	}
 	if h.Range.Count == 0 {
 		return 0, nil
-	}
-
-	// A size prefix makes the data self-describing, so it can be walked
-	// without knowing anything about the group. This is how variable-length
-	// objects such as file transfer are carried.
-	if prefix.IsSize() {
-		return walkSizePrefixed(prefix.Octets(), h.Range.Count, buf)
 	}
 
 	bits, ok := sizer.SizeBits(h.Group, h.Variation)

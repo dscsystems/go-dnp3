@@ -18,6 +18,7 @@ see the [device profile](device-profile.md).
 - [Events, classes and deadbands](#events-classes-and-deadbands)
 - [Controls](#controls)
 - [Time synchronisation](#time-synchronisation)
+- [File transfer](#file-transfer)
 - [Testing without hardware](#testing-without-hardware)
 - [Decoding traffic](#decoding-traffic)
 - [The command-line tools](#the-command-line-tools)
@@ -791,6 +792,119 @@ every event it stamps goes into the past.
 On the outstation side, `Application.SupportsWriteTime` decides whether clock
 writes are accepted at all, and `WriteAbsoluteTime` can reject an individual
 one. A device with a GPS clock should refuse.
+
+---
+
+## File transfer
+
+Group 70 moves files: configuration, firmware, event logs, and the directory
+listings that say what is on the device. It is unlike the rest of DNP3 — no
+point indexes, no measurements, just a path, a handle and numbered blocks.
+
+### Reading and writing from a master
+
+```go
+// Into memory, capped at master.MaxFileSize.
+data, err := m.ReadFileBytes(ctx, "/config/settings.xml")
+
+// Or streamed, for anything large.
+f, err := os.Create("settings.xml")
+n, err := m.ReadFile(ctx, "/config/settings.xml", f)
+
+// Writing declares the size up front, because the open command carries it.
+err = m.WriteFileBytes(ctx, "/config/settings.xml", data)
+err = m.WriteFile(ctx, "/firmware.bin", file, uint32(size))
+
+entries, err := m.ReadDirectory(ctx, "/")
+for _, e := range entries {
+	fmt.Println(e) // drwxr-xr-x     4096 logs
+}
+
+err = m.DeleteFile(ctx, "/logs/old.log")
+info, err := m.FileInfo(ctx, "/config/settings.xml")
+```
+
+Two things to know before you use these in anger.
+
+**A transfer holds the session for its whole duration.** The steps are chained
+so nothing can be scheduled between them, which means polls queued behind a
+large file wait for it. Over Ethernet a megabyte is seconds; over 9600 baud
+serial a firmware image is the better part of an hour, and nothing else on that
+line moves meanwhile. Transfer during a maintenance window, not from the poll
+loop.
+
+**Failures come in two kinds**, and the difference decides whether retrying is
+worth anything:
+
+```go
+if _, err := m.ReadFileBytes(ctx, name); err != nil {
+	switch {
+	case errors.Is(err, dnp3.ErrFileTransfer):
+		// The outstation refused, and said why: not found, permission denied,
+		// locked by another master. The message names the status.
+	case errors.Is(err, dnp3.ErrNotSupported):
+		// The device has no file transfer at all.
+	case errors.Is(err, dnp3.ErrTimeout):
+		// It did not answer.
+	}
+}
+```
+
+A transfer that fails part way through still closes the file, even if your
+context has already been cancelled. An outstation left holding a handle refuses
+the next transfer until its own timeout expires, so skipping the close would
+lock you out of the device you were talking to.
+
+### Serving files from an outstation
+
+File transfer is off unless you configure a handler. It hands a master authority
+over a filesystem across a protocol with no authentication of its own, so it is
+opt-in rather than opt-out:
+
+```go
+files, err := outstation.OpenDir("/var/lib/rtu/public")
+if err != nil {
+	log.Fatal(err)
+}
+defer files.Close()
+files.ReadOnly = true // publish the files, do not accept new ones
+
+out := outstation.New(outstation.Config{
+	LocalAddr:  10,
+	RemoteAddr: 1,
+	Files:      outstation.FileConfig{Handler: files},
+}, nil, nil)
+```
+
+`OpenDir` serves one directory and nothing above it. It is built on `os.Root`,
+so a master asking for `../../etc/passwd` — or for a symlink pointing there — is
+refused by the operating system rather than by string matching this library
+would have to get right. Serve the narrowest directory that does the job, and
+set `ReadOnly` unless the master genuinely needs to write.
+
+For anything else — files synthesised on demand, a database behind a path, an
+allowlist — implement `FileHandler` yourself:
+
+```go
+type FileHandler interface {
+	Info(name string) (dnp3.FileInfo, dnp3.FileStatus)
+	List(name string) ([]dnp3.FileInfo, dnp3.FileStatus)
+	OpenRead(name string) (io.ReadCloser, dnp3.FileInfo, dnp3.FileStatus)
+	OpenWrite(name string, mode dnp3.FileMode, size uint32) (io.WriteCloser, dnp3.FileStatus)
+	Delete(name string) dnp3.FileStatus
+}
+```
+
+Every method returns a status rather than an error, because the status is what
+goes on the wire: a master distinguishes a missing file from a denied one, and
+flattening both into "failed" leaves it unable to tell whether retrying could
+ever work. The session calls the handler from its own goroutine, one call at a
+time, so no locking is needed — and it encodes directory listings itself, so an
+implementation never sees the wire format.
+
+An outstation serves one transfer at a time; a second open is refused with
+`TOO_MANY_OPEN`. A transfer that goes quiet is closed after
+`FileConfig.Timeout`, and one still open when the connection drops goes with it.
 
 ---
 

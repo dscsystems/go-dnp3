@@ -623,6 +623,71 @@ func TestParseSizePrefixedObjects(t *testing.T) {
 	}
 }
 
+// TestFreeFormatInARequest covers the exception file transfer needs: a READ
+// request carries no object data by the general rule, and a read of a file
+// block carries a group 70 object holding the handle and the block number.
+//
+// Before the free-format case was hoisted above the function-code rule, the
+// object's own octets were parsed as the next object header, and every file
+// read a master sent was rejected as a malformed fragment.
+func TestFreeFormatInARequest(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		fn   FuncCode
+	}{
+		{"read a file block", FuncRead},
+		{"delete a file", FuncDeleteFile},
+		{"file info", FuncGetFileInfo},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			frag := []byte{
+				0xC0, byte(c.fn),
+				70, 5, 0x5B, // g70v5, 2-octet size prefix, variable count
+				1,          // one object
+				0x08, 0x00, // eight octets
+				1, 0, 0, 0, // handle
+				2, 0, 0, 0, // block number
+			}
+
+			f, err := ParseFragment(nil, frag)
+			if err != nil {
+				t.Fatalf("ParseFragment: %v", err)
+			}
+			if len(f.Objects) != 1 {
+				t.Fatalf("parsed %d object headers, want 1", len(f.Objects))
+			}
+			if got := len(f.Objects[0].Data); got != 10 {
+				t.Errorf("data = %d octets, want 10 (the size prefix and the object)", got)
+			}
+		})
+	}
+}
+
+// TestReadRequestStillCarriesNoData is the other half of that exception: an
+// ordinary read names points and must not be given data, or the parser runs
+// off the end of every poll.
+func TestReadRequestStillCarriesNoData(t *testing.T) {
+	// A class 0 poll followed by a second header. If the first were treated as
+	// carrying data, the second would be swallowed as its payload.
+	frag := []byte{
+		0xC0, byte(FuncRead),
+		60, 1, 0x06,
+		60, 2, 0x06,
+	}
+	f, err := ParseFragment(nil, frag)
+	if err != nil {
+		t.Fatalf("ParseFragment: %v", err)
+	}
+	if len(f.Objects) != 2 {
+		t.Fatalf("parsed %d object headers, want 2", len(f.Objects))
+	}
+	for i, o := range f.Objects {
+		if len(o.Data) != 0 {
+			t.Errorf("header %d carries %d octets of data, want none", i, len(o.Data))
+		}
+	}
+}
+
 func TestSizePrefixedTruncation(t *testing.T) {
 	// A size prefix claiming more octets than remain must be rejected, not
 	// clamped — this is the classic length-field overflow.
