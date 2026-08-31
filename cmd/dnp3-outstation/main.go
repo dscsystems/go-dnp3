@@ -71,6 +71,9 @@ func run() error {
 		address    = flag.Int("address", 0, "override the outstation link `address`")
 		master     = flag.Int("master", 0, "override the master link `address`")
 		unsol      = flag.Bool("unsolicited", false, "push events without being polled")
+		filesDir   = flag.String("files", "", "serve file transfer from `directory` instead of the simulated files")
+		filesRO    = flag.Bool("files-read-only", false, "refuse file writes and deletes")
+		noFiles    = flag.Bool("no-files", false, "disable file transfer entirely")
 		verbose    = flag.Bool("v", false, "log protocol activity")
 		quiet      = flag.Bool("q", false, "log nothing but errors")
 		dump       = flag.Bool("points", false, "print the point list and exit")
@@ -101,6 +104,15 @@ func run() error {
 	if *unsol {
 		cfg.Unsolicited.Enabled = true
 	}
+	if *filesDir != "" {
+		cfg.Files.Directory = *filesDir
+	}
+	if *filesRO {
+		cfg.Files.ReadOnly = true
+	}
+	if *noFiles {
+		cfg.Files.Disabled = true
+	}
 
 	var err error
 	if cfg.injection, err = parseInjections(inject); err != nil {
@@ -119,6 +131,15 @@ func run() error {
 	log := newLogger(*verbose, *quiet)
 	ocfg := cfg.outstationConfig()
 	ocfg.Log = log
+
+	files, servingFiles, closeFiles, err := buildFileConfig(cfg, sim)
+	if err != nil {
+		return err
+	}
+	if closeFiles != nil {
+		defer func() { _ = closeFiles() }()
+	}
+	ocfg.Files = files
 
 	plant := &plantHandler{sim: sim, log: log}
 	sess := outstation.New(ocfg, &clock{}, plant)
@@ -141,6 +162,10 @@ func run() error {
 	fmt.Print(sim.Describe())
 	fmt.Printf("\nOutstation %d listening for master %d on %s\n",
 		cfg.Address, cfg.Master, description)
+	fmt.Printf("File transfer: %s\n", servingFiles)
+	if m, ok := files.Handler.(*memFiles); ok {
+		fmt.Print(m.Describe())
+	}
 	if cfg.injection.any() {
 		fmt.Printf("Injecting: %s\n", cfg.injection)
 	}
@@ -155,6 +180,10 @@ func run() error {
 	st := sess.Stats()
 	fmt.Printf("\n%d requests, %d responses, %d commands, %d unsolicited\n",
 		st.RequestsReceived, st.ResponsesSent, st.CommandsExecuted, st.UnsolicitedSent)
+	if st.FilesOpened > 0 {
+		fmt.Printf("%d file transfers, %d blocks sent, %d received, %d refused\n",
+			st.FilesOpened, st.FileBlocksSent, st.FileBlocksReceived, st.FileErrors)
+	}
 	return nil
 }
 
@@ -376,6 +405,11 @@ Device:
   -unsolicited        push events without being polled
   -points             print the point list and exit
 
+File transfer (group 70; simulated files in memory by default):
+  -files DIR          serve a real directory instead, and nothing above it
+  -files-read-only    refuse writes and deletes
+  -no-files           disable file transfer, so the device reports it has none
+
 Fault injection (repeatable):
   -inject event-storm=N       generate N binary events per second
   -inject restart-after=DUR   report a restart every DUR
@@ -390,5 +424,6 @@ Examples:
   dnp3-outstation
   dnp3-outstation -config substation.yaml -unsolicited -v
   dnp3-outstation -inject event-storm=500 -inject offline-every=30s
+  dnp3-outstation -files ./device-files -files-read-only
 `)
 }

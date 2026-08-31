@@ -123,7 +123,7 @@ func (m *Model) viewTabs(l layout) string {
 		status = append(status, "filter "+strconv.Quote(m.filter))
 	}
 	if m.screen.isTable() {
-		status = append(status, plural(l.total, rowNoun(m.screen)))
+		status = append(status, plural(l.total, m.rowNoun()))
 	}
 	if m.screen.follows() && m.follow {
 		status = append(status, "following")
@@ -158,6 +158,8 @@ func (m *Model) viewBody(l layout) []string {
 		body = m.viewEvents(l)
 	case ScreenLog:
 		body = m.viewLog(l)
+	case ScreenFiles:
+		body = m.viewFiles(l)
 	case ScreenHelp:
 		body = m.viewHelp(l)
 	}
@@ -258,6 +260,24 @@ func (m *Model) footerButtons() []button {
 			{label: "Export", key: "e"},
 			{label: "Help", key: "?"},
 		}
+	case ScreenFiles:
+		if m.files.showingPreview() {
+			return []button{
+				{label: "Close", key: "esc"},
+				{label: "Save", key: "w"},
+				{label: "Help", key: "?"},
+			}
+		}
+		return []button{
+			{label: "Go to", key: ":"},
+			{label: "List", key: "l"},
+			{label: "Up", key: "-"},
+			{label: "Open", key: "enter"},
+			{label: "Save", key: "w"},
+			{label: "Send", key: "W"},
+			{label: "Delete", key: "D"},
+			{label: "Help", key: "?"},
+		}
 	case ScreenHelp:
 		return []button{
 			{label: "Points", key: "2"},
@@ -320,8 +340,14 @@ func (m *Model) viewHint(l layout) string {
 		hint = "↑↓ move · f follow · x clear · / filter · p poll · ? help"
 	case ScreenLog:
 		hint = "↑↓ move · f follow · x clear · / filter · ? help"
+	case ScreenFiles:
+		if m.files.showingPreview() {
+			hint = "↑↓ scroll · esc close · w save to disk · ? help"
+		} else {
+			hint = "enter open · - up · : path · l re-list · w save · W send · D delete · ? help"
+		}
 	case ScreenHelp:
-		hint = "↑↓ scroll · tab or 1-5 change screen · q quit"
+		hint = "↑↓ scroll · tab or 1-6 change screen · q quit"
 	default:
 		hint = "i integrity · p poll · t clock · u/U unsolicited · R restart · click anything · ? help"
 	}
@@ -678,6 +704,13 @@ func columnsFor(s Screen) []column {
 			{id: colSource, title: "SOURCE", width: 7, prio: 4},
 			{id: colStamp, title: "TIMESTAMP", width: 12, prio: 1},
 		}
+	case ScreenFiles:
+		return []column{
+			{id: colFileName, title: "NAME", min: 16, flex: true},
+			{id: colFileSize, title: "SIZE", width: 10, right: true},
+			{id: colFilePerms, title: "MODE", width: 9, prio: 2},
+			{id: colFileTime, title: "MODIFIED", width: 16, prio: 1},
+		}
 	default:
 		return []column{
 			{id: colReceived, title: "TIME", width: 12},
@@ -685,6 +718,17 @@ func columnsFor(s Screen) []column {
 			{id: colMessage, title: "MESSAGE", min: 20, flex: true},
 		}
 	}
+}
+
+// filePreviewColumns is the single column a file's contents are drawn in. It
+// goes through the table machinery so the preview scrolls, and is selectable,
+// exactly like every other list here.
+//
+// The file's own description is the column heading rather than a line above
+// it: two header rows on a twenty-row terminal is two rows of the file nobody
+// can see.
+func filePreviewColumns(title string) []column {
+	return []column{{id: colPreview, title: title, min: 8, flex: true}}
 }
 
 func (m *Model) viewPoints(l layout) []string {
@@ -1032,7 +1076,7 @@ func (m *Model) viewHelp(l layout) []string {
 // last third does not exist.
 func (m *Model) helpLines(b rect) []string {
 	keys := [][2]string{
-		{"1 – 5, tab", "change screen"},
+		{"1 – 6, tab", "change screen"},
 		{"↑ ↓ j k", "move the cursor"},
 		{"pgup pgdn", "move a page"},
 		{"home end g G", "first and last row"},
@@ -1059,6 +1103,16 @@ func (m *Model) helpLines(b rect) []string {
 		{"b", "write an analog deadband"},
 		{"S", "select-before-operate or direct"},
 		{"C", "change the connection"},
+	}
+	files := [][2]string{
+		{":", "type a directory to list"},
+		{"l", "list the directory again"},
+		{"enter", "open a directory, or read a file"},
+		{"-, backspace", "go up a directory"},
+		{"w", "save the file to local disk"},
+		{"W", "send a local file to the device"},
+		{"D", "delete the file on the device"},
+		{"esc", "close the file being shown"},
 	}
 	mouse := [][2]string{
 		{"click a tab", "change screen"},
@@ -1104,6 +1158,8 @@ func (m *Model) helpLines(b rect) []string {
 		colW := (b.w - 1) / 2
 		left := append(render("KEYS", keys, colW), about...)
 		right := append(render("PROTOCOL", proto, b.w-colW-1), "")
+		right = append(right, render("FILES", files, b.w-colW-1)...)
+		right = append(right, "")
 		right = append(right, render("MOUSE", mouse, b.w-colW-1)...)
 
 		h := max(len(left), len(right))
@@ -1113,6 +1169,8 @@ func (m *Model) helpLines(b rect) []string {
 	out := render("KEYS", keys, b.w)
 	out = append(out, "")
 	out = append(out, render("PROTOCOL", proto, b.w)...)
+	out = append(out, "")
+	out = append(out, render("FILES", files, b.w)...)
 	out = append(out, "")
 	out = append(out, render("MOUSE", mouse, b.w)...)
 	out = append(out, about...)
@@ -1183,12 +1241,18 @@ func fmtDuration(d time.Duration) string {
 
 // rowNoun names what the current screen is a list of, because "1 rows" is the
 // sort of thing that makes an operator distrust the rest of the numbers.
-func rowNoun(s Screen) string {
-	switch s {
+func (m *Model) rowNoun() string {
+	switch m.screen {
 	case ScreenPoints:
 		return "point"
 	case ScreenEvents:
 		return "event"
+	case ScreenFiles:
+		if m.files.showingPreview() {
+			// The rows are the file's own lines while one is on screen.
+			return "line"
+		}
+		return "entry"
 	default:
 		return "line"
 	}
@@ -1197,6 +1261,9 @@ func rowNoun(s Screen) string {
 func plural(n int, noun string) string {
 	if n == 1 {
 		return "1 " + noun
+	}
+	if strings.HasSuffix(noun, "y") {
+		return fmt.Sprintf("%d %sies", n, strings.TrimSuffix(noun, "y"))
 	}
 	return fmt.Sprintf("%d %ss", n, noun)
 }

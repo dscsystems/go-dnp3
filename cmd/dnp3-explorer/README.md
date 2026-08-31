@@ -9,7 +9,7 @@ It answers the question you actually have when pointing at an unfamiliar device:
 ```console
 $ dnp3-explorer -demo
 dnp3-explorer  demo (in-process outstation)  ● connected      up 1:36  13.4/s  12:04:29
- 1 Overview  2 Points  3 Events  4 Log  5 Help                            20 points
+ 1 Overview  2 Points  3 Events  4 Log  5 Files  6 Help                   20 points
 ────────────────────────────────────────────────────────────────────────────────────
  POINT ▲          VALUE TREND        QUALITY                AGE TIMESTAMP
  BI 0                ON ▁▁▁▁████████ ONLINE                 0s  12:04:29.375
@@ -61,6 +61,7 @@ dnp3-explorer -demo
 | `-mouse` | true | enable the mouse |
 | `-inline` | off | draw inline instead of taking the whole terminal |
 | `-stale DUR` | 30s | fade points not updated for this long; `0` disables |
+| `-file-root PATH` | `/` | directory the Files screen opens on |
 
 **Controls**
 
@@ -70,7 +71,7 @@ dnp3-explorer -demo
 | `-no-confirm` | off | issue controls without asking first |
 | `-pulse MS` | 1000 | pulse duration for trip and close |
 
-## The five screens
+## The six screens
 
 **1 Overview** — the session and the device's health: connection state, uptime,
 message rate, the internal indications the outstation is asserting, and the task
@@ -85,7 +86,41 @@ distinct from what the value is now.
 
 **4 Log** — the activity log: what was sent, what came back, what failed.
 
-**5 Help** — the full key and mouse reference.
+**5 Files** — the device's filesystem, over group 70 file transfer. `enter`
+opens a directory or reads a file into the pane; text is shown as text and
+anything else as a hex dump, so a firmware image is readable as octets rather
+than as noise. `w` saves the selected file to local disk, `W` sends a local file
+up, and `D` deletes one.
+
+Sending and deleting always ask first, whatever `-no-confirm` says. A control is
+one message and another control reverses it; a file transfer takes minutes,
+holds the session while it runs, and replaces something the device may be
+running on.
+
+```
+ /logs                                                              2 entries
+ NAME                        SIZE      MODE      MODIFIED
+ events.log                 450 B      rw-r-----  2026-02-11 09:14
+ startup.log                1.2 KiB    rw-r-----  2026-02-10 22:03
+```
+
+**Devices do not agree on what their root is called.** Some answer to `/`,
+others only to `C:/`, `C:\` or `.`; a Windows-hosted outstation may want
+backslashes throughout. So `:` types a path, `-file-root` sets the one the
+screen opens on, and a listing that fails says which to try:
+
+```
+ /: dnp3: file transfer failed: file not found  —  press : to try another path…
+```
+
+Entry names are joined onto the current directory using whatever separator that
+directory already uses, so a device reached at `C:\LOGS` gets
+`C:\LOGS\events.log` rather than a path it has never heard of.
+
+In `-demo` the simulated device carries files of its own, so the screen has
+something to browse without hardware.
+
+**6 Help** — the full key and mouse reference.
 
 Points can be filtered on anything in the row and sorted by any column —
 including by quality, **worst first**, which is how you find the broken points
@@ -97,7 +132,7 @@ arrived under.
 
 | Key | Does |
 | --- | --- |
-| `1`–`5`, `tab` | switch screens |
+| `1`–`6`, `tab` | switch screens |
 | `↑` `↓`, `j` `k` | move the cursor; `pgup`/`pgdn` by a page |
 | `enter` | act on the selected row — control, setpoint, or inspector |
 | `i` / `p` | integrity poll / poll event classes 1, 2 and 3 |
@@ -113,6 +148,11 @@ arrived under.
 | `<` `>`, `r` | change and reverse the sort column |
 | `d` | the point inspector |
 | `f` | follow the newest row |
+| `:` | Files: type a directory to list |
+| `l` | Files: list the directory again |
+| `-`, `backspace` | Files: go up a directory |
+| `w` / `W` | Files: save to local disk / send a local file |
+| `D` | Files: delete the file on the device |
 | `x` | clear the current list |
 | `e` | export the current list as CSV |
 | `?` | the full reference |

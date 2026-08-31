@@ -109,7 +109,7 @@ func (m *Model) HandleMouse(e mouseEvent) (tea.Model, tea.Cmd) {
 
 	switch z.kind {
 	case zoneTab:
-		m.setScreen(Screen(z.n))
+		return m, m.setScreen(Screen(z.n))
 
 	case zoneButton:
 		if z.n < len(l.buttons) {
@@ -148,9 +148,9 @@ func (m *Model) handleWheel(e mouseEvent) (tea.Model, tea.Cmd) {
 	if e.y <= rowTabs {
 		switch e.button {
 		case tea.MouseWheelUp:
-			m.setScreen((m.screen + numScreens - 1) % numScreens)
+			return m, m.setScreen((m.screen + numScreens - 1) % numScreens)
 		case tea.MouseWheelDown:
-			m.setScreen((m.screen + 1) % numScreens)
+			return m, m.setScreen((m.screen + 1) % numScreens)
 		}
 		return m, nil
 	}

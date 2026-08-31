@@ -64,6 +64,10 @@ func (t *transfer) fail(err error) {
 	}
 }
 
+// supersede replaces whatever was recorded, for the one diagnosis that is
+// better than anything read out of the response body.
+func (t *transfer) supersede(err error) { t.err = err }
+
 // fileObject returns the group 70 object a response carries.
 func fileObject(frag app.Fragment, variation uint8) ([]byte, bool) {
 	for _, h := range frag.Objects {
@@ -94,9 +98,15 @@ func statusObject(frag app.Fragment) (objects.FileTransportStatus, bool) {
 
 // checkSupported turns "I do not implement this" into an error the caller can
 // classify, rather than leaving it as a response with nothing in it.
+//
+// It overrides whatever the response body produced. A device that does not
+// implement the function still sends a response, and reading its empty body
+// yields something like "the response carried no descriptor" — true, useless,
+// and the wrong diagnosis. The indication is the device's own statement about
+// the request as a whole, so it wins.
 func (t *transfer) checkSupported(iin app.IIN, step string) {
 	if iin.Has(app.IINNoFuncCodeSupport) {
-		t.fail(fmt.Errorf("master: file %s: %w", step, dnp3.ErrNotSupported))
+		t.supersede(fmt.Errorf("master: file %s: %w", step, dnp3.ErrNotSupported))
 	}
 }
 

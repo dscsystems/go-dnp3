@@ -66,6 +66,7 @@ func run() error {
 		noConfirm = flag.Bool("no-confirm", false, "issue controls without asking first")
 		pulse     = flag.Uint("pulse", 1000, "pulse `duration` in ms for trip and close controls")
 		stale     = flag.Duration("stale", 30*time.Second, "mark a point stale after this long without an update; 0 disables")
+		fileRoot  = flag.String("file-root", "/", "directory the Files screen opens on")
 	)
 	flag.Usage = usage
 	flag.Parse()
@@ -123,6 +124,7 @@ func run() error {
 	model.confirm = !*noConfirm
 	model.pulseMs = uint32(*pulse)
 	model.staleAge = *stale
+	model.files.dir = *fileRoot
 
 	p := tea.NewProgram(model, tea.WithContext(ctx))
 	if _, err := p.Run(); err != nil && !errors.Is(err, tea.ErrProgramKilled) {
@@ -206,7 +208,11 @@ func newDemoOutstation(log *slog.Logger) *demoOutstation {
 			BinaryOutputStatus: 2, AnalogOutputStatus: 2, OctetString: 2,
 			DefaultClass: dnp3.Class1,
 		},
-		Log: log,
+		// The demo device carries files as a real one does, so the Files
+		// screen has something to browse without hardware. They live in this
+		// process and nowhere else.
+		Files: outstation.FileConfig{Handler: newDemoFiles()},
+		Log:   log,
 	}, nil, d)
 
 	db := d.session.Database()
@@ -367,6 +373,7 @@ Interface:
   -mouse           enable the mouse                  (default true)
   -inline          draw inline instead of taking the whole terminal
   -stale DUR       fade points not updated for this long   (default 30s)
+  -file-root PATH  directory the Files screen opens on      (default /)
 
 Controls:
   -direct          direct operate instead of select-before-operate
@@ -374,7 +381,7 @@ Controls:
   -pulse MS        pulse duration for trip and close  (default 1000)
 
 Keys:
-  1-5 / tab        switch screens
+  1-6 / tab        switch screens
   up/down, j/k     move the cursor; pgup/pgdn by a page
   enter            act on the selected row (control, setpoint, inspector)
   i / p            integrity poll / poll event classes 1, 2 and 3
@@ -392,8 +399,21 @@ Keys:
   f                follow the newest row
   x                clear the current list
   e                export the current list as CSV
-  ? or 5           the full key and mouse reference
+  ? or 6           the full key and mouse reference
   q                quit
+
+Files (screen 5, group 70 file transfer):
+  :                type a directory to list
+  l                list the directory again
+  enter            open a directory, or read a file into the pane
+  - / backspace    go up a directory
+  w                save the selected file to local disk
+  W                send a local file to the device
+  D                delete the selected file on the device
+  esc              close the file being shown
+
+  Sending and deleting always ask first, whatever -no-confirm says:
+  a file transfer overwrites something a device may be running on.
 
 Mouse:
   click a tab, a row, a column heading or a footer button; click a
@@ -403,6 +423,8 @@ Mouse:
 Examples:
   dnp3-explorer -demo
   dnp3-explorer -host 10.0.0.5:20000 -remote 10 -poll 2s
+  dnp3-explorer -demo   then press 5 to browse the device's files
+  dnp3-explorer -host 192.168.0.65:20000 -remote 1 -local 2 -file-root C:/
 `)
 }
 

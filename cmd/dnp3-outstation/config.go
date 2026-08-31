@@ -30,6 +30,9 @@ type Config struct {
 	// Unsolicited configures pushing events without being polled.
 	Unsolicited UnsolicitedYAML `yaml:"unsolicited"`
 
+	// Files configures group 70 file transfer.
+	Files FilesYAML `yaml:"files"`
+
 	// MaxEvents caps the event buffer.
 	MaxEvents int `yaml:"max_events"`
 
@@ -44,6 +47,28 @@ type PointCounts struct {
 	FrozenCounter      int `yaml:"frozen_counter"`
 	BinaryOutputStatus int `yaml:"binary_output"`
 	AnalogOutputStatus int `yaml:"analog_output"`
+}
+
+// FilesYAML configures what a master may read and write over file transfer.
+//
+// The default is a small filesystem synthesised in memory, so the feature can
+// be exercised without preparing anything. Naming a directory serves that
+// directory instead — and only that directory: the handler is rooted, so a
+// master cannot climb out of it.
+type FilesYAML struct {
+	// Directory serves real files instead of the simulated ones. Empty uses
+	// the in-memory device.
+	Directory string `yaml:"directory"`
+	// ReadOnly refuses writes and deletes.
+	ReadOnly bool `yaml:"read_only"`
+	// Disabled turns file transfer off entirely, so the outstation answers
+	// the file function codes the way a device without them does. It is how a
+	// master's handling of an unsupported feature gets tested.
+	Disabled bool `yaml:"disabled"`
+	// BlockSize caps the transfer block. Zero uses the library's default.
+	BlockSize uint16 `yaml:"block_size"`
+	// Timeout closes a transfer that has gone quiet. Zero uses the default.
+	Timeout time.Duration `yaml:"timeout"`
 }
 
 // UnsolicitedYAML mirrors the library's unsolicited configuration.

@@ -436,6 +436,17 @@ func TestFileTransferNotConfigured(t *testing.T) {
 	if err := m.DeleteFile(ctx, "/anything"); !errors.Is(err, dnp3.ErrNotSupported) {
 		t.Errorf("delete error %v, want one wrapping dnp3.ErrNotSupported", err)
 	}
+
+	// The file-info path is the one that got this wrong against a real device:
+	// the response body is empty, reading it yields "carried no descriptor",
+	// and that true-but-useless message hid the outstation's own statement
+	// that it does not implement the function.
+	if _, err := m.FileInfo(ctx, "/anything"); !errors.Is(err, dnp3.ErrNotSupported) {
+		t.Errorf("file info error %v, want one wrapping dnp3.ErrNotSupported", err)
+	}
+	if _, err := m.ReadDirectory(ctx, "/"); !errors.Is(err, dnp3.ErrNotSupported) {
+		t.Errorf("directory error %v, want one wrapping dnp3.ErrNotSupported", err)
+	}
 }
 
 // TestFileTransferLeavesPollingWorking proves a transfer gives the session

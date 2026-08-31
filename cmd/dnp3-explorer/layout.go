@@ -85,6 +85,11 @@ const (
 	colSource
 	colLevel
 	colMessage
+	colFileName
+	colFileSize
+	colFilePerms
+	colFileTime
+	colPreview
 )
 
 // column is one table column, resolved to a concrete width by layoutColumns.
@@ -388,7 +393,13 @@ func (m *Model) layout() layout {
 			l.zones = append(l.zones, zone{rect: l.scroll, kind: zoneScroll})
 		}
 
-		l.cols = layoutColumns(columnsFor(m.screen), tableW)
+		cols := columnsFor(m.screen)
+		if m.screen == ScreenFiles && m.files.showingPreview() {
+			// A file being shown is one wide column of its own contents, not
+			// the columns a listing has.
+			cols = filePreviewColumns(m.previewTitle())
+		}
+		l.cols = layoutColumns(cols, tableW)
 
 		cx := l.table.x + 1
 		for i, c := range l.cols {

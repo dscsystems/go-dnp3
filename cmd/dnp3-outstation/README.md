@@ -178,6 +178,41 @@ which makes an event stream look artificial and hides ordering bugs.
 Validation rejects a duplicate index within a point type, an analog whose `max`
 is below its `min`, and an outstation whose address equals the master's.
 
+## File transfer
+
+The device serves files over group 70, so a master's file transfer has
+something to talk to. By default they are synthesised in memory and nothing on
+the host is exposed:
+
+```
+/device.txt        what the device is: vendor, model, firmware, addresses
+/points.txt        the point list, as -points prints it
+/config.yaml       the running configuration
+/logs/events.log   a commissioning log, long enough to span several blocks
+```
+
+They can be read, written, listed and deleted. A written file is kept in memory
+so the transfer can be verified end to end; it does not reconfigure the running
+simulation.
+
+| Flag | Does |
+| --- | --- |
+| `-files DIR` | serve a real directory instead, and nothing above it |
+| `-files-read-only` | refuse writes and deletes |
+| `-no-files` | disable file transfer, so the device reports it has none |
+
+`-files` is rooted with `os.Root`: a master asking for `../../etc/passwd`, or
+for a symlink pointing there, is refused by the operating system rather than by
+string matching. Serve the narrowest directory that does the job anyway.
+
+`-no-files` is worth its own run: a master that has never met a device without
+file transfer usually handles the refusal badly.
+
+```console
+$ dnp3-outstation -files ./device-files -files-read-only
+$ dnp3-outstation -no-files
+```
+
 ## Fault injection
 
 The injections matter as much as the simulation. These are the conditions a

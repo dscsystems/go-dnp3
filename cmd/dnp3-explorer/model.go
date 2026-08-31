@@ -12,6 +12,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,15 +41,16 @@ const (
 	ScreenPoints
 	ScreenEvents
 	ScreenLog
+	ScreenFiles
 	ScreenHelp
 	numScreens
 )
 
-var screenNames = [numScreens]string{"Overview", "Points", "Events", "Log", "Help"}
+var screenNames = [numScreens]string{"Overview", "Points", "Events", "Log", "Files", "Help"}
 
 // isTable reports whether the screen draws a scrollable list.
 func (s Screen) isTable() bool {
-	return s == ScreenPoints || s == ScreenEvents || s == ScreenLog
+	return s == ScreenPoints || s == ScreenEvents || s == ScreenLog || s == ScreenFiles
 }
 
 // follows reports whether the screen has a newest row worth pinning to.
@@ -138,6 +141,7 @@ type Model struct {
 
 	events []eventRow
 	logs   []logRow
+	files  filesState
 
 	// One cursor and scroll offset per screen, so moving between tabs does not
 	// lose the operator's place in a list they were reading.
@@ -197,6 +201,7 @@ func NewModel(conn *connection) *Model {
 	return &Model{
 		screen:    ScreenOverview,
 		conn:      conn,
+		files:     newFilesState(),
 		points:    map[pointKey]*pointState{},
 		follow:    true,
 		status:    "connecting",
@@ -270,6 +275,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.addLog(msg.level(), msg.text)
 		m.toast.show(msg.level(), msg.text, m.now)
 		return m, nil
+
+	case filesMsg:
+		m.applyFiles(msg)
+		return m, nil
+
+	case filePreviewMsg:
+		m.applyPreview(msg)
+		return m, nil
 	}
 	return m, nil
 }
@@ -314,6 +327,15 @@ func (m *Model) HandleKey(key string) (tea.Model, tea.Cmd) {
 		return m.handleModalKey(key)
 	}
 
+	// The Files screen claims a few keys before the global bindings see them,
+	// because a file browser needs meanings a table does not have: descending
+	// into a directory, going back up, closing a file it is showing.
+	if m.screen == ScreenFiles {
+		if model, cmd, handled := m.handleFilesKey(key); handled {
+			return model, cmd
+		}
+	}
+
 	switch key {
 	case "q", "ctrl+c":
 		m.quitting = true
@@ -330,13 +352,13 @@ func (m *Model) HandleKey(key string) (tea.Model, tea.Cmd) {
 
 	// ---- navigation ----
 	case "tab", "right":
-		m.setScreen((m.screen + 1) % numScreens)
+		return m, m.setScreen((m.screen + 1) % numScreens)
 	case "shift+tab", "left":
-		m.setScreen((m.screen + numScreens - 1) % numScreens)
-	case "1", "2", "3", "4", "5":
-		m.setScreen(Screen(key[0] - '1'))
+		return m, m.setScreen((m.screen + numScreens - 1) % numScreens)
+	case "1", "2", "3", "4", "5", "6":
+		return m, m.setScreen(Screen(key[0] - '1'))
 	case "?":
-		m.setScreen(ScreenHelp)
+		return m, m.setScreen(ScreenHelp)
 
 	case "up", "k":
 		m.moveCursor(-1)
@@ -413,10 +435,24 @@ func (m *Model) HandleKey(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) setScreen(s Screen) {
-	if s >= 0 && s < numScreens {
-		m.screen = s
+// setScreen switches tabs and returns whatever the new screen needs fetching
+// on arrival.
+//
+// The Files screen is the only one with anything to fetch. The others fill
+// themselves from what the session pushes at them, while a directory listing
+// happens only because somebody asked — and a file browser that opens on an
+// empty pane with an instruction to press a key is a file browser that looks
+// broken.
+func (m *Model) setScreen(s Screen) tea.Cmd {
+	if s < 0 || s >= numScreens {
+		return nil
 	}
+	m.screen = s
+
+	if s == ScreenFiles && !m.files.listed && !m.files.busy && m.conn.session() != nil {
+		return m.listDirectory(m.files.dir)
+	}
+	return nil
 }
 
 func (m *Model) pageSize() int {
@@ -819,6 +855,11 @@ func (m *Model) rowCount() int {
 		return len(m.visibleEvents())
 	case ScreenLog:
 		return len(m.visibleLogs())
+	case ScreenFiles:
+		if m.files.showingPreview() {
+			return len(m.files.preview)
+		}
+		return len(m.visibleFiles())
 	case ScreenHelp:
 		return len(m.helpLines(m.bodyRect()))
 	}
@@ -841,6 +882,9 @@ const (
 	promptAnalog
 	promptDeadband
 	promptRange
+	promptFileSave
+	promptFileUpload
+	promptFileDir
 )
 
 type promptState struct {
@@ -849,6 +893,9 @@ type promptState struct {
 	label  string
 	input  string
 	target pointKey
+	// file is the device path a file prompt is about, carried alongside the
+	// typed text because the cursor may move while the prompt is open.
+	file string
 }
 
 // closePrompt dismisses a prompt without submitting it.
@@ -930,6 +977,40 @@ func (m *Model) submitPrompt(p promptState) (tea.Model, tea.Cmd) {
 		}
 		m.addLog("info", fmt.Sprintf("range scan g%dv%d %d-%d", g, v, start, stop))
 		return m, m.conn.rangeScan(g, v, start, stop)
+
+	case promptFileSave:
+		local, err := localName(p.input, p.file)
+		if err != nil {
+			m.toast.show("error", err.Error(), m.now)
+			return m, nil
+		}
+		m.addLog("info", "saving "+p.file+" to "+local)
+		return m, m.saveFile(p.file, local)
+
+	case promptFileDir:
+		dir := strings.TrimSpace(p.input)
+		if dir == "" {
+			return m, nil
+		}
+		return m, m.listDirectory(dir)
+
+	case promptFileUpload:
+		local := strings.TrimSpace(p.input)
+		st, err := os.Stat(local)
+		if err != nil {
+			m.toast.show("error", err.Error(), m.now)
+			return m, nil
+		}
+		if st.IsDir() {
+			m.toast.show("error", local+" is a directory", m.now)
+			return m, nil
+		}
+		name := filepath.Base(local)
+		if err := printableName(name); err != nil {
+			m.toast.show("error", err.Error(), m.now)
+			return m, nil
+		}
+		return m.confirmUpload(local, m.files.remotePath(name), int(st.Size()))
 	}
 	return m, nil
 }

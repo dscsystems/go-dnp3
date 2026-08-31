@@ -1025,11 +1025,21 @@ $ dnp3-explorer -demo                        # a full outstation in-process, no 
 $ dnp3-explorer -host 10.0.0.5:20000 -remote 10 -poll 2s
 ```
 
-Five screens: session overview, the point table, the sequence of events, the
-activity log, and a key reference. Points can be filtered on anything in the
-row and sorted by value or by quality — worst first, which is how you find the
-broken points in a device with a thousand good ones. `e` exports what is on
-screen, after the filter and the sort, as CSV.
+Six screens: session overview, the point table, the sequence of events, the
+activity log, the device's files, and a key reference. Points can be filtered on
+anything in the row and sorted by value or by quality — worst first, which is how
+you find the broken points in a device with a thousand good ones. `e` exports
+what is on screen, after the filter and the sort, as CSV.
+
+The Files screen is group 70 file transfer: `enter` opens a directory or reads a
+file into the pane — text as text, anything else as a hex dump — `w` saves it to
+local disk, `W` sends a local file up, and `D` deletes one. Devices disagree
+about what their root is called, so `:` types a path and `-file-root` sets the
+one the screen opens on; a listing that fails says as much. Sending and deleting
+always ask first, whatever `-no-confirm` says: a control is one message and
+reversible by another, while a file transfer replaces something the device may
+be running on. In `-demo` the simulated device carries files of its own, so the
+screen has something to browse without hardware.
 
 Controls are deliberate: `enter` on an output opens a dialog naming exactly what
 will be sent, select-before-operate by default, with a confirmation before
@@ -1069,6 +1079,17 @@ $ dnp3-outstation --inject event-storm=500 --inject offline-every=30s
 
 The points behave like plant: a breaker stays open once tripped and takes time
 to travel, an analog ramps rather than jumping, and a control closes the loop.
+
+It also serves files, so a master's file transfer has something to talk to. By
+default they are synthesised in memory — the device's identification, its
+running configuration, a point list and an event log — and nothing on the host is
+exposed. `-files DIR` serves a real directory instead and nothing above it,
+`-files-read-only` refuses writes and deletes, and `-no-files` turns the feature
+off so a master can be tested against a device that reports it has none.
+
+```console
+$ dnp3-outstation -files ./device-files -files-read-only
+```
 
 ### `dnp3-decode` — offline frame decoder
 
