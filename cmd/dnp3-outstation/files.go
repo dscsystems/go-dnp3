@@ -83,10 +83,13 @@ func newMemFiles(cfg *Config, sim *Simulator, readOnly bool) *memFiles {
 // runs, and the addresses it answers on.
 func deviceFile(cfg *Config) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "vendor:        DSC Systems\n")
-	fmt.Fprintf(&b, "model:         dnp3-outstation (simulator)\n")
-	fmt.Fprintf(&b, "version:       %s\n", dnp3.Version)
-	fmt.Fprintf(&b, "serial:        SIM-0000-0001\n")
+	// The same identity the device answers a group 0 read with. A device whose
+	// file and whose attributes disagree about its own serial number is a
+	// device nobody can commission.
+	fmt.Fprintf(&b, "vendor:        %s\n", cfg.Device.Vendor)
+	fmt.Fprintf(&b, "model:         %s\n", cfg.Device.Model)
+	fmt.Fprintf(&b, "version:       %s\n", cfg.Device.Version)
+	fmt.Fprintf(&b, "serial:        %s\n", cfg.Device.Serial)
 	fmt.Fprintf(&b, "address:       %d\n", cfg.Address)
 	fmt.Fprintf(&b, "master:        %d\n", cfg.Master)
 	fmt.Fprintf(&b, "binary_inputs: %d\n", cfg.Points.Binary)

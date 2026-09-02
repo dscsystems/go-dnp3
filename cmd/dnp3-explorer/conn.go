@@ -63,6 +63,19 @@ func (c *connection) session() *master.Session {
 	return c.sess
 }
 
+// setUnsolicited records the operator's choice against the connection, so the
+// session a reconnect builds asks for the same thing this one did.
+//
+// It does not reconnect. Turning unsolicited reporting on or off is a request
+// to the outstation, not a change of link, and tearing the session down to
+// deliver it would lose everything on screen to say something the device can
+// be told directly.
+func (c *connection) setUnsolicited(on bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cur.Unsolicited = on
+}
+
 // current returns the parameters the live session was built with.
 func (c *connection) current() link {
 	c.mu.Lock()

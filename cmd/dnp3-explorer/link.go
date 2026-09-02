@@ -42,6 +42,22 @@ type link struct {
 	Remote  uint16
 	Timeout time.Duration
 	Poll    time.Duration
+
+	// Unsolicited asks the outstation to report events without being polled.
+	//
+	// It lives on the connection rather than in the model because the request
+	// is part of the master's startup sequence: an operator who turns it off
+	// means off, and a session rebuilt by a reconnect would otherwise enable it
+	// again the moment the link came back.
+	Unsolicited bool
+}
+
+// unsolMask is the classes to enable after the startup poll, or none.
+func unsolMask(on bool) dnp3.Class {
+	if on {
+		return dnp3.Class123
+	}
+	return 0
 }
 
 // target names the device for the header and the overview.
@@ -226,12 +242,16 @@ func (s *supervisor) start(p link) {
 
 	h := &handler{conn: s.conn}
 	sess := master.New(master.Config{
-		LocalAddr:             p.Local,
-		RemoteAddr:            p.Remote,
-		ResponseTimeout:       p.Timeout,
-		IntegrityOnStartup:    true,
+		LocalAddr:          p.Local,
+		RemoteAddr:         p.Remote,
+		ResponseTimeout:    p.Timeout,
+		IntegrityOnStartup: true,
+		// The standard's startup sequence stops unsolicited reporting before
+		// the integrity poll either way: an event stream racing the poll
+		// produces a picture that is neither. What the setting decides is
+		// whether it is turned back on afterwards.
 		DisableUnsolOnStartup: true,
-		UnsolClassMask:        dnp3.Class123,
+		UnsolClassMask:        unsolMask(p.Unsolicited),
 		KeepAlive:             30 * time.Second,
 		Log:                   s.log,
 	}, h)
@@ -312,4 +332,37 @@ func (s *supervisor) stopLocked() {
 	// Waiting is the point: the next session must not start until this one has
 	// stopped touching the model.
 	s.wg.Wait()
+}
+
+// unsolicitedAction says what a u or U keystroke is about to do.
+func unsolicitedAction(on bool) string {
+	if on {
+		return "enabling unsolicited reporting for classes 1, 2 and 3"
+	}
+	return "disabling unsolicited reporting"
+}
+
+// unsolicitedOn reports whether the session is asking the outstation to report
+// without being polled.
+func (m *Model) unsolicitedOn() bool { return m.conn.current().Unsolicited }
+
+// unsolicitedText is what the session panel says about it.
+//
+// "asked for" rather than "on": the master can ask, and only the outstation
+// decides whether anything arrives. A device that does not implement
+// unsolicited reporting is entitled to say nothing at all.
+func (m *Model) unsolicitedText() string {
+	if m.unsolicitedOn() {
+		return "asked for (classes 1, 2, 3)"
+	}
+	return "not asked for"
+}
+
+// unsolicitedButton toggles the setting: it offers the opposite of what is in
+// force, because a button that repeats the current state does nothing.
+func unsolicitedButton(on bool) button {
+	if on {
+		return button{label: "Unsol off", key: "U", on: true}
+	}
+	return button{label: "Unsol on", key: "u"}
 }

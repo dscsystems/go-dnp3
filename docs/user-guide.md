@@ -18,6 +18,7 @@ see the [device profile](device-profile.md).
 - [Events, classes and deadbands](#events-classes-and-deadbands)
 - [Controls](#controls)
 - [Time synchronisation](#time-synchronisation)
+- [Device attributes](#device-attributes)
 - [File transfer](#file-transfer)
 - [Testing without hardware](#testing-without-hardware)
 - [Decoding traffic](#decoding-traffic)
@@ -795,6 +796,57 @@ one. A device with a GPS clock should refuse.
 
 ---
 
+## Device attributes
+
+Group 0 is the device's own answer to "what are you?" — vendor, model, firmware
+version, serial number, and how many points of each kind it has. Reading them is
+one request, and it is the first thing worth doing against an unfamiliar panel:
+a drawing describes the device that was specified, and this describes the one
+that is actually on the end of the wire.
+
+```go
+attrs, err := m.ReadAttributes(ctx)     // the standard set, in one request
+for _, a := range attrs {
+	fmt.Println(a.Name(), a.Value())     // product name and model  RTU-9000
+}
+
+a, err := m.ReadAttribute(ctx, 0, 250)  // or one, by number
+```
+
+`dnp3.ErrNotSupported` means the device implements no attributes at all, which
+is worth telling apart from a device that implements them and has none to
+report.
+
+The variation *is* the attribute — 250 is the product name, not "the product
+name encoded one way" — so there is no codec table, and an attribute a vendor
+invented for itself decodes exactly as well as one the standard named. Its value
+carries its own type and length. This library prints names for the standard
+set's variations; anything else comes back numbered, because guessing what a
+vendor calls something it invented is worse than saying `attribute 17`.
+
+### Serving them from an outstation
+
+```go
+cfg.Attributes = []dnp3.Attribute{
+	objects.StringAttribute(252, "DSC Systems"),
+	objects.StringAttribute(250, "RTU-9000"),
+	objects.StringAttribute(242, "2.1.0"),
+	objects.StringAttribute(248, "SN-00042"),
+}
+```
+
+The point counts and the fragment sizes are **not** in that list: the outstation
+derives them from the same configuration that sizes its database. A count
+configured by hand is a count that drifts from the database it describes the
+first time somebody adds a point.
+
+An attribute the device does not have is refused with the object-unknown
+indication rather than answered with something else, and so is variation 255 —
+"which attributes do you have" — which is a distinct encoding this
+implementation does not have.
+
+---
+
 ## File transfer
 
 Group 70 moves files: configuration, firmware, event logs, and the directory
@@ -1031,6 +1083,21 @@ anything in the row and sorted by value or by quality — worst first, which is 
 you find the broken points in a device with a thousand good ones. `e` exports
 what is on screen, after the filter and the sort, as CSV.
 
+**Unsolicited reporting is asked for by default**, and `u` / `U` change that. The
+choice is part of the connection rather than a one-off request: the master's
+startup sequence asks again on every reconnect, so an operator who turned it off
+and then lost the link for a moment would otherwise find it back on. The Session
+panel says which it is — "asked for" rather than "on", because only the
+outstation decides whether anything actually arrives. `-unsolicited=false` starts
+with it off.
+
+The Overview's **Device** panel is group 0: the tool reads the device's
+attributes once, automatically, when the link comes up, and shows the nameplate
+— vendor, product, version, serial — with the point counts summarised onto one
+row. `a` reads them again. A device that implements none says so in the panel
+rather than in the log, and the Session panel carries the identity as a single
+line so it survives on a short terminal.
+
 The Files screen is group 70 file transfer: `enter` opens a directory or reads a
 file into the pane — text as text, anything else as a hex dump — `w` saves it to
 local disk, `W` sends a local file up, and `D` deletes one. Devices disagree
@@ -1079,6 +1146,17 @@ $ dnp3-outstation --inject event-storm=500 --inject offline-every=30s
 
 The points behave like plant: a breaker stays open once tripped and takes time
 to travel, an analog ramps rather than jumping, and a control closes the loop.
+
+Analog outputs are held rather than forgotten: writing a setpoint and reading
+it back is how an operator confirms one landed, so the simulator assumes what it
+is written, refuses values outside the configured range, and drives the analog
+input at the same index to stand in for the plant.
+
+It reports device attributes: a vendor, model, version and serial number that
+say plainly that this is a simulator, plus the point counts and fragment sizes
+derived from the plant it is simulating. The `device:` section of the YAML sets
+them by name rather than by number, and `-no-attributes` turns them off so a
+master can meet a device that reports none.
 
 It also serves files, so a master's file transfer has something to talk to. By
 default they are synthesised in memory — the device's identification, its

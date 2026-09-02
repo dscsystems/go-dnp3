@@ -23,9 +23,10 @@ type Config struct {
 	// plant, so a simple configuration need not repeat itself.
 	Points PointCounts `yaml:"points"`
 
-	Breakers []BreakerSim `yaml:"breakers"`
-	Analogs  []AnalogSim  `yaml:"analogs"`
-	Counters []CounterSim `yaml:"counters"`
+	Breakers  []BreakerSim  `yaml:"breakers"`
+	Analogs   []AnalogSim   `yaml:"analogs"`
+	Counters  []CounterSim  `yaml:"counters"`
+	Setpoints []SetpointSim `yaml:"setpoints"`
 
 	// Unsolicited configures pushing events without being polled.
 	Unsolicited UnsolicitedYAML `yaml:"unsolicited"`
@@ -33,10 +34,17 @@ type Config struct {
 	// Files configures group 70 file transfer.
 	Files FilesYAML `yaml:"files"`
 
+	// Device is what the outstation says about itself over group 0.
+	Device DeviceYAML `yaml:"device"`
+
 	// MaxEvents caps the event buffer.
 	MaxEvents int `yaml:"max_events"`
 
 	injection Injection
+
+	// attributes is Device resolved into what the library serves, filled in
+	// by Validate so a bad entry is reported once rather than at every read.
+	attributes []dnp3.Attribute
 }
 
 // PointCounts sizes each point type.
@@ -113,7 +121,18 @@ func DefaultConfig() *Config {
 			{Index: 0, Name: "Feeder 1 energy", PerSecond: 12, Class: 3},
 			{Index: 1, Name: "Feeder 2 energy", PerSecond: 8, Class: 3},
 		},
+		Setpoints: []SetpointSim{
+			// Bounded, so a master's out-of-range handling has something to run
+			// into. The ranges match the measurements at the same indexes, so
+			// every setpoint the device accepts is also one the simulated plant
+			// can reach — writing one moves the analog input with it.
+			{Index: 0, Name: "Voltage setpoint", Units: "kV",
+				Min: 10.8, Max: 11.2, Initial: 11.0, Class: 2},
+			{Index: 4, Name: "Tap position setpoint", Units: "",
+				Min: 7, Max: 9, Initial: 8, Class: 2},
+		},
 		Unsolicited: UnsolicitedYAML{HoldTime: 500 * time.Millisecond},
+		Device:      DefaultDevice(),
 		MaxEvents:   1000,
 	}
 }
@@ -126,8 +145,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	cfg := DefaultConfig()
 	// Start from a blank slate so a file that lists two analogs does not
-	// silently inherit the five defaults.
-	cfg.Breakers, cfg.Analogs, cfg.Counters = nil, nil, nil
+	// silently inherit the five defaults — and the same for setpoints, or a
+	// device configured with one output would answer for three.
+	cfg.Breakers, cfg.Analogs, cfg.Counters, cfg.Setpoints = nil, nil, nil, nil
 
 	dec := yaml.NewDecoder(strings.NewReader(string(data)))
 	dec.KnownFields(true) // a typo must fail, not be ignored
@@ -162,7 +182,13 @@ func (c *Config) derivePoints() {
 		c.Points.FrozenCounter = c.Points.Counter
 	}
 	if c.Points.AnalogOutputStatus == 0 {
+		// An outstation with analogs and no configured setpoints gets one
+		// output per input, which is the shape of most devices and what this
+		// tool did before setpoints could be described.
 		c.Points.AnalogOutputStatus = c.Points.Analog
+	}
+	for _, sp := range c.Setpoints {
+		c.Points.AnalogOutputStatus = need(c.Points.AnalogOutputStatus, sp.Index)
 	}
 }
 
@@ -173,6 +199,17 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("the outstation and master addresses are both %d; "+
 			"a station cannot poll itself", c.Address)
 	}
+
+	attrs, err := c.Device.attributes()
+	if err != nil {
+		return err
+	}
+	c.attributes = attrs
+
+	// Everything downstream — the simulator, the device attributes, the
+	// banner — reads the derived point counts, and Validate is the last thing
+	// that runs before any of it.
+	c.derivePoints()
 
 	seen := map[string]string{}
 	dup := func(kind string, index uint16, name string) error {
@@ -205,6 +242,19 @@ func (c *Config) Validate() error {
 			return err
 		}
 	}
+	for _, sp := range c.Setpoints {
+		if err := dup("analog output", sp.Index, sp.Name); err != nil {
+			return err
+		}
+		if sp.Max < sp.Min {
+			return fmt.Errorf("setpoint %d (%s) has max %v below min %v",
+				sp.Index, sp.Name, sp.Max, sp.Min)
+		}
+		if sp.bounded() && !sp.accepts(sp.Initial) {
+			return fmt.Errorf("setpoint %d (%s) starts at %v, outside its %v..%v range",
+				sp.Index, sp.Name, sp.Initial, sp.Min, sp.Max)
+		}
+	}
 	return nil
 }
 
@@ -224,7 +274,8 @@ func (c *Config) outstationConfig() outstation.Config {
 			AnalogOutputStatus: c.Points.AnalogOutputStatus,
 			DefaultClass:       dnp3.Class1,
 		},
-		Events: outstation.EventBufferConfig{MaxEvents: c.MaxEvents},
+		Events:     outstation.EventBufferConfig{MaxEvents: c.MaxEvents},
+		Attributes: c.attributes,
 		Unsolicited: outstation.UnsolicitedConfig{
 			Enabled:   c.Unsolicited.Enabled,
 			HoldTime:  c.Unsolicited.HoldTime,
@@ -249,6 +300,17 @@ func (c *Config) applyPointConfig(db *outstation.Database) {
 		default:
 			return dnp3.Class1
 		}
+	}
+
+	for _, sp := range c.Setpoints {
+		db.Configure(dnp3.TypeAnalogOutputStatus, sp.Index, outstation.PointConfig{
+			Class: class(sp.Class),
+			// A setpoint carries fractions as readily as a measurement does,
+			// and the default 32-bit integer variation would truncate the one
+			// the master just wrote — reporting back something it did not send.
+			StaticVariation: 3, // g40v3
+			EventVariation:  7, // g42v7, float with time
+		})
 	}
 
 	for _, b := range c.Breakers {

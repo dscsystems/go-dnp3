@@ -74,6 +74,7 @@ func run() error {
 		filesDir   = flag.String("files", "", "serve file transfer from `directory` instead of the simulated files")
 		filesRO    = flag.Bool("files-read-only", false, "refuse file writes and deletes")
 		noFiles    = flag.Bool("no-files", false, "disable file transfer entirely")
+		noAttrs    = flag.Bool("no-attributes", false, "report no device attributes")
 		verbose    = flag.Bool("v", false, "log protocol activity")
 		quiet      = flag.Bool("q", false, "log nothing but errors")
 		dump       = flag.Bool("points", false, "print the point list and exit")
@@ -112,6 +113,9 @@ func run() error {
 	}
 	if *noFiles {
 		cfg.Files.Disabled = true
+	}
+	if *noAttrs {
+		cfg.Device.Disabled = true
 	}
 
 	var err error
@@ -162,6 +166,7 @@ func run() error {
 	fmt.Print(sim.Describe())
 	fmt.Printf("\nOutstation %d listening for master %d on %s\n",
 		cfg.Address, cfg.Master, description)
+	fmt.Print(describeAttributes(cfg.attributes))
 	fmt.Printf("File transfer: %s\n", servingFiles)
 	if m, ok := files.Handler.(*memFiles); ok {
 		fmt.Print(m.Describe())
@@ -190,6 +195,12 @@ func run() error {
 // simulate advances the plant and writes it into the database.
 func simulate(ctx context.Context, sess *outstation.Session, sim *Simulator,
 	inject Injection, log *slog.Logger) {
+
+	// Prime the database before the first tick. A master that polls in the
+	// first half second would otherwise read zeros for everything — including
+	// the analog outputs, whose configured starting values are the one thing
+	// about them nobody can recover by waiting.
+	sim.Apply(sess, time.Now())
 
 	tick := time.NewTicker(time.Duration(tickSeconds * float64(time.Second)))
 	defer tick.Stop()
@@ -286,7 +297,10 @@ func (p *plantHandler) OperateCROB(index uint16, c dnp3.ControlRelayOutputBlock,
 }
 
 func (p *plantHandler) SelectAnalog(index uint16, v outstation.AnalogOutput) dnp3.CommandStatus {
-	return dnp3.CommandSuccess
+	// A select reports whether the operate would be accepted without moving
+	// anything, which for a setpoint means checking the value against the
+	// output's range.
+	return p.sim.wouldAcceptAnalog(index, v.Value)
 }
 
 func (p *plantHandler) OperateAnalog(index uint16, v outstation.AnalogOutput,
@@ -404,6 +418,9 @@ Device:
   -master N           override the master link address
   -unsolicited        push events without being polled
   -points             print the point list and exit
+
+Device attributes (group 0):
+  -no-attributes      report none, so a master meets a device without them
 
 File transfer (group 70; simulated files in memory by default):
   -files DIR          serve a real directory instead, and nothing above it

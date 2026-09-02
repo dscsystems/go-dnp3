@@ -178,6 +178,76 @@ which makes an event stream look artificial and hides ordering bugs.
 Validation rejects a duplicate index within a point type, an analog whose `max`
 is below its `min`, and an outstation whose address equals the master's.
 
+## Setpoints
+
+Analog outputs are held. A master writes one, the device assumes the value, and
+a read of the analog output status returns what was written — which is how an
+operator confirms a setpoint landed, and the half of the exchange a simulator
+that only accepted commands would leave untested.
+
+```console
+$ # after writing 11.05 to analog output 0
+AO 0 = 11.05     AI 0 = 11.05
+```
+
+Setpoints are bounded, so a master's out-of-range handling has something to run
+into: a value outside the range is refused with `OUT_OF_RANGE` and the old value
+stays put. A select is answered by asking the same question without applying
+it, which is what select-before-operate is for.
+
+An analog *input* at the same index follows the setpoint, standing in for the
+plant a real setpoint would drive — so a master can watch a measurement move in
+response to something it sent. It follows only where the setpoint is a value the
+measurement could have reached on its own.
+
+```yaml
+setpoints:
+  - {index: 0, name: "Voltage setpoint", units: kV, min: 10.8, max: 11.2, initial: 11.0, class: 2}
+  - {index: 4, name: "Tap position setpoint", min: 7, max: 9, initial: 8, class: 2}
+```
+
+Leaving `min` and `max` at zero takes any value, which is what an output nobody
+has characterised does. Every analog output in the database exists whether or
+not it is listed here: an unnamed one starts at zero, takes anything, and
+answers a poll like the rest.
+
+## Device attributes
+
+The outstation answers group 0 with a nameplate that says plainly what it is:
+
+```
+    252  manufacturer name            DSC Systems
+    250  product name and model       dnp3-outstation (simulator)
+    242  software version             0.1.0-dev
+    248  serial number                SIM-0000-0001
+    249  subset level and conformance 2
+```
+
+The point counts and fragment sizes come with them, derived from the same
+configuration that sizes the database, so they cannot drift from the points a
+master is about to poll.
+
+Set them by name in the `device:` section rather than by number:
+
+```yaml
+device:
+  vendor: "Acme Controls"
+  model: "RTU-9000"
+  version: "4.2.1"
+  serial: "AC-118822"
+  name: "FEEDER-1"
+  location: "Bay 3"
+  id_code: 118822
+  subset: 2
+  # Anything the section does not name, including a vendor's own sets:
+  attributes:
+    - {variation: 200, type: uint, value: "7"}
+    - {set: 1, variation: 210, type: string, value: "private"}
+```
+
+`-no-attributes` reports none, which is the other case a master needs to have
+met.
+
 ## File transfer
 
 The device serves files over group 70, so a master's file transfer has

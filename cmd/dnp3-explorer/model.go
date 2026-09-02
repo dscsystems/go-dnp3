@@ -142,6 +142,7 @@ type Model struct {
 	events []eventRow
 	logs   []logRow
 	files  filesState
+	device deviceState
 
 	// One cursor and scroll offset per screen, so moving between tabs does not
 	// lose the operator's place in a list they were reading.
@@ -264,8 +265,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.conn.wait()
 
 	case statusMsg:
-		m.applyStatus(msg)
-		return m, m.conn.wait()
+		cmd := m.applyStatus(msg)
+		return m, tea.Batch(m.conn.wait(), cmd)
+
+	case attributesMsg:
+		m.applyAttributes(msg)
+		return m, nil
+
+	case refreshAttributesMsg:
+		return m, m.readAttributes()
 
 	case logMsg:
 		m.addLog(msg.level, msg.text)
@@ -287,7 +295,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) applyStatus(msg statusMsg) {
+func (m *Model) applyStatus(msg statusMsg) tea.Cmd {
 	was := m.connected
 	m.status = msg.text
 	m.connected = msg.connected
@@ -300,12 +308,30 @@ func (m *Model) applyStatus(msg statusMsg) {
 	if !msg.connected && was {
 		m.linkSince = time.Time{}
 		m.addLog("warn", "link down")
+		// Whatever the last device said about itself is not true of the next
+		// one: an address answered by something else is exactly what a
+		// reconnect after a change of configuration means.
+		m.resetDevice()
 	}
 	if msg.err != "" && msg.err != m.lastErr {
 		m.lastErr = msg.err
 		m.addLog("error", msg.err)
 	}
+
+	// "What is this thing?" is the first question anyone has, so the answer is
+	// fetched without being asked for — once per connection, and after a pause
+	// so the master's own startup sequence goes first.
+	if m.connected && !m.device.asked {
+		m.device.asked = true
+		return tea.Tick(attributeRefreshDelay, func(time.Time) tea.Msg {
+			return refreshAttributesMsg{}
+		})
+	}
+	return nil
 }
+
+// refreshAttributesMsg is the delayed trigger for the automatic read.
+type refreshAttributesMsg struct{}
 
 // HandleKey applies one keystroke, named the way Bubble Tea names it.
 //
@@ -407,12 +433,14 @@ func (m *Model) HandleKey(key string) (tea.Model, tea.Cmd) {
 	case "T":
 		m.addLog("info", "time sync with delay measurement requested")
 		return m, m.conn.syncTime(true)
-	case "u":
-		m.addLog("info", "enabling unsolicited classes 1/2/3")
-		return m, m.conn.unsolicited(true)
-	case "U":
-		m.addLog("info", "disabling unsolicited classes 1/2/3")
-		return m, m.conn.unsolicited(false)
+	case "u", "U":
+		on := key == "u"
+		// Recorded as well as sent: the master's startup sequence asks again
+		// on every reconnect, and an operator who turned it off should not
+		// find it back on because a cable was re-seated.
+		m.conn.setUnsolicited(on)
+		m.addLog("info", unsolicitedAction(on))
+		return m, m.conn.unsolicited(on)
 	case "s":
 		m.prompt = promptState{active: true, kind: promptRange,
 			label: "scan range  group[.var] start-stop", input: ""}
@@ -425,6 +453,9 @@ func (m *Model) HandleKey(key string) (tea.Model, tea.Cmd) {
 		m.toast.show("info", "controls: "+controlMode(m.sbo), m.now)
 	case "e":
 		return m, m.export()
+	case "a":
+		m.addLog("info", "reading device attributes")
+		return m, m.readAttributes()
 
 	// ---- controls ----
 	case "c", "o":

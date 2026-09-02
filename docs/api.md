@@ -26,6 +26,11 @@ signatures may change before 1.0.
 | `decoder` | `…/decoder` | Structured protocol traces for logging and tooling |
 | `objects` | `…/objects` | Group/variation codecs and the object descriptor table |
 
+Groups 0 and 70 are hand-written rather than generated: their objects carry
+their own length, and group 0's variation is the attribute's identity rather
+than an encoding, so no table could hold a row per attribute a device might
+invent.
+
 `internal/link`, `internal/transport`, `internal/app` and `internal/stack` are
 not importable. See [Internal types in the public API](#internal-types-in-the-public-api)
 for the one place that leaks through.
@@ -378,6 +383,44 @@ func AnalogFitsIn32(v float64) bool
 ```
 
 An outstation needs these when a master requests a narrow variation.
+
+## Device attributes
+
+What a device says about itself, over group 0.
+
+```go
+type Attribute struct {
+    Set       uint8         // 0 is the standard set; a device may keep its own in others
+    Variation uint8         // *is* the attribute: 250 is the product name
+    Type      AttributeType // AttrVisibleString, AttrUnsignedInt, AttrFloat, AttrTime, …
+
+    Text   string           // exactly one carries the value, chosen by Type
+    Number int64
+    Real   float64
+    Octets []byte
+    Time   time.Time
+}
+
+func (a Attribute) Value() string  // the value as text, whatever its type
+func (a Attribute) Name() string   // "product name and model", or "attribute 17"
+
+func AttributeName(variation uint8) (string, bool)
+```
+
+The variation is the attribute's identity rather than an encoding, so there is
+no codec table and an attribute a device invented for itself decodes as well as
+one the standard named — its value carries its own type and length.
+
+Names are display only: nothing routes on one, and the table is transcribed
+from the standard rather than verified against a device.
+
+```go
+const (
+    AttrSetStandard uint8 = 0   // the standard's set
+    AttrAll         uint8 = 254 // read this to ask for every attribute
+    AttrList        uint8 = 255 // "which do you have?" — not implemented here
+)
+```
 
 ## File transfer
 
@@ -844,6 +887,27 @@ A multi-command request can partially succeed. `OK` is false unless every status
 is `CommandSuccess`, because treating a partial success as success would tell an
 operator a breaker operated when it did not.
 
+## Device attributes
+
+```go
+func (s *Session) ReadAttributes(ctx context.Context) ([]dnp3.Attribute, error)
+func (s *Session) ReadAttributeSet(ctx context.Context, set uint8) ([]dnp3.Attribute, error)
+func (s *Session) ReadAttribute(ctx context.Context, set, variation uint8) (dnp3.Attribute, error)
+```
+
+One request: the master asks for variation 254 and the outstation answers with
+one object header per attribute, the variation naming it and the range naming
+the set. A device that does not implement attributes comes back as
+`dnp3.ErrNotSupported`, which is worth distinguishing from one that implements
+them and has none.
+
+```go
+attrs, err := m.ReadAttributes(ctx)
+for _, a := range attrs {
+    fmt.Println(a.Name(), a.Value())
+}
+```
+
 ## File transfer
 
 ```go
@@ -1230,6 +1294,35 @@ Defaults, chosen as the widest lossless encoding for each type:
 The analog defaults are 32-bit **integer** variations. A point that needs
 fractions must be configured for a float variation — see
 [Variations and precision](user-guide.md#variations-and-precision).
+
+## Device attributes
+
+```go
+// Config
+Attributes []dnp3.Attribute
+```
+
+What the device says about itself. The point counts and the fragment sizes are
+**derived** from the same configuration and need not be listed — deriving them
+is what stops them drifting from the database they describe — and an entry here
+overrides a derived one.
+
+```go
+cfg.Attributes = []dnp3.Attribute{
+    objects.StringAttribute(252, "DSC Systems"),
+    objects.StringAttribute(250, "RTU-9000"),
+    objects.StringAttribute(248, "SN-00042"),
+}
+```
+
+The variations this package answers with are named in `outstation/attribute.go`
+— `AttrBinaryInputCount`, `AttrMaxRxFragment` and the rest — because a number
+used to answer a request is not a label.
+
+An attribute the device does not have is refused with OBJECT_UNKNOWN rather
+than answered with something else. Variation 255, "which attributes do you
+have", is a distinct encoding this implementation does not have and is refused
+the same way.
 
 ## File transfer
 

@@ -50,6 +50,45 @@ type AnalogSim struct {
 	phase float64
 }
 
+// SetpointSim is an analog output: a value a master writes and the device is
+// then expected to report back.
+//
+// A real device assumes what it is told. It holds the setpoint between polls,
+// and reading the analog output status is how a master confirms the write
+// landed — so a simulator that accepted a setpoint and reported nothing back
+// would exercise exactly half of what a master does with one.
+type SetpointSim struct {
+	Index uint16 `yaml:"index"`
+	Name  string `yaml:"name"`
+	Units string `yaml:"units"`
+	// Min and Max bound what the device accepts. Both left at zero takes any
+	// value, which is what an output nobody has characterised does.
+	Min float64 `yaml:"min"`
+	Max float64 `yaml:"max"`
+	// Initial is what the output reads before anything has been written to it.
+	Initial float64 `yaml:"initial"`
+	// Class is the event class the point's events go to.
+	Class int `yaml:"class"`
+
+	value   float64
+	written time.Time
+}
+
+// bounded reports whether this setpoint refuses values outside a range.
+func (s SetpointSim) bounded() bool { return s.Min != 0 || s.Max != 0 }
+
+// accepts reports whether a value is one this setpoint will take.
+//
+// A NaN is refused whatever the range: it compares false against every bound,
+// so a device that only checked the limits would accept it and then report a
+// value no master can do anything with.
+func (s SetpointSim) accepts(v float64) bool {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return false
+	}
+	return !s.bounded() || (v >= s.Min && v <= s.Max)
+}
+
 // BreakerSim describes a two-state device with a status input and a control
 // output.
 type BreakerSim struct {
@@ -106,6 +145,15 @@ type Simulator struct {
 	breakers []BreakerSim
 	counters []CounterSim
 
+	// setpoints is every analog output the device has, by point index.
+	// Outputs the configuration did not name are here too, holding whatever
+	// they were last written: a point that exists in the database has to
+	// answer a read of it.
+	setpoints map[uint16]*SetpointSim
+	// setpointOrder keeps the configured ones in a stable order for the
+	// listing, since a map has none.
+	setpointOrder []uint16
+
 	inject Injection
 	start  time.Time
 
@@ -132,6 +180,21 @@ func NewSimulator(cfg *Config) *Simulator {
 	}
 	for i := range s.breakers {
 		s.breakers[i].target = s.breakers[i].Closed
+	}
+
+	// Every analog output in the database gets a setpoint, whether or not the
+	// configuration named it. An output a master can write and then read back
+	// as nothing is worse than one that does not exist.
+	s.setpoints = make(map[uint16]*SetpointSim, cfg.Points.AnalogOutputStatus)
+	for _, sp := range cfg.Setpoints {
+		sp.value = sp.Initial
+		s.setpoints[sp.Index] = &sp
+		s.setpointOrder = append(s.setpointOrder, sp.Index)
+	}
+	for i := range uint16(cfg.Points.AnalogOutputStatus) {
+		if _, ok := s.setpoints[i]; !ok {
+			s.setpoints[i] = &SetpointSim{Index: i}
+		}
 	}
 	return s
 }
@@ -178,6 +241,19 @@ func (s *Simulator) Apply(sess *outstation.Session, now time.Time) {
 			})
 			db.UpdateBinaryOutputStatus(b.ControlIndex, dnp3.BinaryOutputStatus{
 				Value: b.Closed,
+				Flags: flags,
+				Time:  dnp3.Now(now),
+			})
+		}
+
+		// The analog outputs report what they were last written, which for one
+		// nobody has written is its initial value. They are refreshed every
+		// tick rather than only on a write, so a point that has never been
+		// commanded still answers a class 0 poll with a quality flag rather
+		// than with the nothing an untouched point would report.
+		for _, sp := range s.setpoints {
+			db.UpdateAnalogOutputStatus(sp.Index, dnp3.AnalogOutputStatus{
+				Value: sp.value,
 				Flags: flags,
 				Time:  dnp3.Now(now),
 			})
@@ -324,24 +400,74 @@ func (s *Simulator) wouldAccept(controlIndex uint16) dnp3.CommandStatus {
 	return dnp3.CommandNotSupported
 }
 
-// SetAnalog applies an analog output command to a simulated setpoint.
+// SetAnalog applies an analog output command.
+//
+// The device assumes the value: it holds what it was told and reports it back
+// on the analog output status point until something writes it again. That is
+// the half of a setpoint a master actually verifies — writing one and reading
+// it back is how an operator knows the write landed.
+//
+// An analog *input* at the same index follows the setpoint as well, which is
+// the simulator standing in for the plant a setpoint would drive: it lets a
+// master watch a measurement move in response to something it sent.
 func (s *Simulator) SetAnalog(index uint16, value float64) dnp3.CommandStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	sp, ok := s.setpoints[index]
+	if !ok {
+		return dnp3.CommandNotSupported
+	}
+	if !sp.accepts(value) {
+		return dnp3.CommandOutOfRange
+	}
+
+	sp.value = value
+	sp.written = time.Now()
 
 	for i := range s.analogs {
 		a := &s.analogs[i]
 		if a.Index != index {
 			continue
 		}
-		if value < a.Min || value > a.Max {
-			return dnp3.CommandOutOfRange
+		// The measurement follows only where the setpoint is a value it could
+		// have reached on its own.
+		if value >= a.Min && value <= a.Max {
+			a.Signal = SignalFixed
+			a.value = value
 		}
-		a.Signal = SignalFixed
-		a.value = value
+		break
+	}
+	return dnp3.CommandSuccess
+}
+
+// wouldAcceptAnalog reports whether a setpoint would be taken, without taking
+// it. A select must not move anything; it answers whether the operate would.
+func (s *Simulator) wouldAcceptAnalog(index uint16, value float64) dnp3.CommandStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sp, ok := s.setpoints[index]
+	switch {
+	case !ok:
+		return dnp3.CommandNotSupported
+	case !sp.accepts(value):
+		return dnp3.CommandOutOfRange
+	default:
 		return dnp3.CommandSuccess
 	}
-	return dnp3.CommandNotSupported
+}
+
+// Setpoint returns what an analog output currently holds.
+func (s *Simulator) Setpoint(index uint16) (float64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sp, ok := s.setpoints[index]
+	if !ok {
+		return 0, false
+	}
+	return sp.value, true
 }
 
 // Describe renders the simulated plant, so a user starting the tool can see
@@ -374,6 +500,21 @@ func (s *Simulator) Describe() string {
 		for _, a := range s.analogs {
 			b.WriteString("    AI " + pad(a.Index) + "  " + a.Name +
 				"  " + string(a.Signal) + " " + trim(a.Min) + ".." + trim(a.Max) + " " + a.Units + "\n")
+		}
+	}
+
+	if len(s.setpointOrder) > 0 {
+		b.WriteString("\n  Analog outputs (setpoints)\n")
+		for _, index := range s.setpointOrder {
+			sp := s.setpoints[index]
+			line := "    AO " + pad(sp.Index) + "  " + sp.Name + "  " + trim(sp.value)
+			if sp.Units != "" {
+				line += " " + sp.Units
+			}
+			if sp.bounded() {
+				line += "  [" + trim(sp.Min) + ".." + trim(sp.Max) + "]"
+			}
+			b.WriteString(line + "\n")
 		}
 	}
 

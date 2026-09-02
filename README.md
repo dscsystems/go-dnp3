@@ -121,8 +121,9 @@ drifts from the spec.
 Three things stay hand-written because the table cannot express them:
 bit-packed objects, whose unit of encoding is the range rather than the object;
 commands, whose fields map onto purpose-built structs rather than a measurement
-type; and group 70 file transfer, whose objects are variable length and carry
-their own size.
+type; and groups 0 and 70 — device attributes and file transfer — whose objects
+are variable length and carry their own size, and whose variations name a thing
+rather than an encoding.
 
 ## Scope
 

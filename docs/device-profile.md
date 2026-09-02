@@ -134,7 +134,7 @@ Sizes and field layouts for all of these are generated from
 | 80 | 1 | Yes | Yes | Internal indications |
 | 110, 111 | any length | Yes | Yes | Octet strings, static and event |
 | 112, 113 | — | Sizes only | — | Virtual terminal |
-| 0 | — | **No** | **No** | Device attributes |
+| 0 | any | Yes | Yes | Device attributes |
 | 70 | 2–8 | Yes | Yes | File transfer |
 | 85–87 | — | **No** | **No** | Datasets |
 | 120–121 | — | **No** | **No** | Secure Authentication v5 — use TLS |
@@ -219,9 +219,20 @@ Listed rather than left to be discovered:
 
 - **Self-address** (0xFFFC) is not implemented, so a master cannot address an
   outstation whose configured address it does not know.
-- **Device attributes** (group 0) are not implemented. The framing layer knows
-  they are variable-length and will walk past them without misparsing the rest
-  of a fragment.
+- **Device attributes** (group 0) are implemented for reading, in any set: a
+  master reads one attribute or all of them, and an outstation answers from
+  what the application configured plus the point counts and fragment sizes it
+  derives from its own database. What is not implemented: writing an attribute,
+  and the "list of attribute variations" request (variation 255), which is a
+  distinct encoding this implementation does not have and answers with
+  OBJECT_UNKNOWN rather than a guess.
+
+  The **names** this library prints for standard-set variations are transcribed
+  from the standard's table and have not been checked against another vendor's
+  device. They are display only — nothing routes on a name, the wire carries
+  numbers, and an entry that is wrong mislabels a row without affecting an
+  octet. The numbers an outstation **answers with** are a different matter and
+  are listed in `outstation/attribute.go`.
 - **File transfer** (group 70) is implemented for reading, writing, listing and
   deleting: `OPEN_FILE`, `CLOSE_FILE`, `DELETE_FILE`, `ABORT_FILE`,
   `GET_FILE_INFO`, and the `READ`/`WRITE` of group 70 variation 5 blocks.
@@ -243,4 +254,8 @@ Listed rather than left to be discovered:
 - The **TCP server** serves one master at a time.
 - **Analog output status points are not driven by analog output commands** in
   the library: a command reaches the `CommandHandler`, and it is the
-  application's job to reflect it back into the database.
+  application's job to reflect it back into the database. Whether a device
+  assumes a setpoint, holds it, or drives plant that only approaches it is a
+  property of the device, not of the protocol, so the library does not decide.
+  `cmd/dnp3-outstation` shows the usual answer — it holds what it was written
+  and reports it back on the status point.

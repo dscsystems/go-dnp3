@@ -288,7 +288,8 @@ func (m *Model) footerButtons() []button {
 			{label: "Integrity", key: "i"},
 			{label: "Poll", key: "p"},
 			{label: "Set clock", key: "t"},
-			{label: "Unsol on", key: "u"},
+			{label: "Device", key: "a"},
+			unsolicitedButton(m.unsolicitedOn()),
 			{label: "Restart", key: "R"},
 			{label: "Connection", key: "C"},
 			{label: "Help", key: "?"},
@@ -349,7 +350,7 @@ func (m *Model) viewHint(l layout) string {
 	case ScreenHelp:
 		hint = "↑↓ scroll · tab or 1-6 change screen · q quit"
 	default:
-		hint = "i integrity · p poll · t clock · u/U unsolicited · R restart · click anything · ? help"
+		hint = "i integrity · p poll · t clock · a device · u/U unsolicited · R restart · ? help"
 	}
 	return fit(stMuted.Render(" "+hint), m.width)
 }
@@ -365,17 +366,18 @@ func (m *Model) viewOverview(b rect) []string {
 	session := panelSpec{"Session", m.overviewSession()}
 	traffic := panelSpec{"Traffic", m.overviewTraffic()}
 	database := panelSpec{"Database", m.overviewDatabase()}
-	activity := panelSpec{"Recent activity", m.overviewActivity(b.h/2 - 2)}
+	device := panelSpec{"Device", m.overviewDevice(b.h/2 - 2)}
+	activity := panelSpec{"Recent activity", m.overviewActivity(b.h/3 - 2)}
 
 	// Two columns when the terminal can hold them without squeezing the
 	// numbers; one when it cannot.
 	if b.w >= 92 {
 		colW := (b.w - 1) / 2
-		left := stackPanels([]panelSpec{session, traffic}, colW, b.h)
+		left := stackPanels([]panelSpec{session, device, traffic}, colW, b.h)
 		right := stackPanels([]panelSpec{database, activity}, b.w-1-colW, b.h)
 		return joinColumns([][]string{left, right}, b.h)
 	}
-	return stackPanels([]panelSpec{session, database, traffic, activity}, b.w, b.h)
+	return stackPanels([]panelSpec{session, device, database, traffic, activity}, b.w, b.h)
 }
 
 // stackPanels gives each panel its natural height and lets the last one absorb
@@ -455,9 +457,14 @@ func (m *Model) overviewSession() []string {
 	lines := []string{
 		field("outstation", m.conn.target()),
 		field("transport", m.conn.transport()),
+		// What the device says it is, on the panel that is never squeezed off
+		// the screen: the address tells you where you are pointed, not what
+		// answered.
+		field("device", m.deviceSummary()),
 		field("state", state),
 		field("link up for", up),
 		field("indications", iinStyled(m.iin)),
+		field("unsolicited", m.unsolicitedText()),
 		field("controls", controlMode(m.sbo)),
 		field("confirmation", m.confirmText()),
 	}
@@ -1103,6 +1110,7 @@ func (m *Model) helpLines(b rect) []string {
 		{"b", "write an analog deadband"},
 		{"S", "select-before-operate or direct"},
 		{"C", "change the connection"},
+		{"a", "read the device attributes"},
 	}
 	files := [][2]string{
 		{":", "type a directory to list"},

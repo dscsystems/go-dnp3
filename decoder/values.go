@@ -74,6 +74,13 @@ func DecodeValues(h app.ObjectHeader, ctx objects.Context) ([]Value, bool) {
 		return decodeFileObjects(h)
 	}
 
+	// And device attributes, where the variation is the attribute's identity
+	// rather than an encoding: there is no row to look up because there is no
+	// table that could hold one per attribute a device might invent.
+	if h.Group == 0 {
+		return decodeAttributes(h)
+	}
+
 	d, ok := objects.Lookup(gv)
 	if !ok {
 		return nil, false

@@ -39,6 +39,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/dscsystems/go-dnp3"
 	"github.com/dscsystems/go-dnp3/channel"
+	"github.com/dscsystems/go-dnp3/objects"
 	"github.com/dscsystems/go-dnp3/outstation"
 )
 
@@ -59,6 +60,7 @@ func run() error {
 		serial  = flag.String("serial", "", "use a serial `port` instead of TCP")
 		baud    = flag.Int("baud", 9600, "serial line `rate`")
 		timeout = flag.Duration("timeout", 5*time.Second, "response `timeout`")
+		unsol   = flag.Bool("unsolicited", true, "ask the outstation to report events without being polled")
 
 		mouse     = flag.Bool("mouse", true, "enable the mouse")
 		inline    = flag.Bool("inline", false, "draw inline instead of taking the whole terminal")
@@ -94,6 +96,11 @@ func run() error {
 		Remote:  uint16(*remote),
 		Timeout: *timeout,
 		Poll:    *poll,
+		// On by default: an unfamiliar device is more informative when it
+		// reports what changed as it changes, and a master that never asks
+		// cannot tell a device that does not support unsolicited reporting
+		// from one that was never asked to use it.
+		Unsolicited: *unsol,
 	}
 	if err := start.validate(); err != nil {
 		return err
@@ -212,7 +219,24 @@ func newDemoOutstation(log *slog.Logger) *demoOutstation {
 		// screen has something to browse without hardware. They live in this
 		// process and nowhere else.
 		Files: outstation.FileConfig{Handler: newDemoFiles()},
-		Log:   log,
+		// Unsolicited reporting is on at the device level so the setting above
+		// has something to demonstrate: with it off, u and U would be two keys
+		// that appear to do nothing.
+		Unsolicited: outstation.UnsolicitedConfig{
+			Enabled:  true,
+			HoldTime: 500 * time.Millisecond,
+		},
+		// And it says what it is, so the Device panel has something to show.
+		// The point counts come from the database above without being listed.
+		Attributes: []dnp3.Attribute{
+			objects.StringAttribute(attrVendorName, "DSC Systems"),
+			objects.StringAttribute(attrProductName, "GO-DNP3 DEMO RTU"),
+			objects.StringAttribute(attrSoftwareVersion, "1.0.0-demo"),
+			objects.StringAttribute(attrSerialNumber, "DEMO-0001"),
+			objects.StringAttribute(245, "in-process"),
+			objects.UintAttribute(249, 2),
+		},
+		Log: log,
 	}, nil, d)
 
 	db := d.session.Database()
@@ -367,6 +391,7 @@ Connection (all of it editable while running, with C):
   -remote N        outstation link address           (default 10)
   -poll DUR        event class poll interval         (default 5s, 0 disables)
   -timeout DUR     response timeout                  (default 5s)
+  -unsolicited     ask for unsolicited reporting     (default true)
   -demo            run a simulated outstation in-process
 
 Interface:
@@ -387,9 +412,10 @@ Keys:
   i / p            integrity poll / poll event classes 1, 2 and 3
   s                range scan a group
   t / T            set the outstation clock (T measures the link delay)
-  u / U            enable / disable unsolicited reporting
+  u / U            enable / disable unsolicited reporting (kept across reconnects)
   R                restart the outstation
   c / o            close / open the selected binary output
+  a                read the device attributes (group 0)
   b                write a deadband to the selected analog input
   S                switch between select-before-operate and direct operate
   C                edit the connection and reconnect in place

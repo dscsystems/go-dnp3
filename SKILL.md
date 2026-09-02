@@ -294,6 +294,27 @@ A refusal wraps `dnp3.ErrFileTransfer` and names the status; a device without
 file transfer gives `dnp3.ErrNotSupported`. **A transfer holds the session for
 its whole duration** — polls wait behind it.
 
+**Read what a device is** (group 0)
+
+```go
+attrs, err := m.ReadAttributes(ctx)          // the standard set
+a, err := m.ReadAttribute(ctx, 0, 250)       // one, by number
+for _, a := range attrs {
+	fmt.Println(a.Name(), a.Value())          // "product name and model RTU-9000"
+}
+
+// Outstation: configure the nameplate; the point counts and fragment sizes
+// are derived from the database and need not be listed.
+cfg.Attributes = []dnp3.Attribute{
+	objects.StringAttribute(252, "Vendor"),
+	objects.StringAttribute(250, "Model"),
+}
+```
+
+`dnp3.ErrNotSupported` means the device has no attributes. The variation *is*
+the attribute — 250 is the product name, not "the product name encoded one way"
+— so there is no codec table and a device's own attributes decode fine.
+
 **Decode octets**
 
 ```go
@@ -319,9 +340,10 @@ unimplemented rather than writing a call that will not compile.
   outstation answers those function codes; the master API does not send them.
   (`Database.FreezeCounters()` and `Database.AssignClass()` are outstation-local
   calls, not protocol requests.)
-- **No device attributes** (group 0), **no datasets** (groups 85–87), **no
-  `FREEZE_AT_TIME`**, **no Secure Authentication v5** (out of scope — use TLS),
-  **no self-address** (0xFFFC).
+- **No datasets** (groups 85–87), **no `FREEZE_AT_TIME`**, **no Secure
+  Authentication v5** (out of scope — use TLS), **no self-address** (0xFFFC).
+- **Device attributes are implemented** (group 0) for reading. No writing, and
+  no variation 255 "list of attributes" request.
 - **File transfer is implemented** (group 70) — read, write, list, delete — but
   there is **no `AUTHENTICATE_FILE` handshake**, and an outstation serves **one
   transfer at a time**.

@@ -126,6 +126,18 @@ func objectDataLen(sizer ObjectSizer, h ObjectHeader, buf []byte, carriesData bo
 		return 0, nil
 	}
 
+	// A group 0 device attribute carries its own data type and length, so it
+	// is walkable without a size table — which is just as well, because its
+	// variation is not an encoding at all but the number of the attribute
+	// being reported, and no table could enumerate what a device might say
+	// about itself.
+	//
+	// Unlike the free-format case above this does depend on the function code:
+	// in a read request the same header names an attribute and stops there.
+	if h.Group == 0 {
+		return walkAttributes(h.Range.Count, buf)
+	}
+
 	bits, ok := sizer.SizeBits(h.Group, h.Variation)
 	if !ok {
 		return 0, fmt.Errorf("%w: g%dv%d", ErrUnknownObject, h.Group, h.Variation)
@@ -154,6 +166,24 @@ func objectDataLen(sizer ObjectSizer, h ObjectHeader, buf []byte, carriesData bo
 
 	total := uint64(h.Range.Count) * (uint64(prefixOctets) + uint64(bits)/8)
 	return checkFits(total, buf)
+}
+
+// walkAttributes advances over count device attributes, each of which is a
+// one-octet data type, a one-octet length, and that many octets of value.
+func walkAttributes(count uint32, buf []byte) (int, error) {
+	const header = 2 // the data type and the length
+	off := 0
+	for range count {
+		if off+header > len(buf) {
+			return 0, ErrTruncated
+		}
+		size := int(buf[off+1])
+		if off+header+size > len(buf) {
+			return 0, ErrTruncated
+		}
+		off += header + size
+	}
+	return off, nil
 }
 
 // walkSizePrefixed advances over count objects, each introduced by its own

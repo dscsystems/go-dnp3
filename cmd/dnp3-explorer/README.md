@@ -61,6 +61,7 @@ dnp3-explorer -demo
 | `-mouse` | true | enable the mouse |
 | `-inline` | off | draw inline instead of taking the whole terminal |
 | `-stale DUR` | 30s | fade points not updated for this long; `0` disables |
+| `-unsolicited` | on | ask the outstation to report events without being polled |
 | `-file-root PATH` | `/` | directory the Files screen opens on |
 
 **Controls**
@@ -76,6 +77,13 @@ dnp3-explorer -demo
 **1 Overview** — the session and the device's health: connection state, uptime,
 message rate, the internal indications the outstation is asserting, and the task
 counters.
+
+The Overview also carries a **Device** panel: what the outstation says it is
+over group 0, read once automatically when the link comes up and again with
+`a`. Vendor, product, version and serial one to a row, then the point counts
+summarised onto one. A device implementing no attributes says so there rather
+than in the log — and the Session panel keeps the identity on one line, so it
+survives a terminal too short for the panel.
 
 **2 Points** — the point table. Every point the device has reported, with its
 value, a sparkline trend, the named quality flags, how long since it last
@@ -138,7 +146,7 @@ arrived under.
 | `i` / `p` | integrity poll / poll event classes 1, 2 and 3 |
 | `s` | range scan a group |
 | `t` / `T` | set the outstation clock (`T` measures the link delay first) |
-| `u` / `U` | enable / disable unsolicited reporting |
+| `u` / `U` | enable / disable unsolicited reporting; the choice is kept across reconnects |
 | `R` | restart the outstation |
 | `c` / `o` | close / open the selected binary output |
 | `b` | write a deadband to the selected analog input |
@@ -148,6 +156,7 @@ arrived under.
 | `<` `>`, `r` | change and reverse the sort column |
 | `d` | the point inspector |
 | `f` | follow the newest row |
+| `a` | read the device attributes |
 | `:` | Files: type a directory to list |
 | `l` | Files: list the directory again |
 | `-`, `backspace` | Files: go up a directory |

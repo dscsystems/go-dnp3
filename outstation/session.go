@@ -48,6 +48,12 @@ type Config struct {
 	// answers the file function codes the way a device that has no files does.
 	Files FileConfig
 
+	// Attributes are what the device says about itself over group 0: vendor,
+	// model, serial number, firmware version. The point counts and fragment
+	// sizes are derived from this configuration and need not be listed; an
+	// entry here overrides a derived one.
+	Attributes []dnp3.Attribute
+
 	// UseLinkConfirms enables link-layer confirmation, normally off over TCP.
 	UseLinkConfirms bool
 	// LinkRetries is how many times a confirmed frame is retransmitted.
@@ -158,6 +164,10 @@ type Session struct {
 	// linkDeadline is when an unacknowledged link frame should be retried.
 	linkDeadline time.Time
 
+	// attributes is what this device answers a group 0 read with, assembled
+	// once at construction because neither half of it changes.
+	attributes attributeStore
+
 	// file is the transfer in flight, and handleSeq issues the handles. A
 	// handle is never reused within a session, so a master holding a stale one
 	// is told it is invalid rather than being given somebody else's file.
@@ -193,6 +203,9 @@ type Stats struct {
 	// File transfer. FileErrors counts the operations refused with a status
 	// code — a missing file, a denied write — which is a configuration
 	// problem far more often than a protocol one.
+	// AttributesRead counts group 0 reads answered.
+	AttributesRead uint64
+
 	FilesOpened        uint64
 	FileBlocksSent     uint64
 	FileBlocksReceived uint64
@@ -217,11 +230,12 @@ func New(cfg Config, appl Application, cmds CommandHandler) *Session {
 
 	events := NewEventBuffer(cfg.Events)
 	return &Session{
-		cfg:  cfg,
-		appl: appl,
-		cmds: cmds,
-		db:   NewDatabase(cfg.Database, events),
-		log:  cfg.Log.With("role", "outstation", "addr", cfg.LocalAddr),
+		attributes: buildAttributes(cfg),
+		cfg:        cfg,
+		appl:       appl,
+		cmds:       cmds,
+		db:         NewDatabase(cfg.Database, events),
+		log:        cfg.Log.With("role", "outstation", "addr", cfg.LocalAddr),
 		// A fresh outstation reports a restart until the master clears it.
 		// Suppressing that would deny the master the one signal that says
 		// "my event history is gone, re-poll everything".
@@ -555,6 +569,11 @@ func (s *Session) onRead(w io.Writer, r stack.Received, frag app.Fragment) error
 	// not for measurements. It cannot be both: the object header says which.
 	if h, ok := fileObject(frag); ok {
 		return s.onFileRead(w, r, frag, h)
+	}
+	// Group 0 is the same story: an attribute read asks what the device is,
+	// not what it is measuring.
+	if h, ok := attributeHeader(frag); ok {
+		return s.onAttributeRead(w, r, frag, h)
 	}
 
 	ctx := objects.Context{Synchronized: s.synchronized}
