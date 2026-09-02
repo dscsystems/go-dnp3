@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net"
 	"os"
@@ -100,10 +101,24 @@ func bindAndWait(t *testing.T, server channel.Channel, _ func()) string {
 	t.Helper()
 
 	ctx, cancel := context.WithCancel(t.Context())
+
+	// The accept has to have finished before this returns, not merely been
+	// cancelled. Cancelling asks it to stop, and the deadline that actually
+	// stops it is set by another goroutine; until that has run, this accept is
+	// still first in line for the next connection — and the next connection is
+	// the session's, which this would take and drop on the floor.
+	//
+	// The session would then wait to accept a client that already believes it
+	// is connected, and the test would fail two response timeouts later with
+	// nothing in the log to say why.
+	accepted := make(chan io.Closer, 1)
 	go func() {
-		// This Connect blocks accepting; cancelling it releases the listener
-		// for the real session without closing it.
-		_, _ = server.Connect(ctx)
+		conn, err := server.Connect(ctx)
+		if err != nil {
+			accepted <- nil
+			return
+		}
+		accepted <- conn
 	}()
 
 	var addr string
@@ -115,6 +130,10 @@ func bindAndWait(t *testing.T, server channel.Channel, _ func()) string {
 		time.Sleep(5 * time.Millisecond)
 	}
 	cancel()
+
+	if conn := <-accepted; conn != nil {
+		_ = conn.Close()
+	}
 	if addr == "" {
 		t.Fatal("the server never bound")
 	}

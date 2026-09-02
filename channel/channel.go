@@ -252,6 +252,20 @@ func acceptContext(ctx context.Context, l *net.TCPListener) (net.Conn, error) {
 		}
 		return nil, err
 	}
+
+	// A connection that arrived while the caller was giving up. Cancellation
+	// and the handshake race each other, and the deadline that interrupts an
+	// accept is set by another goroutine, so there is a window in which both
+	// happen.
+	//
+	// Handing it back would give it to a caller that has stopped waiting for
+	// it and will not close it, leaving a peer that believes it is connected
+	// talking to nothing — which on a listener serving one session at a time
+	// is a device that never gets a second chance to be accepted.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		_ = conn.Close()
+		return nil, ctxErr
+	}
 	return conn, nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -305,4 +306,86 @@ func TestChannelStrings(t *testing.T) {
 	if TCPServerAddr(TCPClient("x:1", NoRetry)) != nil {
 		t.Error("TCPServerAddr should return nil for a non-server channel")
 	}
+}
+
+// TestAcceptCancelledDoesNotSwallowAConnection covers the window where a
+// cancellation and an inbound connection race.
+//
+// A server channel serves one session at a time, so a connection the channel
+// accepts and then discards is not merely leaked: the client believes it is
+// connected, the session is still waiting to accept, and neither notices until
+// something times out. A cancelled accept therefore has to leave the queue
+// alone, and close anything it took on the way out.
+func TestAcceptCancelledDoesNotSwallowAConnection(t *testing.T) {
+	server := TCPServer("127.0.0.1:0")
+	t.Cleanup(func() { _ = server.Close() })
+
+	// Bind the listener and find its address by completing one accept.
+	addr := bindServer(t, server)
+
+	// A client waiting in the accept queue.
+	client, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	// A connect whose context is already done must not consume it.
+	done, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := server.Connect(done); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled connect returned %v, want context.Canceled", err)
+	}
+
+	// The queued client is still there for the session that comes next.
+	accepted, err := server.Connect(t.Context())
+	if err != nil {
+		t.Fatalf("the queued connection was swallowed: %v", err)
+	}
+	defer accepted.Close()
+
+	// And it is the same connection, not a new one: what goes in comes out.
+	go func() { _, _ = client.Write([]byte("hello")) }()
+
+	buf := make([]byte, 5)
+	if _, err := io.ReadFull(accepted, buf); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(buf) != "hello" {
+		t.Errorf("read %q, want hello", buf)
+	}
+}
+
+// bindServer forces a lazy listener to bind and returns its address, waiting
+// for the accept it used to do so to finish.
+func bindServer(t *testing.T, server Channel) string {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	accepted := make(chan io.Closer, 1)
+	go func() {
+		conn, err := server.Connect(ctx)
+		if err != nil {
+			accepted <- nil
+			return
+		}
+		accepted <- conn
+	}()
+
+	var addr string
+	for range 400 {
+		if a := ServerAddr(server); a != nil {
+			addr = a.String()
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	if conn := <-accepted; conn != nil {
+		_ = conn.Close()
+	}
+	if addr == "" {
+		t.Fatal("the server never bound")
+	}
+	return addr
 }
