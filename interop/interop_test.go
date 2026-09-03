@@ -13,7 +13,7 @@
 //	make interop         # run these tests
 //	make interop-reverse # drive opendnp3 against our outstation
 //
-// opendnp3 is the de-facto reference implementation, 
+// opendnp3 is the de-facto reference implementation,
 // archived at end of life in September 2022 and pinned here to
 // its final release.
 package interop
