@@ -37,6 +37,15 @@
 // overlapping. Three masters polling a slow line every second will spend their
 // time waiting for each other — pace the polls, and give the line the time it
 // needs.
+//
+// That example works when one piece of code owns the whole line and knows to
+// build the Bus once. When two independent parts of a program each reach for
+// the same device — a master here, a simulator there, neither aware of the
+// other — each doing the right thing on its own reproduces the very problem
+// multidrop exists to solve: two Buses, two opens, the second refused by the
+// OS. A [Registry] is where such callers meet: each asks it for a bus by the
+// channel it would open, and a caller asking for one that is already open
+// gets the existing bus back instead of a second one.
 package multidrop
 
 import (

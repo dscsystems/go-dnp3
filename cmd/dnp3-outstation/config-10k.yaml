@@ -1,0 +1,65 @@
+# A field-sized outstation: 10,000 points, for load-testing a master or the
+# explorer against something closer to a real substation gateway than the
+# dozen-point default.
+#
+# Run it with:
+#   go run ./cmd/dnp3-outstation -config cmd/dnp3-outstation/config-10k.yaml
+#
+# points: sizes the database directly, so the bulk of the 10,000 need no
+# per-point entry. A handful are named below anyway — enough to see real
+# names and real signals in the point list and in the explorer, at indexes
+# low enough to sit inside the bulk counts they share with.
+
+address: 10
+master: 1
+
+points:
+  binary: 6000          # BI   0..5999
+  analog: 2500           # AI   0..2499
+  counter: 500            # CT   0..499
+  binary_output: 700     # BO   0..699
+  analog_output: 300     # AO   0..299
+  # frozen_counter left at 0: it defaults to the counter count.
+# 6000 + 2500 + 500 + 700 + 300 = 10000
+
+breakers:
+  - {status_index: 0, control_index: 0, name: "Feeder 1 breaker", closed: true,
+     travel_time: 200ms, class: 1}
+  - {status_index: 1, control_index: 1, name: "Feeder 2 breaker", closed: true,
+     travel_time: 200ms, class: 1}
+  - {status_index: 2, control_index: 2, name: "Bus tie", closed: false,
+     travel_time: 500ms, class: 1}
+
+analogs:
+  - {index: 0, name: "Bus voltage", units: kV, signal: sine,
+     min: 10.8, max: 11.2, period: 45s, noise: 0.01, deadband: 0.05, class: 2}
+  - {index: 1, name: "Feeder 1 current", units: A, signal: walk,
+     min: 0, max: 400, noise: 0.005, deadband: 5, class: 2}
+  - {index: 2, name: "Feeder 2 current", units: A, signal: walk,
+     min: 0, max: 400, noise: 0.005, deadband: 5, class: 2}
+  - {index: 3, name: "Transformer temperature", units: degC, signal: ramp,
+     min: 35, max: 85, period: 120s, deadband: 1, class: 3}
+
+counters:
+  - {index: 0, name: "Feeder 1 energy", per_second: 12, class: 3}
+  - {index: 1, name: "Feeder 2 energy", per_second: 8, class: 3}
+
+setpoints:
+  - {index: 0, name: "Voltage setpoint", units: kV,
+     min: 10.8, max: 11.2, initial: 11.0, class: 2}
+
+# Group 0: what the device says about itself.
+device:
+  vendor: "DSC Systems"
+  model: "dnp3-outstation (10k load test)"
+  version: "1.0.0"
+  serial: "LOAD-0010000"
+  name: "LOADTEST-RTU"
+  location: "load test rig"
+  subset: 2
+
+unsolicited:
+  enabled: true
+  hold_time: 500ms
+
+max_events: 5000

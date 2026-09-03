@@ -275,6 +275,12 @@ The addresses must match the session's own config. The bus routes inbound frames
 by address, serialises transmission, and holds the half-duplex line for one
 master's exchange at a time. It does not pace the polls — that is still yours.
 
+If two independent parts of a program might reach for the same device without
+either knowing it, use `multidrop.Registry` instead of building the `Bus`
+directly — `reg.Open(ch, cfg)` returns the existing bus for an equivalent
+channel (same device, same baud/host/port) rather than opening it twice, and
+`reg.Release(bus)` closes it only once every caller that opened it has let go.
+
 **Transfer files** (group 70)
 
 ```go

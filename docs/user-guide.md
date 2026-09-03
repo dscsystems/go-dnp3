@@ -551,6 +551,38 @@ The same applies to a terminal server — several RTUs behind one TCP connection
 to a serial gateway is the same line with a longer wire. Give the bus a
 `channel.TCPClient` instead of a serial port.
 
+#### When two callers don't know about each other
+
+The example above works because one piece of code builds the `Bus` once and
+hands out channels from it. That breaks down when two independent parts of a
+program each reach for the same device without knowing the other exists — a
+poller in one package, a diagnostic tool in another, both configured with
+`/dev/ttyUSB0` — because each doing the right thing on its own reproduces the
+exact problem multidrop solves, one layer up: two `Bus`es, two opens, the
+second refused.
+
+`multidrop.Registry` is where such callers meet:
+
+```go
+reg := multidrop.NewRegistry() // one per process, shared by whoever needs it
+
+port := channel.SerialChannel(channel.SerialConfig{Device: "/dev/ttyUSB0", Baud: 9600},
+	channel.DefaultRetry)
+bus := reg.Open(port, multidrop.Config{})
+defer reg.Release(bus)
+
+ch, err := bus.Add(multidrop.Station{LocalAddr: 1, RemoteAddr: addr, Master: true})
+```
+
+Two calls to `reg.Open` for channels describing the same device — same serial
+port at the same baud, same host and port for TCP — get the same `Bus` back;
+the second caller's own channel object, now redundant, is closed automatically.
+Neither caller has to know the other called `Open` first. Release the bus
+through the registry rather than calling `bus.Close()` directly: the registry
+counts how many callers are using it and only closes the line once the last one
+lets go, so an early `Close()` from one caller cannot drop the line out from
+under another still polling on it.
+
 ### TLS
 
 ```go

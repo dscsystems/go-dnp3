@@ -733,6 +733,34 @@ The last group is the link parser's own, accumulated across connections. A
 session's `Stats` cannot report them on a bus: the bus decodes the stream, so
 the sessions never see the octets that failed to make a frame.
 
+## Registry
+
+```go
+func NewRegistry() *Registry
+func (r *Registry) Open(ch channel.Channel, cfg Config) *Bus
+func (r *Registry) Release(b *Bus) error
+func (r *Registry) Len() int
+```
+
+A `Bus` solves one channel opened twice by code that knows to share it.
+`Registry` solves it for code that does not: two independent parts of a
+program — a master built in one package, a simulator in another — each
+constructing what they believe is their own channel for the same device.
+`Open` reuses the bus for an equivalent channel instead of building a second
+one; equivalence is `channel.Channel.String()`, so two channels built the same
+way — same serial device at the same baud, same host and port — are
+recognised as the same line without either caller knowing about the other.
+
+The channel that loses — an equivalent one already existed — is closed before
+`Open` returns, since nothing will ever call `Connect` on it. `cfg` takes
+effect only on the first `Open` for a channel; a later `Open` for the same one
+does not reconfigure a bus other callers depend on.
+
+Every `Open` needs exactly one matching `Release`; the bus closes when the
+last caller releases it, not the first. Once a bus came from a `Registry`,
+release it through the `Registry`, not `Bus.Close` — that call does not know
+about the other callers and would close the line out from under them.
+
 ---
 
 # Package master
