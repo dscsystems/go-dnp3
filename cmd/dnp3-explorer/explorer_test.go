@@ -1450,24 +1450,24 @@ func TestEndToEndAgainstDemoOutstation(t *testing.T) {
 		t.Fatalf("integrity poll: %v", err)
 	}
 
-	// Drain what the handler pushed into the model, as the UI loop would.
+	// Drain what the handler pushed into the model, through the model's own
+	// dispatch rather than a copy of it: the shape of what the session pushes
+	// is the model's business, and a test that decodes it by hand goes on
+	// passing after the model has stopped understanding it.
 	m := testModel()
 	m.conn = conn
-	drained := 0
+	before := len(m.points)
 	for {
 		select {
 		case msg := <-conn.msgs:
-			if u, ok := msg.(updateMsg); ok {
-				m.applyUpdate(u)
-				drained++
-			}
+			m.applySessionMsg(msg)
 			continue
 		default:
 		}
 		break
 	}
 
-	if drained == 0 {
+	if len(m.points) == before {
 		t.Fatal("no measurements reached the model")
 	}
 	if len(m.points) < 8 {

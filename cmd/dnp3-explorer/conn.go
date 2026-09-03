@@ -102,6 +102,20 @@ func (c *connection) reconnect(p link) tea.Cmd {
 	}
 }
 
+// updatesMsg is one object header's worth of measurements.
+//
+// The unit is the header rather than the point on purpose. A device with five
+// thousand points answers an integrity poll in a couple of milliseconds, and a
+// message per point puts five thousand items through a queue the interface
+// drains between repaints — which it cannot do at that rate, so the tail goes
+// on the floor. Static data arrives grouped by object group, so what lands on
+// the floor is not a scattering of points but whole families of them: the
+// binary outputs, in the field report that led here.
+//
+// One message per header makes the queue depth count headers, of which a
+// large poll has dozens.
+type updatesMsg []updateMsg
+
 // updateMsg is one measurement arriving from the outstation.
 type updateMsg struct {
 	Type    dnp3.PointType
@@ -144,15 +158,43 @@ func (c commandResultMsg) level() string {
 	return "error"
 }
 
-// wait returns a command that blocks until the next message arrives.
+// batchMsg is everything that had arrived by the time the UI came back for
+// more.
+type batchMsg []tea.Msg
+
+// maxBatch bounds one drain, so a device that never stops talking cannot keep
+// the interface inside a single Update indefinitely.
+const maxBatch = 4096
+
+// wait returns a command that blocks until messages arrive, then takes every
+// one already queued behind the first.
 //
 // Bubble Tea runs commands on their own goroutines, so blocking here is
 // exactly right — it is Update that must never block.
+//
+// Taking them in a batch is what makes the interface usable against a real
+// device. One message per point and one message per pass through the event
+// loop means an integrity poll of a few thousand points arrives orders of
+// magnitude faster than the UI can accept it, and the difference goes on the
+// floor: whole object groups vanish, because static data arrives grouped and a
+// buffer that fills partway through the binary inputs takes the binary outputs
+// behind them with it.
 func (c *connection) wait() tea.Cmd {
 	return func() tea.Msg {
 		select {
-		case msg := <-c.msgs:
-			return msg
+		case first := <-c.msgs:
+			batch := make([]tea.Msg, 1, 64)
+			batch[0] = first
+			for len(batch) < maxBatch {
+				select {
+				case next := <-c.msgs:
+					batch = append(batch, next)
+				default:
+					return batchMsg(batch)
+				}
+			}
+			return batchMsg(batch)
+
 		case <-c.ctx.Done():
 			return statusMsg{text: "closed"}
 		}
@@ -169,6 +211,24 @@ func (c *connection) push(msg tea.Msg) {
 	case c.msgs <- msg:
 	default:
 		c.dropped.Add(1)
+	}
+}
+
+// pushUpdates delivers a header's measurements, counting the points rather
+// than the message when they are dropped.
+//
+// The count is what the Traffic panel reports, and an operator comparing it
+// against a device's point list needs it to mean measurements — "1 dropped"
+// for a header carrying two hundred of them would understate the loss by two
+// orders of magnitude.
+func (c *connection) pushUpdates(u updatesMsg) {
+	if len(u) == 0 {
+		return
+	}
+	select {
+	case c.msgs <- u:
+	default:
+		c.dropped.Add(int64(len(u)))
 	}
 }
 
@@ -194,79 +254,93 @@ func (h *handler) BeginFragment(info master.ResponseInfo) {
 }
 
 func (h *handler) HandleBinary(info master.HeaderInfo, vs []dnp3.Indexed[dnp3.Binary]) {
+	out := make(updatesMsg, 0, len(vs))
 	for _, v := range vs {
-		h.conn.push(updateMsg{
+		out = append(out, updateMsg{
 			Type: dnp3.TypeBinary, Index: v.Index,
 			Value: boolText(v.Value.Value), Flags: v.Value.Flags, Stamp: v.Value.Time,
 			Num: boolNum(v.Value.Value), HasNum: true,
 			IsEvent: info.IsEvent(), Class: info.Class, GV: info.GV,
 		})
 	}
+	h.conn.pushUpdates(out)
 }
 
 func (h *handler) HandleDoubleBit(info master.HeaderInfo, vs []dnp3.Indexed[dnp3.DoubleBitBinary]) {
+	out := make(updatesMsg, 0, len(vs))
 	for _, v := range vs {
-		h.conn.push(updateMsg{
+		out = append(out, updateMsg{
 			Type: dnp3.TypeDoubleBitBinary, Index: v.Index,
 			Value: v.Value.Value.String(), Flags: v.Value.Flags, Stamp: v.Value.Time,
 			IsEvent: info.IsEvent(), Class: info.Class, GV: info.GV,
 		})
 	}
+	h.conn.pushUpdates(out)
 }
 
 func (h *handler) HandleCounter(info master.HeaderInfo, vs []dnp3.Indexed[dnp3.Counter]) {
+	out := make(updatesMsg, 0, len(vs))
 	for _, v := range vs {
-		h.conn.push(updateMsg{
+		out = append(out, updateMsg{
 			Type: dnp3.TypeCounter, Index: v.Index,
 			Value: fmt.Sprint(v.Value.Value), Flags: v.Value.Flags, Stamp: v.Value.Time,
 			Num: float64(v.Value.Value), HasNum: true,
 			IsEvent: info.IsEvent(), Class: info.Class, GV: info.GV,
 		})
 	}
+	h.conn.pushUpdates(out)
 }
 
 func (h *handler) HandleFrozenCounter(info master.HeaderInfo, vs []dnp3.Indexed[dnp3.FrozenCounter]) {
+	out := make(updatesMsg, 0, len(vs))
 	for _, v := range vs {
-		h.conn.push(updateMsg{
+		out = append(out, updateMsg{
 			Type: dnp3.TypeFrozenCounter, Index: v.Index,
 			Value: fmt.Sprint(v.Value.Value), Flags: v.Value.Flags, Stamp: v.Value.Time,
 			Num: float64(v.Value.Value), HasNum: true,
 			IsEvent: info.IsEvent(), Class: info.Class, GV: info.GV,
 		})
 	}
+	h.conn.pushUpdates(out)
 }
 
 func (h *handler) HandleAnalog(info master.HeaderInfo, vs []dnp3.Indexed[dnp3.Analog]) {
+	out := make(updatesMsg, 0, len(vs))
 	for _, v := range vs {
-		h.conn.push(updateMsg{
+		out = append(out, updateMsg{
 			Type: dnp3.TypeAnalog, Index: v.Index,
 			Value: formatFloat(v.Value.Value), Flags: v.Value.Flags, Stamp: v.Value.Time,
 			Num: v.Value.Value, HasNum: true,
 			IsEvent: info.IsEvent(), Class: info.Class, GV: info.GV,
 		})
 	}
+	h.conn.pushUpdates(out)
 }
 
 func (h *handler) HandleBinaryOutputStatus(info master.HeaderInfo, vs []dnp3.Indexed[dnp3.BinaryOutputStatus]) {
+	out := make(updatesMsg, 0, len(vs))
 	for _, v := range vs {
-		h.conn.push(updateMsg{
+		out = append(out, updateMsg{
 			Type: dnp3.TypeBinaryOutputStatus, Index: v.Index,
 			Value: boolText(v.Value.Value), Flags: v.Value.Flags, Stamp: v.Value.Time,
 			Num: boolNum(v.Value.Value), HasNum: true,
 			IsEvent: info.IsEvent(), Class: info.Class, GV: info.GV,
 		})
 	}
+	h.conn.pushUpdates(out)
 }
 
 func (h *handler) HandleAnalogOutputStatus(info master.HeaderInfo, vs []dnp3.Indexed[dnp3.AnalogOutputStatus]) {
+	out := make(updatesMsg, 0, len(vs))
 	for _, v := range vs {
-		h.conn.push(updateMsg{
+		out = append(out, updateMsg{
 			Type: dnp3.TypeAnalogOutputStatus, Index: v.Index,
 			Value: formatFloat(v.Value.Value), Flags: v.Value.Flags, Stamp: v.Value.Time,
 			Num: v.Value.Value, HasNum: true,
 			IsEvent: info.IsEvent(), Class: info.Class, GV: info.GV,
 		})
 	}
+	h.conn.pushUpdates(out)
 }
 
 // HandleOctetString shows the strings a device reports about itself — point
@@ -274,13 +348,15 @@ func (h *handler) HandleAnalogOutputStatus(info master.HeaderInfo, vs []dnp3.Ind
 // out what an unfamiliar device actually is, so they belong in the table
 // rather than in a debug log.
 func (h *handler) HandleOctetString(info master.HeaderInfo, vs []dnp3.Indexed[dnp3.OctetString]) {
+	out := make(updatesMsg, 0, len(vs))
 	for _, v := range vs {
-		h.conn.push(updateMsg{
+		out = append(out, updateMsg{
 			Type: dnp3.TypeOctetString, Index: v.Index,
 			Value: printable(v.Value), Flags: dnp3.Online,
 			IsEvent: info.IsEvent(), Class: info.Class, GV: info.GV,
 		})
 	}
+	h.conn.pushUpdates(out)
 }
 
 // ---------- Actions ----------

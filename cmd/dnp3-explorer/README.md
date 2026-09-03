@@ -262,6 +262,22 @@ rejected it. The log screen has the exact status.
 **Analog values look truncated.** The outstation is reporting them in an integer
 variation. Nothing the explorer can fix; it shows what arrived.
 
+**A whole family of points is missing, and Traffic reports dropped updates.**
+The interface fell behind the device. Static data arrives grouped by object
+group, so a queue that fills partway through the binary inputs takes the binary
+outputs immediately behind them with it — the symptom is not a scattering of
+missing points but an entire type absent from a table that otherwise looks fine.
+
+The Overview says so in two places: `dropped` in the Traffic panel counts the
+measurements lost, and the Device panel's point counts are what the outstation
+declares it has, against which the Database panel's totals can be compared. If
+`dropped` is zero, what is on screen is what the device sent.
+
+Updates are delivered a whole object header at a time and applied a whole
+queue at a time, so a five-thousand-point integrity poll costs the interface
+tens of messages rather than thousands. A device large enough to still overrun
+that is worth reporting.
+
 **The terminal is left in a strange state after a crash.** Run `reset`. Use
 `-inline` to avoid the alternate screen entirely.
 

@@ -260,8 +260,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseReleaseMsg:
 		return m.HandleMouse(mouseEvent{x: msg.X, y: msg.Y, button: msg.Button, kind: mouseRelease})
 
-	case updateMsg:
-		m.applyUpdate(msg)
+	case batchMsg:
+		// Everything the session had queued, applied in one pass. Asking for
+		// the next batch once at the end rather than after every message is
+		// the point of batching at all: it is what lets the interface keep up
+		// with a device reporting thousands of points.
+		cmds := make([]tea.Cmd, 0, 2)
+		for _, one := range msg {
+			if cmd := m.applySessionMsg(one); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+		return m, tea.Batch(append(cmds, m.conn.wait())...)
+
+	case updatesMsg, updateMsg:
+		m.applySessionMsg(msg)
 		return m, m.conn.wait()
 
 	case statusMsg:
@@ -293,6 +306,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// applySessionMsg applies one message from the session, returning whatever it
+// wants done next. It never asks for the next message itself: a batch does
+// that once, for all of them.
+func (m *Model) applySessionMsg(msg tea.Msg) tea.Cmd {
+	switch msg := msg.(type) {
+	case updatesMsg:
+		for _, u := range msg {
+			m.applyUpdate(u)
+		}
+	case updateMsg:
+		m.applyUpdate(msg)
+	case statusMsg:
+		return m.applyStatus(msg)
+	case logMsg:
+		m.addLog(msg.level, msg.text)
+	}
+	return nil
 }
 
 func (m *Model) applyStatus(msg statusMsg) tea.Cmd {
