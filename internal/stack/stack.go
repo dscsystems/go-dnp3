@@ -279,6 +279,19 @@ func (s *Stack) drain(w io.Writer, fn func(Received)) error {
 			continue
 		}
 
+		// The destination says the frame is ours to look at; the source says
+		// whether it can have come from anywhere at all. An address no
+		// station may hold cannot be a sender, and a reply goes back to
+		// whatever source it was given — so answering one would put that
+		// impossible address on the wire as a destination.
+		//
+		// This belongs here rather than in the parser: a frame like this is
+		// exactly what an operator wants the decoder to show them, so it is
+		// dropped where the protocol is acted on, not where it is read.
+		if !link.IsValidSource(f.Header.Src) {
+			continue
+		}
+
 		if f.Header.Control.Prm {
 			res := s.sec.OnFrame(f)
 			if res.Reply != nil {

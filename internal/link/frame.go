@@ -72,6 +72,21 @@ func IsReserved(addr uint16) bool {
 	return addr >= reservedLow && addr <= reservedHigh
 }
 
+// IsValidSource reports whether addr can be the source of a frame.
+//
+// A source address is the sending station's own, so none of the addresses no
+// station may hold can appear there: the reserved range, the self-address a
+// master uses to reach an outstation whose address it does not know, and the
+// three broadcast addresses. Together they are the whole of 0xFFF0-0xFFFF.
+//
+// A frame claiming one has to be discarded rather than answered, because a
+// reply is addressed to the source it came from. Answering a request that
+// claims a broadcast source produces a broadcast-addressed reply, which every
+// station on the line accepts as its own.
+func IsValidSource(addr uint16) bool {
+	return !IsReserved(addr) && !IsBroadcast(addr) && addr != SelfAddress
+}
+
 // Function is the four-bit function code in the control octet. The same
 // numeric value means different things depending on the PRM bit, so the
 // constants are split into two blocks and Function.String needs to be told
