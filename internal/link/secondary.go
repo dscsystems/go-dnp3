@@ -23,11 +23,35 @@ type SecResult struct {
 	// Payload is user data to pass to the transport function, or nil. It
 	// aliases the input frame's payload.
 	Payload []byte
-	// Discarded is set when a frame carried user data that was dropped. The
-	// usual cause is a frame count bit mismatch, meaning the peer retransmitted
+	// Discarded is set when a received frame was dropped. The usual cause is a
+	// frame count bit mismatch on user data, meaning the peer retransmitted
 	// something already accepted, which is correct behaviour rather than an
-	// error — but worth counting.
+	// error — but worth counting. It is also set for a frame whose control
+	// field is not a valid combination.
 	Discarded bool
+}
+
+// validControl reports whether a primary frame's control field is one of the
+// combinations the standard's control-code validity matrix allows.
+//
+// FCV says whether the frame count bit carries meaning, so it is fixed by the
+// function code: set for the two functions that use the FCB, clear for those
+// that do not. A frame whose FCV contradicts its function code is not safe to
+// act on — most sharply for confirmed user data, where the FCB is what
+// decides whether a payload is new or a duplicate of one already delivered.
+// Acting on a bit the sender has declared meaningless can drop live data and
+// acknowledge it as received.
+func validControl(c Control) bool {
+	switch c.Func {
+	case FuncTestLinkStates, FuncConfirmedUserData:
+		return c.Fcv
+	case FuncResetLinkStates, FuncUnconfirmedUserData, FuncRequestLinkStatus:
+		return !c.Fcv
+	default:
+		// Not an FCV question: an unrecognised function code is answered with
+		// NOT_SUPPORTED rather than discarded.
+		return true
+	}
 }
 
 // Reset returns the secondary to its unreset state. A session calls this when
@@ -49,6 +73,14 @@ func (s *Secondary) IsReset() bool { return s.reset }
 func (s *Secondary) OnFrame(f Frame) SecResult {
 	if !f.Header.Control.Prm {
 		return SecResult{}
+	}
+
+	// A control field that is not a valid combination is discarded outright,
+	// without a reply: answering it would confirm a frame we are refusing to
+	// act on, and the peer's own timeout is what should tell it something is
+	// wrong.
+	if !validControl(f.Header.Control) {
+		return SecResult{Discarded: true}
 	}
 
 	src := f.Header.Src
