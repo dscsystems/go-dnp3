@@ -158,6 +158,17 @@ func (s *Stack) SendTo(w io.Writer, dest uint16, fragment []byte) error {
 // pump sends segments until one needs acknowledging or the fragment is done.
 func (s *Stack) pump(w io.Writer) error {
 	for s.seg.Pending() {
+		if s.pri.DataFlowControl() {
+			// The peer's last reply said its buffers are full: what is left
+			// of this fragment stays queued rather than being sent through
+			// that, or lost by consuming it here anyway. Sending resumes on
+			// its own once some later reply clears DFC — drain calls pump
+			// again after every ActionComplete, including the ACK to a
+			// SendLinkStatusRequest probe, whose own gate deliberately lets
+			// it go out while paused like this so there is something to
+			// elicit that later reply in the first place.
+			return nil
+		}
 		seg, ok := s.seg.Next(s.txSeg[:0])
 		if !ok {
 			break
@@ -283,7 +294,15 @@ func (s *Stack) drain(w io.Writer, fn func(Received)) error {
 			continue
 		}
 
-		// A secondary frame is a reply to something we sent.
+		// A secondary frame answers something we sent as primary, and must
+		// come from the station we are actually exchanging with — s.dest,
+		// the address the fragment in flight was sent to — or it could
+		// complete or advance an exchange it has nothing to do with, forged
+		// or merely misrouted from some other station on the line.
+		if f.Header.Src != s.dest {
+			continue
+		}
+
 		next, action := s.pri.OnFrame(f)
 		switch action {
 		case link.ActionTransmit:
@@ -340,8 +359,8 @@ func (s *Stack) write(w io.Writer, buf *[]byte, f link.Frame) error {
 // nothing to report. Asking for link status is how a session finds out before
 // the next poll is due.
 func (s *Stack) SendLinkStatusRequest(w io.Writer) error {
-	if s.Busy() {
-		return nil // there is traffic in flight; the link is demonstrably alive
+	if s.awaiting {
+		return nil // a confirmed frame is genuinely in flight; do not interleave
 	}
 	f, action, err := s.pri.RequestLinkStatus()
 	if err != nil {

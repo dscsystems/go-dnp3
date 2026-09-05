@@ -1,6 +1,14 @@
 package link
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrDataFlowControl means the peer's last reply signalled DFC — its
+// buffers are full — so Send refuses to queue more user data until a later
+// reply clears it.
+var ErrDataFlowControl = errors.New("link: peer has signalled data flow control")
 
 // Action tells a session what the [Primary] state machine wants next.
 type Action uint8
@@ -127,6 +135,14 @@ func (p *Primary) Send(payload []byte) (Frame, Action, error) {
 	}
 	if p.Busy() {
 		return Frame{}, ActionFailed, fmt.Errorf("link: primary busy in state %s", p.state)
+	}
+	if p.dfc {
+		// The peer's last reply said its buffers are full; sending more user
+		// data now would be exactly what data flow control exists to
+		// prevent. Stack.pump checks DataFlowControl itself before ever
+		// reaching here for a queued continuation segment, so this only
+		// turns away a caller starting something new while paused.
+		return Frame{}, ActionFailed, ErrDataFlowControl
 	}
 
 	p.retries = 0
