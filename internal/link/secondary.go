@@ -83,6 +83,10 @@ func (s *Secondary) OnFrame(f Frame) SecResult {
 		return SecResult{Discarded: true}
 	}
 
+	if IsBroadcast(f.Header.Dest) {
+		return s.onBroadcast(f)
+	}
+
 	src := f.Header.Src
 	switch f.Header.Control.Func {
 
@@ -127,6 +131,29 @@ func (s *Secondary) OnFrame(f Frame) SecResult {
 
 	default:
 		return SecResult{Reply: s.reply(FuncNotSupported, src)}
+	}
+}
+
+// onBroadcast handles a frame addressed to every station on the line.
+//
+// Nothing here ever replies. A broadcast reaches every outstation at once, so
+// answering one would have all of them transmit at the same moment — the
+// collision the application layer above already goes to some length to avoid.
+// That rules out the functions whose whole purpose is to be answered: link
+// status, and the link-state reset and test. What is left is user data, which
+// is what a broadcast address is for, and its payload goes up.
+//
+// The frame count bit is deliberately not touched, for confirmed user data as
+// much as for unconfirmed. That state belongs to the confirmed exchange with
+// one particular station, established by a reset handshake this frame is no
+// part of; letting a broadcast advance it would leave the next frame from the
+// real peer judged against a bit somebody else moved.
+func (s *Secondary) onBroadcast(f Frame) SecResult {
+	switch f.Header.Control.Func {
+	case FuncConfirmedUserData, FuncUnconfirmedUserData:
+		return SecResult{Payload: f.Payload}
+	default:
+		return SecResult{Discarded: true}
 	}
 }
 
