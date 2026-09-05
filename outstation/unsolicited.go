@@ -178,7 +178,18 @@ func (s *Session) sendUnsolicited(w io.Writer, events []Event, now time.Time, nu
 	// series the master would have to reassemble without having asked for it.
 	body := bodies[0]
 
-	s.unsol.seq = (s.unsol.seq + 1) % app.SeqModulus
+	// A retry of a still-unconfirmed transmission keeps its sequence number.
+	// retries is nonzero only while we are re-attempting a send the master has
+	// not yet acknowledged (it is reset to zero the moment that happens, on
+	// confirmation or on giving up), so it is exactly the signal that tells a
+	// retry apart from a genuinely new transmission. A master tells a
+	// retransmission of data it already has apart from new data purely by the
+	// sequence number matching what it has outstanding — advancing it on every
+	// attempt would make every retry look like new data and be delivered
+	// twice.
+	if s.unsol.retries == 0 {
+		s.unsol.seq = (s.unsol.seq + 1) % app.SeqModulus
+	}
 	frag := app.AppendHeader(nil, app.Header{
 		Control: app.Control{
 			Fir: true, Fin: true, Con: true, Uns: true,
