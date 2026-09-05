@@ -549,6 +549,25 @@ func (s *Session) handle(w io.Writer, r stack.Received) error {
 		s.iin = s.iin.Set(app.IINBroadcast)
 	}
 
+	// A request whose function code is meaningless without objects asked for
+	// nothing, which is not the same as having nothing to do. Answering it
+	// with an empty success would tell the master its request was carried
+	// out: for a control, that its point was operated.
+	if frag.Header.Func.RequiresObjects() && len(frag.Objects) == 0 {
+		s.bump(func(st *Stats) { st.MalformedRequests++ })
+		s.log.Warn("request carried no objects but requires them",
+			"func", frag.Header.Func, "seq", frag.Header.Control.Seq)
+		s.iin = s.iin.Set(app.IINParameterError)
+		if frag.Header.Func.NoReply() || r.Broadcast {
+			// Nothing to answer to; the indication rides on the next response.
+			return nil
+		}
+		// Unlike a fragment we cannot parse, this one has a valid header and a
+		// sequence number to answer on, and the master is waiting: it gets a
+		// null response carrying the error rather than silence.
+		return s.respond(w, r, frag.Header, nil)
+	}
+
 	switch frag.Header.Func {
 	case app.FuncConfirm:
 		// Solicited and unsolicited responses have separate sequence spaces,
