@@ -60,6 +60,12 @@ type task struct {
 	deadline time.Time
 	seq      uint8
 
+	// started records that the first fragment of the response has been
+	// accepted, which is what tells a continuation apart from a repeat: every
+	// fragment of a solicited response carries the request's own sequence
+	// number, so the sequence number alone cannot distinguish them.
+	started bool
+
 	// done receives the outcome, for callers waiting on a one-shot task.
 	done chan error
 	// index is the task's position in the scheduler heap, and order is the

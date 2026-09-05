@@ -1,6 +1,7 @@
 package outstation
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -166,6 +167,18 @@ type Session struct {
 	pendingSeq       uint8
 	pendingHasEvents bool
 
+	// lastReq is the request we last acted on, and lastResp what we answered
+	// it with. A master retransmits a request whenever it does not see the
+	// response, reusing the sequence number precisely so the outstation can
+	// recognise the repeat; answering it from here rather than running it
+	// again is what keeps one operator action from operating a point twice.
+	lastReqValid   bool
+	lastReqSource  uint16
+	lastReqSeq     uint8
+	lastReqFrag    []byte
+	lastRespBodies [][]byte
+	lastRespEvents bool
+
 	// sel is the live select-before-operate reservation, and cmds executes
 	// the controls themselves.
 	sel  selection
@@ -201,14 +214,16 @@ type Session struct {
 
 // Stats counts what a session has done.
 type Stats struct {
-	RequestsReceived  uint64
-	ResponsesSent     uint64
-	FragmentsSent     uint64
-	ConfirmsReceived  uint64
-	ConfirmTimeouts   uint64
-	UnknownFunction   uint64
-	MalformedRequests uint64
-	Connections       uint64
+	RequestsReceived   uint64
+	ResponsesSent      uint64
+	FragmentsSent      uint64
+	ConfirmsReceived   uint64
+	ConfirmTimeouts    uint64
+	UnknownFunction    uint64
+	RepeatedRequests   uint64
+	IncompleteRequests uint64
+	MalformedRequests  uint64
+	Connections        uint64
 
 	CommandsExecuted    uint64
 	CommandsRejected    uint64
@@ -495,6 +510,36 @@ func (s *Session) handle(w io.Writer, r stack.Received) error {
 		// parameter-error indication rides on the next response instead.
 		s.iin = s.iin.Set(app.IINParameterError)
 		return nil
+	}
+
+	// Only a fragment carrying both FIR and FIN is a complete request. A
+	// multi-fragment request is not something this outstation reassembles,
+	// and a fragment with FIR clear is a continuation of a series whose
+	// beginning it never saw — acting on either means acting on a request it
+	// cannot know the whole of, which for a control means operating a point
+	// on the strength of half a message.
+	if !frag.Header.Control.Fir || !frag.Header.Control.Fin {
+		s.bump(func(st *Stats) { st.IncompleteRequests++ })
+		s.log.Warn("discarding a fragment that is not a complete request",
+			"fir", frag.Header.Control.Fir, "fin", frag.Header.Control.Fin,
+			"seq", frag.Header.Control.Seq)
+		// As with a fragment we cannot parse: there is nothing meaningful to
+		// answer, so the indication rides on the next response instead.
+		s.iin = s.iin.Set(app.IINParameterError)
+		return nil
+	}
+
+	// A confirm is an acknowledgement of our own response, not a request: it
+	// has its own sequence space and nothing to replay, so it is dispatched
+	// without going near the repeat-detection below.
+	if frag.Header.Func != app.FuncConfirm {
+		if s.isRepeatRequest(r, frag) {
+			s.bump(func(st *Stats) { st.RepeatedRequests++ })
+			s.log.Debug("repeated request; re-sending the previous response",
+				"seq", frag.Header.Control.Seq)
+			return s.replayResponse(w, r, frag.Header)
+		}
+		s.rememberRequest(r, frag)
 	}
 
 	if r.Broadcast {
@@ -910,6 +955,55 @@ func (s *Session) onAssignClass(w io.Writer, r stack.Received, frag app.Fragment
 	return s.respond(w, r, frag.Header, nil)
 }
 
+// isRepeatRequest reports whether this is the request we last acted on,
+// arriving again because the master did not see the response.
+//
+// The whole fragment is compared, not just the sequence number: a master that
+// reuses a sequence number for genuinely different content is asking for
+// something new, and suppressing that would be far worse than answering a
+// repeat twice.
+func (s *Session) isRepeatRequest(r stack.Received, frag app.Fragment) bool {
+	return s.lastReqValid &&
+		r.Source == s.lastReqSource &&
+		frag.Header.Control.Seq == s.lastReqSeq &&
+		bytes.Equal(r.Fragment, s.lastReqFrag)
+}
+
+// rememberRequest records a request as the one to compare repeats against.
+func (s *Session) rememberRequest(r stack.Received, frag app.Fragment) {
+	s.lastReqValid = true
+	s.lastReqSource = r.Source
+	s.lastReqSeq = frag.Header.Control.Seq
+	// r.Fragment aliases the stack's reassembly buffer and is valid only for
+	// this call, so it has to be copied to outlive it.
+	s.lastReqFrag = append(s.lastReqFrag[:0], r.Fragment...)
+
+	// Whatever we answered the previous request with no longer belongs to
+	// this one; it is replaced when this request produces its own response.
+	s.lastRespBodies = nil
+	s.lastRespEvents = false
+}
+
+// replayResponse re-sends the response the identical previous request
+// produced, without executing anything a second time.
+func (s *Session) replayResponse(w io.Writer, r stack.Received, req app.Header) error {
+	if r.Broadcast || len(s.lastRespBodies) == 0 {
+		// A broadcast is executed but never answered, and a request that
+		// produced no response has nothing to repeat.
+		return nil
+	}
+
+	// This supersedes any part of that same response still in flight with an
+	// identical send from its first fragment. The events it carries stay
+	// selected rather than going back to the queue, because they are the very
+	// events this replay is about to carry again.
+	s.awaitingConfirm = false
+	s.pendingBodies = nil
+	s.pendingIndex = 0
+
+	return s.sendFragments(w, r, req, s.lastRespBodies, s.lastRespEvents)
+}
+
 // respond sends a single-fragment response carrying body.
 func (s *Session) respond(w io.Writer, r stack.Received, req app.Header, body []byte) error {
 	return s.sendFragments(w, r, req, [][]byte{body}, false)
@@ -944,6 +1038,11 @@ func (s *Session) sendFragments(w io.Writer, r stack.Received, req app.Header, b
 	s.pendingDest = r.Source
 	s.pendingSeq = req.Control.Seq
 	s.pendingHasEvents = hasEvents
+
+	// Kept so a retransmission of the request that produced it is answered
+	// with this same response rather than by running the request again.
+	s.lastRespBodies = bodies
+	s.lastRespEvents = hasEvents
 
 	return s.advanceResponse(w)
 }

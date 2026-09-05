@@ -92,14 +92,15 @@ func (c *Config) applyDefaults() {
 
 // Stats counts what a session has done.
 type Stats struct {
-	TasksRun        uint64
-	TasksSucceeded  uint64
-	TasksFailed     uint64
-	ResponseTimeout uint64
-	FragmentsRx     uint64
-	Unsolicited     uint64
-	Connections     uint64
-	RestartsSeen    uint64
+	TasksRun           uint64
+	TasksSucceeded     uint64
+	TasksFailed        uint64
+	ResponseTimeout    uint64
+	FragmentsRx        uint64
+	FragmentsDiscarded uint64
+	Unsolicited        uint64
+	Connections        uint64
+	RestartsSeen       uint64
 }
 
 // Session is a master's connection to one outstation.
@@ -470,6 +471,10 @@ func (s *Session) sendTask(w io.Writer, t *task) {
 	}
 
 	t.seq = s.seq
+	// A periodic task is the same struct run again, so the series state from
+	// its previous run has to be cleared or the first fragment of this run's
+	// response looks like a repeat of the last one's.
+	t.started = false
 	s.bump(func(st *Stats) { st.TasksRun++ })
 	s.log.Debug("task sent", "task", t.name, "seq", s.seq)
 
@@ -596,6 +601,35 @@ func (s *Session) onSolicited(w io.Writer, frag app.Fragment) {
 			"got", frag.Header.Control.Seq, "want", t.seq)
 		return
 	}
+
+	// A fragment is only delivered if it belongs where the series actually
+	// is: the first one must carry FIR and every later one must not. A FIR
+	// fragment arriving once the series has started is the outstation
+	// repeating a fragment whose confirm it never saw, and a fragment without
+	// FIR arriving before any has started continues a series that never
+	// began. Delivering the first would report the same measurements twice;
+	// delivering the second would report part of a response as the whole of
+	// one.
+	if frag.Header.Control.Fir == t.started {
+		s.bump(func(st *Stats) { st.FragmentsDiscarded++ })
+		s.log.Debug("discarding a response fragment that does not continue the series",
+			"fir", frag.Header.Control.Fir, "started", t.started,
+			"seq", frag.Header.Control.Seq)
+
+		// The confirm still goes out. A repeat is sent precisely because the
+		// outstation did not see the confirm the first time, and withholding
+		// it now would only have the outstation repeat itself again.
+		if frag.Header.Control.Con {
+			s.sendConfirm(w, frag.Header.Control.Seq, false)
+		}
+		// The task is deliberately not completed, whatever this fragment's
+		// FIN says: nothing valid has been received for it, so letting it
+		// time out reports that honestly rather than reporting success on a
+		// response that was thrown away.
+		t.deadline = time.Now().Add(s.cfg.ResponseTimeout)
+		return
+	}
+	t.started = true
 
 	s.deliver(frag, false)
 	if t.onFragment != nil {
