@@ -31,6 +31,13 @@ type unsolState struct {
 	// retries counts consecutive unconfirmed attempts.
 	retries int
 
+	// lastFrag is the exact fragment last transmitted, kept so a retry can
+	// repeat it octet for octet. A master tells a retransmission apart from
+	// new data purely by the sequence number, so a retry that keeps the
+	// sequence number — as it must — has to carry the same data too, or the
+	// difference is discarded as a duplicate and never delivered.
+	lastFrag []byte
+
 	// nextAllowed is the earliest a further unsolicited response may be sent,
 	// which is how a device that has given up retrying backs off.
 	nextAllowed time.Time
@@ -98,6 +105,15 @@ func (s *Session) pollUnsolicited(w io.Writer, now time.Time) error {
 		return s.onUnsolicitedTimeout(w, now)
 	}
 
+	// A retry repeats the fragment the master did not confirm, exactly as it
+	// went out the first time. Building a fresh one from whatever is queued
+	// now would put events the master has never seen behind the sequence
+	// number of a transmission it has already seen, so it would match them as
+	// a duplicate, deliver none of them, and confirm them away regardless.
+	if s.unsol.retries > 0 && len(s.unsol.lastFrag) > 0 {
+		return s.retryUnsolicited(w, now)
+	}
+
 	// The null unsolicited response comes first and comes before any data.
 	//
 	// Its job is to tell a master that has just connected — or reconnected to
@@ -146,21 +162,42 @@ func (s *Session) onUnsolicitedTimeout(w io.Writer, now time.Time) error {
 	s.unsol.retries++
 	s.bump(func(st *Stats) { st.UnsolicitedTimeouts++ })
 
-	// The events go back in the queue whether or not we retry. If we give up,
-	// the master's next poll collects them — losing them because unsolicited
-	// delivery failed would defeat the point of the confirmation.
-	requeued := s.db.events.Unselect()
-
 	if s.unsol.retries > s.cfg.Unsolicited.MaxRetries {
+		// Only now do the events go back in the queue, for the master's next
+		// poll to collect: losing them because unsolicited delivery failed
+		// would defeat the point of the confirmation. Returning them any
+		// earlier, while a retry still owes them, would let the retry sweep
+		// up whatever else has arrived since and send the lot under the
+		// original sequence number.
+		requeued := s.db.events.Unselect()
 		s.log.Warn("giving up on unsolicited reporting until the master polls",
 			"retries", s.unsol.retries, "events_requeued", requeued)
 		s.unsol.retries = 0
+		s.unsol.lastFrag = nil
 		s.unsol.nextAllowed = now.Add(s.cfg.Unsolicited.ConfirmTimeout)
 		return nil
 	}
 
 	s.log.Debug("unsolicited response unconfirmed; retrying",
-		"attempt", s.unsol.retries, "events_requeued", requeued)
+		"attempt", s.unsol.retries)
+	return nil
+}
+
+// retryUnsolicited retransmits the unconfirmed response verbatim.
+func (s *Session) retryUnsolicited(w io.Writer, now time.Time) error {
+	if err := s.stack.Send(w, s.unsol.lastFrag); err != nil {
+		// The events stay selected; the retry path keeps hold of them until
+		// the transmission is either confirmed or given up on.
+		return err
+	}
+
+	s.unsol.awaiting = true
+	s.unsol.awaitSeq = s.unsol.seq
+	s.unsol.deadline = now.Add(s.cfg.Unsolicited.ConfirmTimeout)
+
+	s.bump(func(st *Stats) { st.UnsolicitedSent++ })
+	s.log.Debug("unsolicited response retransmitted",
+		"seq", s.unsol.seq, "attempt", s.unsol.retries)
 	return nil
 }
 
@@ -178,18 +215,13 @@ func (s *Session) sendUnsolicited(w io.Writer, events []Event, now time.Time, nu
 	// series the master would have to reassemble without having asked for it.
 	body := bodies[0]
 
-	// A retry of a still-unconfirmed transmission keeps its sequence number.
-	// retries is nonzero only while we are re-attempting a send the master has
-	// not yet acknowledged (it is reset to zero the moment that happens, on
-	// confirmation or on giving up), so it is exactly the signal that tells a
-	// retry apart from a genuinely new transmission. A master tells a
-	// retransmission of data it already has apart from new data purely by the
-	// sequence number matching what it has outstanding — advancing it on every
-	// attempt would make every retry look like new data and be delivered
-	// twice.
-	if s.unsol.retries == 0 {
-		s.unsol.seq = (s.unsol.seq + 1) % app.SeqModulus
-	}
+	// Every transmission through here is a new one, carrying data the master
+	// has not been offered before, so it takes the next sequence number. A
+	// retry does not come through here at all: it goes through
+	// retryUnsolicited, which repeats the stored fragment under the sequence
+	// number it already had, because that is the only thing a master's
+	// duplicate detection matches on.
+	s.unsol.seq = (s.unsol.seq + 1) % app.SeqModulus
 	frag := app.AppendHeader(nil, app.Header{
 		Control: app.Control{
 			Fir: true, Fin: true, Con: true, Uns: true,
@@ -209,6 +241,9 @@ func (s *Session) sendUnsolicited(w io.Writer, events []Event, now time.Time, nu
 	s.unsol.awaitSeq = s.unsol.seq
 	s.unsol.deadline = now.Add(s.cfg.Unsolicited.ConfirmTimeout)
 	s.unsol.nullSent = s.unsol.nullSent || null
+	// Kept whole for a retry to repeat. frag is freshly allocated here and
+	// the body is copied into it, so holding the reference is enough.
+	s.unsol.lastFrag = frag
 
 	s.bump(func(st *Stats) { st.UnsolicitedSent++ })
 	s.log.Debug("unsolicited response sent",
@@ -226,6 +261,7 @@ func (s *Session) onUnsolicitedConfirm(h app.Header) {
 
 	s.unsol.awaiting = false
 	s.unsol.retries = 0
+	s.unsol.lastFrag = nil
 
 	if !s.unsol.nullConfirmed {
 		// The master has acknowledged our existence; data may now flow.
