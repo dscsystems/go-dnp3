@@ -151,6 +151,21 @@ type Session struct {
 	confirmSeq      uint8
 	confirmDeadline time.Time
 
+	// pendingBodies are the fragments still to send for a response that spans
+	// more than one, and pendingIndex is the next to go out. Only one is ever
+	// truly in flight at a time, on purpose: every fragment in the response
+	// shares the request's own sequence number, the only field a confirm is
+	// matched against, so a confirm for the first fragment cannot be told
+	// apart from one for a later one unless the outstation never has more
+	// than one outstanding. pendingDest and pendingSeq are constant across the
+	// response; pendingHasEvents says whether it carries events at all, which
+	// decides whether the last fragment needs a confirmation of its own.
+	pendingBodies    [][]byte
+	pendingIndex     int
+	pendingDest      uint16
+	pendingSeq       uint8
+	pendingHasEvents bool
+
 	// sel is the live select-before-operate reservation, and cmds executes
 	// the controls themselves.
 	sel  selection
@@ -392,6 +407,10 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 				s.log.Warn("request handling failed", "err", handleErr)
 				return
 			}
+			if err := s.advanceResponse(conn); err != nil {
+				s.log.Warn("sending a queued response fragment failed", "err", err)
+				return
+			}
 
 		case <-ticker.C:
 			now := s.appl.Now()
@@ -452,6 +471,12 @@ func (s *Session) checkConfirmTimeout() {
 		return
 	}
 	s.awaitingConfirm = false
+	// The master's silence on one fragment means it cannot be paced through
+	// the rest of the response either, so the whole thing is abandoned rather
+	// than pressing on: the events it carried, wherever in the series they
+	// actually landed, go back in the queue for the master's next poll.
+	s.pendingBodies = nil
+	s.pendingIndex = 0
 	n := s.db.events.Unselect()
 	s.bump(func(st *Stats) { st.ConfirmTimeouts++ })
 	s.log.Warn("application confirm timed out; events requeued", "events", n)
@@ -548,7 +573,14 @@ func (s *Session) handle(w io.Writer, r stack.Received) error {
 	}
 }
 
-// onConfirm clears the events the confirmed response carried.
+// onConfirm clears the wait on the fragment just confirmed.
+//
+// It does not touch the event buffer: a multi-fragment response may still
+// have fragments left to send, sharing this same sequence number, so this
+// confirm cannot be told apart from one for a later fragment. The events are
+// only actually cleared once the whole response is done — see
+// finishResponse, reached through advanceResponse once every fragment has
+// both gone out and, where it needed one, been confirmed.
 func (s *Session) onConfirm(h app.Header) {
 	s.bump(func(st *Stats) { st.ConfirmsReceived++ })
 
@@ -559,8 +591,6 @@ func (s *Session) onConfirm(h app.Header) {
 		return
 	}
 	s.awaitingConfirm = false
-	n := s.db.events.Confirm()
-	s.log.Debug("events confirmed", "count", n)
 }
 
 // onRead answers a read request.
@@ -885,7 +915,10 @@ func (s *Session) respond(w io.Writer, r stack.Received, req app.Header, body []
 	return s.sendFragments(w, r, req, [][]byte{body}, false)
 }
 
-// sendFragments emits a response, splitting it across fragments as needed.
+// sendFragments starts a response, splitting it across fragments as needed,
+// and sends as much of it as the link and the master's pacing allow right
+// now. The rest, if any, is queued and driven forward by advanceResponse as
+// each fragment's acknowledgement arrives — see the pendingBodies field.
 //
 // Every fragment but the last carries FIN clear. A fragment carrying events
 // sets CON, because only a confirmation lets the outstation drop them.
@@ -894,38 +927,100 @@ func (s *Session) sendFragments(w io.Writer, r stack.Received, req app.Header, b
 		return nil
 	}
 
-	for i, body := range bodies {
-		last := i == len(bodies)-1
-		// Intermediate fragments must be confirmed or the master cannot pace
-		// the series; the final one only needs it when it carries events.
-		needConfirm := !last || hasEvents
-
-		ctrl := app.Control{
-			Fir: i == 0,
-			Fin: last,
-			Con: needConfirm,
-			Seq: req.Control.Seq,
-		}
-
-		frag := app.AppendHeader(nil, app.Header{
-			Control: ctrl,
-			Func:    app.FuncResponse,
-			IIN:     s.currentIIN(),
-		})
-		frag = append(frag, body...)
-
-		if err := s.stack.SendTo(w, r.Source, frag); err != nil {
-			return err
-		}
-		s.bump(func(st *Stats) { st.FragmentsSent++ })
-
-		if needConfirm {
-			s.awaitingConfirm = true
-			s.confirmSeq = ctrl.Seq
-			s.confirmDeadline = time.Now().Add(s.cfg.ConfirmTimeout)
+	if s.pendingIndex < len(s.pendingBodies) {
+		// A well-behaved master confirms (or lets confirm time out) before
+		// asking anything else, so this should not happen; abandon the
+		// response still in flight rather than silently losing track of
+		// whatever events it was holding.
+		s.log.Warn("a new response is replacing one still in flight")
+		if s.awaitingConfirm {
+			s.awaitingConfirm = false
+			s.db.events.Unselect()
 		}
 	}
 
+	s.pendingBodies = bodies
+	s.pendingIndex = 0
+	s.pendingDest = r.Source
+	s.pendingSeq = req.Control.Seq
+	s.pendingHasEvents = hasEvents
+
+	return s.advanceResponse(w)
+}
+
+// advanceResponse sends the next queued fragment of a response in progress,
+// if nothing is holding it back, and finishes the response once every
+// fragment has been both sent and, where required, confirmed.
+//
+// Two independent things can hold the next fragment back, and only one is
+// ever outstanding for long: the link layer, when link confirms are in use
+// and the peer has not yet acknowledged the last frame (stack.Busy), and the
+// application layer, when the fragment just sent asked for a confirmation of
+// its own (awaitingConfirm). Both gate on state the rest of the session
+// already maintains — the stack for the first, onConfirm and
+// checkConfirmTimeout for the second — so this only needs to check them.
+func (s *Session) advanceResponse(w io.Writer) error {
+	if len(s.pendingBodies) == 0 {
+		return nil
+	}
+	if s.awaitingConfirm || s.stack.Busy() {
+		return nil
+	}
+	if s.pendingIndex >= len(s.pendingBodies) {
+		return s.finishResponse()
+	}
+
+	i := s.pendingIndex
+	last := i == len(s.pendingBodies)-1
+	// Intermediate fragments must be confirmed or the master cannot pace the
+	// series; the final one only needs it when it carries events.
+	needConfirm := !last || s.pendingHasEvents
+
+	ctrl := app.Control{
+		Fir: i == 0,
+		Fin: last,
+		Con: needConfirm,
+		Seq: s.pendingSeq,
+	}
+
+	frag := app.AppendHeader(nil, app.Header{
+		Control: ctrl,
+		Func:    app.FuncResponse,
+		IIN:     s.currentIIN(),
+	})
+	frag = append(frag, s.pendingBodies[i]...)
+
+	if err := s.stack.SendTo(w, s.pendingDest, frag); err != nil {
+		return err
+	}
+	s.bump(func(st *Stats) { st.FragmentsSent++ })
+	if s.stack.Pending() {
+		s.linkDeadline = time.Now().Add(s.cfg.LinkTimeout)
+	}
+	s.pendingIndex++
+
+	if needConfirm {
+		s.awaitingConfirm = true
+		s.confirmSeq = ctrl.Seq
+		s.confirmDeadline = time.Now().Add(s.cfg.ConfirmTimeout)
+		return nil
+	}
+	return s.finishResponse()
+}
+
+// finishResponse closes out a response once every fragment has gone out and
+// none is still awaiting confirmation: only now is it safe to drop the
+// events it carried, however many trailing fragments they ended up spread
+// across, since only now do we know the master has everything.
+func (s *Session) finishResponse() error {
+	hasEvents := s.pendingHasEvents
+	s.pendingBodies = nil
+	s.pendingIndex = 0
+
+	if hasEvents {
+		n := s.db.events.Confirm()
+		s.log.Debug("events confirmed", "count", n)
+	}
 	s.bump(func(st *Stats) { st.ResponsesSent++ })
 	// The broadcast indication reports only the request that arrived by
 	// broadcast, so it is cleared once reported.
