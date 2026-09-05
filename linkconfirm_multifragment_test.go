@@ -79,8 +79,22 @@ func TestConfirmedLinkMultiFragmentResponse(t *testing.T) {
 		t.Fatalf("integrity poll: %v (outstation stats: %+v) — confirmed links cannot "+
 			"send a response split across several application fragments", err, st)
 	}
-	if st.ResponsesSent < 2 {
-		t.Fatalf("only %d response(s) sent; the test did not actually force a multi-fragment "+
-			"response, so it proves nothing about this defect", st.ResponsesSent)
+	// Then confirm the poll really was answered across several fragments,
+	// since a single-fragment answer would prove nothing about this defect.
+	//
+	// Counting fragments against responses says that directly. Waiting for it
+	// matters: the outstation bumps its counters just *after* writing each
+	// fragment, so the master — which completes the moment the final fragment
+	// lands — can return from the poll while the outstation goroutine has yet
+	// to account for it. Sampling the instant the poll returns reads that gap
+	// and sees one fragment fewer than went out.
+	waitFor(t, 2*time.Second, func() bool {
+		s := out.Stats()
+		return s.FragmentsSent > s.ResponsesSent
+	})
+
+	if st = out.Stats(); st.FragmentsSent <= st.ResponsesSent {
+		t.Fatalf("%d fragment(s) across %d response(s): nothing was split, so the test did "+
+			"not actually force a multi-fragment response", st.FragmentsSent, st.ResponsesSent)
 	}
 }

@@ -427,9 +427,15 @@ func TestMultiFragmentResponse(t *testing.T) {
 	}
 
 	// 400 points at five octets each cannot fit one 2048-octet fragment.
-	if out.Stats().FragmentsSent < 2 {
-		t.Errorf("sent %d fragments; a 400-point response must span several",
-			out.Stats().FragmentsSent)
+	//
+	// The outstation bumps this counter just after writing each fragment, so
+	// it can still be catching up here: the poll returns as soon as the master
+	// has the final fragment, which is before the outstation goroutine has
+	// accounted for it. Wait for it rather than sampling that gap.
+	waitFor(t, 2*time.Second, func() bool { return out.Stats().FragmentsSent >= 2 })
+
+	if got := out.Stats().FragmentsSent; got < 2 {
+		t.Errorf("sent %d fragments; a 400-point response must span several", got)
 	}
 }
 
