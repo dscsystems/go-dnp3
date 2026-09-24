@@ -29,4 +29,4 @@
 package dnp3
 
 // Version is the library version, following semantic versioning.
-const Version = "0.1.0-dev"
+const Version = "0.5.1"
