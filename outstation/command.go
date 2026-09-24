@@ -146,7 +146,8 @@ func nextSeq(s uint8) uint8 { return (s + 1) % app.SeqModulus }
 
 // commandOutcome is the status assigned to one command object.
 type commandOutcome struct {
-	index  uint16
+	// index is as the request gave it, which may be wider than any point.
+	index  uint32
 	status dnp3.CommandStatus
 }
 
@@ -257,15 +258,23 @@ func (s *Session) executeCommands(
 			if off+prefixLen+size > len(h.Data) {
 				break
 			}
-			index := uint16(readPrefix(h.Data[off:], prefixLen))
+			wide := readPrefix(h.Data[off:], prefixLen)
 			raw := h.Data[off+prefixLen : off+prefixLen+size]
 			off += prefixLen + size
 
+			// A four-octet prefix can name an index no point has. Narrowing it
+			// to uint16 would wrap it onto one that does — a command for point
+			// 65541 operating point 5 — so it is refused here, before any
+			// handler sees it, the same way an unimplemented point is.
+			index := uint16(wide)
 			status := selectStatus
-			if status.OK() {
+			switch {
+			case wide > 0xFFFF:
+				status = dnp3.CommandNotSupported
+			case status.OK():
 				status = s.runCommand(h.Group, h.Variation, index, raw, selecting, opType)
 			}
-			outcomes = append(outcomes, commandOutcome{index: index, status: status})
+			outcomes = append(outcomes, commandOutcome{index: wide, status: status})
 
 			echo = append(echo, h.Data[off-prefixLen-size:off]...)
 			// The status octet is the last of every command object, so

@@ -25,12 +25,12 @@ type stringCollector struct {
 	master.NopHandler
 
 	mu      sync.Mutex
-	strings map[uint16]string
+	strings map[uint32]string
 	events  int
 }
 
 func newStringCollector() *stringCollector {
-	return &stringCollector{strings: map[uint16]string{}}
+	return &stringCollector{strings: map[uint32]string{}}
 }
 
 func (c *stringCollector) HandleOctetString(info master.HeaderInfo, vs []dnp3.Indexed[dnp3.OctetString]) {
@@ -44,7 +44,7 @@ func (c *stringCollector) HandleOctetString(info master.HeaderInfo, vs []dnp3.In
 	}
 }
 
-func (c *stringCollector) get(i uint16) string {
+func (c *stringCollector) get(i uint32) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.strings[i]
@@ -115,7 +115,7 @@ func TestOctetStringsCrossTheWire(t *testing.T) {
 	if got := coll.count(); got != 3 {
 		t.Fatalf("received %d strings, want 3", got)
 	}
-	for i, want := range map[uint16]string{0: "Feeder 1", 1: "Feeder 2", 2: "Bus tie"} {
+	for i, want := range map[uint32]string{0: "Feeder 1", 1: "Feeder 2", 2: "Bus tie"} {
 		if got := coll.get(i); got != want {
 			t.Errorf("string %d = %q, want %q", i, got, want)
 		}
@@ -131,7 +131,7 @@ func TestOctetStringsCrossTheWire(t *testing.T) {
 func TestOctetStringsOfDifferentLengths(t *testing.T) {
 	m, out, coll := stringPair(t, 4)
 
-	want := map[uint16]string{
+	want := map[uint32]string{
 		0: "A",
 		1: "Feeder 1 protection relay",
 		2: "BB",
@@ -139,7 +139,7 @@ func TestOctetStringsOfDifferentLengths(t *testing.T) {
 	}
 	out.Update(func(db *outstation.Database) {
 		for i, v := range want {
-			db.UpdateOctetString(i, []byte(v))
+			db.UpdateOctetString(uint16(i), []byte(v)) // the outstation side is 16-bit by design
 		}
 	})
 

@@ -56,6 +56,13 @@ type EventBuffer struct {
 	events   []Event
 	max      int
 	overflow bool
+
+	// drops counts events discarded to overflow, and dropsAtSelect is that
+	// count when events were last selected for a response. Comparing them on
+	// confirmation says whether anything was lost after the confirmed
+	// response was built — a loss the master has not yet been told about.
+	drops         uint64
+	dropsAtSelect uint64
 }
 
 // NewEventBuffer returns an event buffer.
@@ -84,6 +91,7 @@ func (b *EventBuffer) Add(e Event) {
 	if len(b.events) >= b.max {
 		b.events = append(b.events[:0], b.events[1:]...)
 		b.overflow = true
+		b.drops++
 	}
 	b.events = append(b.events, e)
 }
@@ -130,8 +138,9 @@ func (b *EventBuffer) Overflowed() bool {
 	return b.overflow
 }
 
-// ClearOverflow resets the overflow flag, which a master does implicitly by
-// reading the events that remain.
+// ClearOverflow resets the overflow flag. The outstation clears it itself once
+// the master confirms events reported after the overflow (see Confirm); this
+// is for an application that needs to clear it some other way.
 func (b *EventBuffer) ClearOverflow() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -145,6 +154,8 @@ func (b *EventBuffer) ClearOverflow() {
 func (b *EventBuffer) Select(mask dnp3.Class, limit int) []Event {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	b.dropsAtSelect = b.drops
 
 	if limit <= 0 {
 		return nil
@@ -194,6 +205,14 @@ func (b *EventBuffer) Confirm() int {
 		kept = append(kept, e)
 	}
 	b.events = kept
+
+	// The master has now received events sent after the overflow, on a
+	// response whose internal indications reported it, so the indication has
+	// done its job. It stays set if more were lost after that response was
+	// built: the master has not heard about those yet.
+	if removed > 0 && b.drops == b.dropsAtSelect {
+		b.overflow = false
+	}
 	return removed
 }
 

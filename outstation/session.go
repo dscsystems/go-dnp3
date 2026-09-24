@@ -621,7 +621,7 @@ func (s *Session) handle(w io.Writer, r stack.Received) error {
 		return s.onCommand(w, r, frag)
 
 	case app.FuncImmedFreeze, app.FuncImmedFreezeNR:
-		s.db.FreezeCounters()
+		s.onFreeze(frag)
 		if frag.Header.Func.NoReply() || r.Broadcast {
 			return nil
 		}
@@ -708,11 +708,15 @@ func (s *Session) onRead(w io.Writer, r stack.Received, frag app.Fragment) error
 				s.iin = s.iin.Set(app.IINObjectUnknown)
 				continue
 			}
-			start, stop := uint16(0), uint16(0xFFFF)
-			if h.Range.Spec.IsStartStop() {
-				start, stop = uint16(h.Range.Start), uint16(h.Range.Stop)
+			build := func(start, stop uint16) {
+				s.buildStaticRange(b, pt, h.Variation, start, stop)
 			}
-			s.buildStaticRange(b, pt, h.Variation, start, stop)
+			if !forEachPointRun(h, build) {
+				// A count with no index prefix says how many points but not
+				// which. It has always been answered with every point, and
+				// still is.
+				build(0, 0xFFFF)
+			}
 		}
 	}
 
@@ -962,16 +966,56 @@ func (s *Session) onAssignClass(w io.Writer, r stack.Received, frag app.Fragment
 			}
 			continue
 		}
-		if pt, ok := pointTypeForGroup(h.Group); ok {
-			s.db.AssignClass(pt, class)
-		} else {
+		pt, ok := pointTypeForGroup(h.Group)
+		if !ok {
 			s.iin = s.iin.Set(app.IINObjectUnknown)
+			continue
+		}
+		// Only the points the header names change class. Assigning the whole
+		// type regardless would move every other point too — a request to put
+		// two analogs in class 1 silently reclassifying all of them.
+		if !forEachPointRun(h, func(start, stop uint16) {
+			s.db.assignClassRange(pt, class, start, stop)
+		}) {
+			// A count with no index prefix does not say which points.
+			s.iin = s.iin.Set(app.IINParameterError)
 		}
 	}
 	if r.Broadcast {
 		return nil
 	}
 	return s.respond(w, r, frag.Header, nil)
+}
+
+// onFreeze copies the counters a freeze request names into their frozen
+// counterparts.
+//
+// A request with no objects freezes every counter. One naming counters by
+// group 20 header freezes only those: freezing the lot regardless overwrites
+// frozen values the master never asked to change.
+func (s *Session) onFreeze(frag app.Fragment) {
+	// Every counter frozen by one request shares the one moment of the freeze,
+	// taken from the application's clock and only as trustworthy as that
+	// clock: synchronized once the master has set it, unsynchronized until.
+	at := dnp3.Unsynchronized(s.appl.Now())
+	if s.synchronized {
+		at = dnp3.Now(at.Time)
+	}
+	freeze := func(start, stop uint16) { s.db.freezeCountersRange(start, stop, at) }
+
+	if len(frag.Objects) == 0 {
+		freeze(0, 0xFFFF)
+		return
+	}
+	for _, h := range frag.Objects {
+		if h.Group != 20 {
+			s.iin = s.iin.Set(app.IINObjectUnknown)
+			continue
+		}
+		if !forEachPointRun(h, freeze) {
+			s.iin = s.iin.Set(app.IINParameterError)
+		}
+	}
 }
 
 // isRepeatRequest reports whether this is the request we last acted on,

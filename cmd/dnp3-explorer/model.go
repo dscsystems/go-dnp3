@@ -70,7 +70,30 @@ func (s Screen) String() string {
 // pointKey identifies a point in the model's tables.
 type pointKey struct {
 	Type  dnp3.PointType
-	Index uint16
+	Index uint32
+}
+
+// commandIndex returns the index a command to this point is addressed with.
+// A point can be reported at a 32-bit index but commands carry 16-bit ones, so
+// a point above 65535 cannot be commanded — and narrowing its index to fit
+// would address the command to a different point.
+func (k pointKey) commandIndex() (uint16, bool) {
+	if k.Index > 0xFFFF {
+		return 0, false
+	}
+	return uint16(k.Index), true
+}
+
+// commandable resolves the index a command to k would carry, telling the
+// operator when there is none.
+func (m *Model) commandable(k pointKey) (uint16, bool) {
+	idx, ok := k.commandIndex()
+	if !ok {
+		msg := fmt.Sprintf("%s is above index 65535 and cannot be commanded", pointLabel(k))
+		m.addLog("warn", msg)
+		m.toast.show("warn", msg, m.now)
+	}
+	return idx, ok
 }
 
 // histCap bounds the per-point trend. Two minutes of a one-second scan is
@@ -604,9 +627,13 @@ func (m *Model) contextAction(key string) (tea.Model, tea.Cmd) {
 	}
 	switch p.Key.Type {
 	case dnp3.TypeBinaryOutputStatus:
-		m.openControlDialog(p)
+		if _, ok := m.commandable(p.Key); ok {
+			m.openControlDialog(p)
+		}
 	case dnp3.TypeAnalogOutputStatus:
-		m.startAnalogPrompt(p)
+		if _, ok := m.commandable(p.Key); ok {
+			m.startAnalogPrompt(p)
+		}
 	default:
 		m.detail = !m.detail
 	}
@@ -625,8 +652,11 @@ func (m *Model) quickControl(closing bool) (tea.Model, tea.Cmd) {
 		m.toast.show("warn", "no binary output selected", m.now)
 		return m, nil
 	}
-	op := latchOp(p.Index, closing)
-	return m.issueControl(op)
+	idx, ok := m.commandable(p)
+	if !ok {
+		return m, nil
+	}
+	return m.issueControl(latchOp(idx, closing))
 }
 
 // issueControl either asks first or sends, depending on the confirm setting.
@@ -700,6 +730,9 @@ func (m *Model) startDeadbandPrompt() (tea.Model, tea.Cmd) {
 	p, ok := m.selectedPoint()
 	if !ok || p.Key.Type != dnp3.TypeAnalog {
 		m.toast.show("warn", "select an analog input first", m.now)
+		return m, nil
+	}
+	if _, ok := m.commandable(p.Key); !ok {
 		return m, nil
 	}
 	m.prompt = promptState{
@@ -1015,7 +1048,11 @@ func (m *Model) submitPrompt(p promptState) (tea.Model, tea.Cmd) {
 		m.filter = p.input
 
 	case promptAnalog:
-		cmd, desc, err := parseAnalogWrite(p.target.Index, p.input)
+		idx, ok := m.commandable(p.target)
+		if !ok {
+			return m, nil
+		}
+		cmd, desc, err := parseAnalogWrite(idx, p.input)
 		if err != nil {
 			m.toast.show("error", err.Error(), m.now)
 			return m, nil
@@ -1029,8 +1066,12 @@ func (m *Model) submitPrompt(p promptState) (tea.Model, tea.Cmd) {
 			m.toast.show("error", "deadband: "+err.Error(), m.now)
 			return m, nil
 		}
-		m.addLog("info", fmt.Sprintf("writing deadband %g to AI %d", v, p.target.Index))
-		return m, m.conn.writeDeadband(p.target.Index, float32(v))
+		idx, ok := m.commandable(p.target)
+		if !ok {
+			return m, nil
+		}
+		m.addLog("info", fmt.Sprintf("writing deadband %g to AI %d", v, idx))
+		return m, m.conn.writeDeadband(idx, float32(v))
 
 	case promptRange:
 		g, v, start, stop, err := parseRangeScan(p.input)
@@ -1217,7 +1258,11 @@ func (m *Model) handleModalKey(key string) (tea.Model, tea.Cmd) {
 		}
 
 	case modalControl:
-		idx := m.modal.target.Index
+		idx, ok := m.commandable(m.modal.target)
+		if !ok {
+			m.modal = modalState{}
+			return m, nil
+		}
 		var op controlOp
 		switch key {
 		case "c":

@@ -549,8 +549,13 @@ func parseG30V1(buf []byte, ctx Context) dnp3.Analog {
 // writeG30V1 encodes g30v1, AnalogInput32WithFlag.
 func writeG30V1(dst []byte, v dnp3.Analog, ctx Context) []byte {
 	_ = ctx
-	dst = append(dst, byte(v.Flags))
-	dst = binary.LittleEndian.AppendUint32(dst, uint32(clampInt32(v.Value)))
+	n, over := clampInt32(v.Value)
+	flags := v.Flags
+	if over {
+		flags |= dnp3.OverRange
+	}
+	dst = append(dst, byte(flags))
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(n))
 	return dst
 }
 
@@ -566,8 +571,13 @@ func parseG30V2(buf []byte, ctx Context) dnp3.Analog {
 // writeG30V2 encodes g30v2, AnalogInput16WithFlag.
 func writeG30V2(dst []byte, v dnp3.Analog, ctx Context) []byte {
 	_ = ctx
-	dst = append(dst, byte(v.Flags))
-	dst = binary.LittleEndian.AppendUint16(dst, uint16(clampInt16(v.Value)))
+	n, over := clampInt16(v.Value)
+	flags := v.Flags
+	if over {
+		flags |= dnp3.OverRange
+	}
+	dst = append(dst, byte(flags))
+	dst = binary.LittleEndian.AppendUint16(dst, uint16(n))
 	return dst
 }
 
@@ -583,7 +593,8 @@ func parseG30V3(buf []byte, ctx Context) dnp3.Analog {
 // writeG30V3 encodes g30v3, AnalogInput32NoFlag.
 func writeG30V3(dst []byte, v dnp3.Analog, ctx Context) []byte {
 	_ = ctx
-	dst = binary.LittleEndian.AppendUint32(dst, uint32(clampInt32(v.Value)))
+	n, _ := clampInt32(v.Value)
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(n))
 	return dst
 }
 
@@ -599,7 +610,8 @@ func parseG30V4(buf []byte, ctx Context) dnp3.Analog {
 // writeG30V4 encodes g30v4, AnalogInput16NoFlag.
 func writeG30V4(dst []byte, v dnp3.Analog, ctx Context) []byte {
 	_ = ctx
-	dst = binary.LittleEndian.AppendUint16(dst, uint16(clampInt16(v.Value)))
+	n, _ := clampInt16(v.Value)
+	dst = binary.LittleEndian.AppendUint16(dst, uint16(n))
 	return dst
 }
 
@@ -649,8 +661,13 @@ func parseG31V1(buf []byte, ctx Context) dnp3.Analog {
 // writeG31V1 encodes g31v1, FrozenAnalog32WithFlag.
 func writeG31V1(dst []byte, v dnp3.Analog, ctx Context) []byte {
 	_ = ctx
-	dst = append(dst, byte(v.Flags))
-	dst = binary.LittleEndian.AppendUint32(dst, uint32(clampInt32(v.Value)))
+	n, over := clampInt32(v.Value)
+	flags := v.Flags
+	if over {
+		flags |= dnp3.OverRange
+	}
+	dst = append(dst, byte(flags))
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(n))
 	return dst
 }
 
@@ -666,8 +683,13 @@ func parseG31V2(buf []byte, ctx Context) dnp3.Analog {
 // writeG31V2 encodes g31v2, FrozenAnalog16WithFlag.
 func writeG31V2(dst []byte, v dnp3.Analog, ctx Context) []byte {
 	_ = ctx
-	dst = append(dst, byte(v.Flags))
-	dst = binary.LittleEndian.AppendUint16(dst, uint16(clampInt16(v.Value)))
+	n, over := clampInt16(v.Value)
+	flags := v.Flags
+	if over {
+		flags |= dnp3.OverRange
+	}
+	dst = append(dst, byte(flags))
+	dst = binary.LittleEndian.AppendUint16(dst, uint16(n))
 	return dst
 }
 
@@ -684,8 +706,13 @@ func parseG31V3(buf []byte, ctx Context) dnp3.Analog {
 // writeG31V3 encodes g31v3, FrozenAnalog32WithFlagTime.
 func writeG31V3(dst []byte, v dnp3.Analog, ctx Context) []byte {
 	_ = ctx
-	dst = append(dst, byte(v.Flags))
-	dst = binary.LittleEndian.AppendUint32(dst, uint32(clampInt32(v.Value)))
+	n, over := clampInt32(v.Value)
+	flags := v.Flags
+	if over {
+		flags |= dnp3.OverRange
+	}
+	dst = append(dst, byte(flags))
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(n))
 	dst = appendTime48(dst, dnp3.TimeToDNP3(v.Time.Time))
 	return dst
 }
@@ -703,8 +730,13 @@ func parseG31V4(buf []byte, ctx Context) dnp3.Analog {
 // writeG31V4 encodes g31v4, FrozenAnalog16WithFlagTime.
 func writeG31V4(dst []byte, v dnp3.Analog, ctx Context) []byte {
 	_ = ctx
-	dst = append(dst, byte(v.Flags))
-	dst = binary.LittleEndian.AppendUint16(dst, uint16(clampInt16(v.Value)))
+	n, over := clampInt16(v.Value)
+	flags := v.Flags
+	if over {
+		flags |= dnp3.OverRange
+	}
+	dst = append(dst, byte(flags))
+	dst = binary.LittleEndian.AppendUint16(dst, uint16(n))
 	dst = appendTime48(dst, dnp3.TimeToDNP3(v.Time.Time))
 	return dst
 }
@@ -721,7 +753,8 @@ func parseG31V5(buf []byte, ctx Context) dnp3.Analog {
 // writeG31V5 encodes g31v5, FrozenAnalog32NoFlag.
 func writeG31V5(dst []byte, v dnp3.Analog, ctx Context) []byte {
 	_ = ctx
-	dst = binary.LittleEndian.AppendUint32(dst, uint32(clampInt32(v.Value)))
+	n, _ := clampInt32(v.Value)
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(n))
 	return dst
 }
 
@@ -737,7 +770,8 @@ func parseG31V6(buf []byte, ctx Context) dnp3.Analog {
 // writeG31V6 encodes g31v6, FrozenAnalog16NoFlag.
 func writeG31V6(dst []byte, v dnp3.Analog, ctx Context) []byte {
 	_ = ctx
-	dst = binary.LittleEndian.AppendUint16(dst, uint16(clampInt16(v.Value)))
+	n, _ := clampInt16(v.Value)
+	dst = binary.LittleEndian.AppendUint16(dst, uint16(n))
 	return dst
 }
 
@@ -787,8 +821,13 @@ func parseG32V1(buf []byte, ctx Context) dnp3.Analog {
 // writeG32V1 encodes g32v1, AnalogEvent32WithFlag.
 func writeG32V1(dst []byte, v dnp3.Analog, ctx Context) []byte {
 	_ = ctx
-	dst = append(dst, byte(v.Flags))
-	dst = binary.LittleEndian.AppendUint32(dst, uint32(clampInt32(v.Value)))
+	n, over := clampInt32(v.Value)
+	flags := v.Flags
+	if over {
+		flags |= dnp3.OverRange
+	}
+	dst = append(dst, byte(flags))
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(n))
 	return dst
 }
 
@@ -804,8 +843,13 @@ func parseG32V2(buf []byte, ctx Context) dnp3.Analog {
 // writeG32V2 encodes g32v2, AnalogEvent16WithFlag.
 func writeG32V2(dst []byte, v dnp3.Analog, ctx Context) []byte {
 	_ = ctx
-	dst = append(dst, byte(v.Flags))
-	dst = binary.LittleEndian.AppendUint16(dst, uint16(clampInt16(v.Value)))
+	n, over := clampInt16(v.Value)
+	flags := v.Flags
+	if over {
+		flags |= dnp3.OverRange
+	}
+	dst = append(dst, byte(flags))
+	dst = binary.LittleEndian.AppendUint16(dst, uint16(n))
 	return dst
 }
 
@@ -822,8 +866,13 @@ func parseG32V3(buf []byte, ctx Context) dnp3.Analog {
 // writeG32V3 encodes g32v3, AnalogEvent32WithFlagTime.
 func writeG32V3(dst []byte, v dnp3.Analog, ctx Context) []byte {
 	_ = ctx
-	dst = append(dst, byte(v.Flags))
-	dst = binary.LittleEndian.AppendUint32(dst, uint32(clampInt32(v.Value)))
+	n, over := clampInt32(v.Value)
+	flags := v.Flags
+	if over {
+		flags |= dnp3.OverRange
+	}
+	dst = append(dst, byte(flags))
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(n))
 	dst = appendTime48(dst, dnp3.TimeToDNP3(v.Time.Time))
 	return dst
 }
@@ -841,8 +890,13 @@ func parseG32V4(buf []byte, ctx Context) dnp3.Analog {
 // writeG32V4 encodes g32v4, AnalogEvent16WithFlagTime.
 func writeG32V4(dst []byte, v dnp3.Analog, ctx Context) []byte {
 	_ = ctx
-	dst = append(dst, byte(v.Flags))
-	dst = binary.LittleEndian.AppendUint16(dst, uint16(clampInt16(v.Value)))
+	n, over := clampInt16(v.Value)
+	flags := v.Flags
+	if over {
+		flags |= dnp3.OverRange
+	}
+	dst = append(dst, byte(flags))
+	dst = binary.LittleEndian.AppendUint16(dst, uint16(n))
 	dst = appendTime48(dst, dnp3.TimeToDNP3(v.Time.Time))
 	return dst
 }
@@ -931,8 +985,13 @@ func parseG33V1(buf []byte, ctx Context) dnp3.Analog {
 // writeG33V1 encodes g33v1, FrozenAnalogEvent32WithFlag.
 func writeG33V1(dst []byte, v dnp3.Analog, ctx Context) []byte {
 	_ = ctx
-	dst = append(dst, byte(v.Flags))
-	dst = binary.LittleEndian.AppendUint32(dst, uint32(clampInt32(v.Value)))
+	n, over := clampInt32(v.Value)
+	flags := v.Flags
+	if over {
+		flags |= dnp3.OverRange
+	}
+	dst = append(dst, byte(flags))
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(n))
 	return dst
 }
 
@@ -948,8 +1007,13 @@ func parseG33V2(buf []byte, ctx Context) dnp3.Analog {
 // writeG33V2 encodes g33v2, FrozenAnalogEvent16WithFlag.
 func writeG33V2(dst []byte, v dnp3.Analog, ctx Context) []byte {
 	_ = ctx
-	dst = append(dst, byte(v.Flags))
-	dst = binary.LittleEndian.AppendUint16(dst, uint16(clampInt16(v.Value)))
+	n, over := clampInt16(v.Value)
+	flags := v.Flags
+	if over {
+		flags |= dnp3.OverRange
+	}
+	dst = append(dst, byte(flags))
+	dst = binary.LittleEndian.AppendUint16(dst, uint16(n))
 	return dst
 }
 
@@ -966,8 +1030,13 @@ func parseG33V3(buf []byte, ctx Context) dnp3.Analog {
 // writeG33V3 encodes g33v3, FrozenAnalogEvent32WithFlagTime.
 func writeG33V3(dst []byte, v dnp3.Analog, ctx Context) []byte {
 	_ = ctx
-	dst = append(dst, byte(v.Flags))
-	dst = binary.LittleEndian.AppendUint32(dst, uint32(clampInt32(v.Value)))
+	n, over := clampInt32(v.Value)
+	flags := v.Flags
+	if over {
+		flags |= dnp3.OverRange
+	}
+	dst = append(dst, byte(flags))
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(n))
 	dst = appendTime48(dst, dnp3.TimeToDNP3(v.Time.Time))
 	return dst
 }
@@ -985,8 +1054,13 @@ func parseG33V4(buf []byte, ctx Context) dnp3.Analog {
 // writeG33V4 encodes g33v4, FrozenAnalogEvent16WithFlagTime.
 func writeG33V4(dst []byte, v dnp3.Analog, ctx Context) []byte {
 	_ = ctx
-	dst = append(dst, byte(v.Flags))
-	dst = binary.LittleEndian.AppendUint16(dst, uint16(clampInt16(v.Value)))
+	n, over := clampInt16(v.Value)
+	flags := v.Flags
+	if over {
+		flags |= dnp3.OverRange
+	}
+	dst = append(dst, byte(flags))
+	dst = binary.LittleEndian.AppendUint16(dst, uint16(n))
 	dst = appendTime48(dst, dnp3.TimeToDNP3(v.Time.Time))
 	return dst
 }
@@ -1180,8 +1254,13 @@ func parseG40V1(buf []byte, ctx Context) dnp3.AnalogOutputStatus {
 // writeG40V1 encodes g40v1, AnalogOutputStatus32.
 func writeG40V1(dst []byte, v dnp3.AnalogOutputStatus, ctx Context) []byte {
 	_ = ctx
-	dst = append(dst, byte(v.Flags))
-	dst = binary.LittleEndian.AppendUint32(dst, uint32(clampInt32(v.Value)))
+	n, over := clampInt32(v.Value)
+	flags := v.Flags
+	if over {
+		flags |= dnp3.OverRange
+	}
+	dst = append(dst, byte(flags))
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(n))
 	return dst
 }
 
@@ -1197,8 +1276,13 @@ func parseG40V2(buf []byte, ctx Context) dnp3.AnalogOutputStatus {
 // writeG40V2 encodes g40v2, AnalogOutputStatus16.
 func writeG40V2(dst []byte, v dnp3.AnalogOutputStatus, ctx Context) []byte {
 	_ = ctx
-	dst = append(dst, byte(v.Flags))
-	dst = binary.LittleEndian.AppendUint16(dst, uint16(clampInt16(v.Value)))
+	n, over := clampInt16(v.Value)
+	flags := v.Flags
+	if over {
+		flags |= dnp3.OverRange
+	}
+	dst = append(dst, byte(flags))
+	dst = binary.LittleEndian.AppendUint16(dst, uint16(n))
 	return dst
 }
 
@@ -1248,8 +1332,13 @@ func parseG42V1(buf []byte, ctx Context) dnp3.AnalogOutputStatus {
 // writeG42V1 encodes g42v1, AnalogOutputEvent32.
 func writeG42V1(dst []byte, v dnp3.AnalogOutputStatus, ctx Context) []byte {
 	_ = ctx
-	dst = append(dst, byte(v.Flags))
-	dst = binary.LittleEndian.AppendUint32(dst, uint32(clampInt32(v.Value)))
+	n, over := clampInt32(v.Value)
+	flags := v.Flags
+	if over {
+		flags |= dnp3.OverRange
+	}
+	dst = append(dst, byte(flags))
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(n))
 	return dst
 }
 
@@ -1265,8 +1354,13 @@ func parseG42V2(buf []byte, ctx Context) dnp3.AnalogOutputStatus {
 // writeG42V2 encodes g42v2, AnalogOutputEvent16.
 func writeG42V2(dst []byte, v dnp3.AnalogOutputStatus, ctx Context) []byte {
 	_ = ctx
-	dst = append(dst, byte(v.Flags))
-	dst = binary.LittleEndian.AppendUint16(dst, uint16(clampInt16(v.Value)))
+	n, over := clampInt16(v.Value)
+	flags := v.Flags
+	if over {
+		flags |= dnp3.OverRange
+	}
+	dst = append(dst, byte(flags))
+	dst = binary.LittleEndian.AppendUint16(dst, uint16(n))
 	return dst
 }
 
@@ -1283,8 +1377,13 @@ func parseG42V3(buf []byte, ctx Context) dnp3.AnalogOutputStatus {
 // writeG42V3 encodes g42v3, AnalogOutputEvent32Time.
 func writeG42V3(dst []byte, v dnp3.AnalogOutputStatus, ctx Context) []byte {
 	_ = ctx
-	dst = append(dst, byte(v.Flags))
-	dst = binary.LittleEndian.AppendUint32(dst, uint32(clampInt32(v.Value)))
+	n, over := clampInt32(v.Value)
+	flags := v.Flags
+	if over {
+		flags |= dnp3.OverRange
+	}
+	dst = append(dst, byte(flags))
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(n))
 	dst = appendTime48(dst, dnp3.TimeToDNP3(v.Time.Time))
 	return dst
 }
@@ -1302,8 +1401,13 @@ func parseG42V4(buf []byte, ctx Context) dnp3.AnalogOutputStatus {
 // writeG42V4 encodes g42v4, AnalogOutputEvent16Time.
 func writeG42V4(dst []byte, v dnp3.AnalogOutputStatus, ctx Context) []byte {
 	_ = ctx
-	dst = append(dst, byte(v.Flags))
-	dst = binary.LittleEndian.AppendUint16(dst, uint16(clampInt16(v.Value)))
+	n, over := clampInt16(v.Value)
+	flags := v.Flags
+	if over {
+		flags |= dnp3.OverRange
+	}
+	dst = append(dst, byte(flags))
+	dst = binary.LittleEndian.AppendUint16(dst, uint16(n))
 	dst = appendTime48(dst, dnp3.TimeToDNP3(v.Time.Time))
 	return dst
 }

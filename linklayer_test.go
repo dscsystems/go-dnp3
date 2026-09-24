@@ -137,7 +137,7 @@ func TestConfirmedLinkMultiFragment(t *testing.T) {
 		t.Fatalf("received %d analog points, want 300", len(analog))
 	}
 	for i := range 300 {
-		if got := analog[uint16(i)].Value; got != float64(i) {
+		if got := analog[uint32(i)].Value; got != float64(i) {
 			t.Fatalf("analog %d = %v, want %d", i, got, i)
 		}
 	}

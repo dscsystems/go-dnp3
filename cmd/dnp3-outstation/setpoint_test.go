@@ -24,11 +24,11 @@ type collector struct {
 	master.NopHandler
 
 	mu      sync.Mutex
-	outputs map[uint16]float64
+	outputs map[uint32]float64
 }
 
 func newCollector() *collector {
-	return &collector{outputs: map[uint16]float64{}}
+	return &collector{outputs: map[uint32]float64{}}
 }
 
 func (c *collector) HandleAnalogOutputStatus(_ master.HeaderInfo, vs []dnp3.Indexed[dnp3.AnalogOutputStatus]) {
@@ -39,7 +39,7 @@ func (c *collector) HandleAnalogOutputStatus(_ master.HeaderInfo, vs []dnp3.Inde
 	}
 }
 
-func (c *collector) output(index uint16) (float64, bool) {
+func (c *collector) output(index uint32) (float64, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	v, ok := c.outputs[index]
@@ -114,11 +114,11 @@ func TestSetpointIsAssumedAndReported(t *testing.T) {
 		if err := m.IntegrityPoll(ctx); err != nil {
 			return false
 		}
-		got, ok := coll.output(index)
+		got, ok := coll.output(uint32(index))
 		return ok && math.Abs(got-want) < 0.001
 	})
 
-	got, _ := coll.output(index)
+	got, _ := coll.output(uint32(index))
 	if math.Abs(got-want) > 0.001 {
 		t.Errorf("the outstation reports %v, want the %v it was written", got, want)
 	}
@@ -138,7 +138,7 @@ func TestSetpointIsHeld(t *testing.T) {
 	}
 	waitFor(t, 3*time.Second, func() bool {
 		_ = m.IntegrityPoll(ctx)
-		got, ok := coll.output(index)
+		got, ok := coll.output(uint32(index))
 		return ok && got == want
 	})
 
@@ -149,7 +149,7 @@ func TestSetpointIsHeld(t *testing.T) {
 		if err := m.IntegrityPoll(ctx); err != nil {
 			t.Fatalf("poll: %v", err)
 		}
-		if got, _ := coll.output(index); got != want {
+		if got, _ := coll.output(uint32(index)); got != want {
 			t.Fatalf("the setpoint drifted to %v", got)
 		}
 	}

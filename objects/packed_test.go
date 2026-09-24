@@ -247,36 +247,41 @@ func TestClampSaturatesRatherThanWrapping(t *testing.T) {
 		name string
 		in   float64
 		want int16
+		over bool
 	}{
-		{"in range", 300, 300},
-		{"at the maximum", 32767, 32767},
-		{"over the maximum", 40000, 32767},
-		{"far over", 1e12, 32767},
-		{"at the minimum", -32768, -32768},
-		{"under the minimum", -40000, -32768},
-		{"positive infinity", math.Inf(1), 32767},
-		{"negative infinity", math.Inf(-1), -32768},
-		{"not a number", math.NaN(), 0},
+		{"in range", 300, 300, false},
+		{"at the maximum", 32767, 32767, false},
+		{"over the maximum", 40000, 32767, true},
+		{"far over", 1e12, 32767, true},
+		{"at the minimum", -32768, -32768, false},
+		{"under the minimum", -40000, -32768, true},
+		{"positive infinity", math.Inf(1), 32767, true},
+		{"negative infinity", math.Inf(-1), -32768, true},
+		{"not a number", math.NaN(), 0, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := clampInt16(tc.in); got != tc.want {
-				t.Errorf("clampInt16(%v) = %d, want %d", tc.in, got, tc.want)
+			got, over := clampInt16(tc.in)
+			if got != tc.want || over != tc.over {
+				t.Errorf("clampInt16(%v) = %d, %v; want %d, %v", tc.in, got, over, tc.want, tc.over)
 			}
 		})
 	}
 
-	if got := clampInt32(1e12); got != math.MaxInt32 {
-		t.Errorf("clampInt32(1e12) = %d, want %d", got, int32(math.MaxInt32))
+	if got, over := clampInt32(1e12); got != math.MaxInt32 || !over {
+		t.Errorf("clampInt32(1e12) = %d, %v; want %d, true", got, over, int32(math.MaxInt32))
 	}
-	if got := clampUint16(-5); got != 0 {
-		t.Errorf("clampUint16(-5) = %d, want 0", got)
+	if got, over := clampUint16(-5); got != 0 || !over {
+		t.Errorf("clampUint16(-5) = %d, %v; want 0, true", got, over)
 	}
-	if got := clampUint32(1e12); got != math.MaxUint32 {
-		t.Errorf("clampUint32(1e12) = %d, want %d", got, uint32(math.MaxUint32))
+	if got, over := clampUint16(0); got != 0 || over {
+		t.Errorf("clampUint16(0) = %d, %v; want 0, false", got, over)
 	}
-	if got := clampUint32(math.NaN()); got != 0 {
-		t.Errorf("clampUint32(NaN) = %d, want 0", got)
+	if got, over := clampUint32(1e12); got != math.MaxUint32 || !over {
+		t.Errorf("clampUint32(1e12) = %d, %v; want %d, true", got, over, uint32(math.MaxUint32))
+	}
+	if got, over := clampUint32(math.NaN()); got != 0 || !over {
+		t.Errorf("clampUint32(NaN) = %d, %v; want 0, true", got, over)
 	}
 }
 

@@ -105,9 +105,9 @@ func decodeRun[T any](
 			break
 		}
 
-		index := uint16(h.Range.IndexOf(uint32(i)))
+		index := h.Range.IndexOf(uint32(i))
 		if prefixLen > 0 {
-			index = uint16(readPrefix(h.Data[off:], prefixLen))
+			index = readPrefix(h.Data[off:], prefixLen)
 			off += prefixLen
 		}
 
@@ -131,7 +131,7 @@ func (s *Session) dispatchPacked(h app.ObjectHeader, d objects.Descriptor, info 
 		raw := objects.ParsePackedBinary(h.Data, count, nil)
 		out := make([]dnp3.Indexed[dnp3.Binary], len(raw))
 		for i, v := range raw {
-			out[i] = dnp3.Indexed[dnp3.Binary]{Index: uint16(start + uint32(i)), Value: v}
+			out[i] = dnp3.Indexed[dnp3.Binary]{Index: start + uint32(i), Value: v}
 		}
 		s.handler.HandleBinary(info, out)
 
@@ -139,7 +139,7 @@ func (s *Session) dispatchPacked(h app.ObjectHeader, d objects.Descriptor, info 
 		raw := objects.ParsePackedDoubleBit(h.Data, count, nil)
 		out := make([]dnp3.Indexed[dnp3.DoubleBitBinary], len(raw))
 		for i, v := range raw {
-			out[i] = dnp3.Indexed[dnp3.DoubleBitBinary]{Index: uint16(start + uint32(i)), Value: v}
+			out[i] = dnp3.Indexed[dnp3.DoubleBitBinary]{Index: start + uint32(i), Value: v}
 		}
 		s.handler.HandleDoubleBit(info, out)
 
@@ -147,7 +147,7 @@ func (s *Session) dispatchPacked(h app.ObjectHeader, d objects.Descriptor, info 
 		raw := objects.ParsePackedBinaryOutput(h.Data, count, nil)
 		out := make([]dnp3.Indexed[dnp3.BinaryOutputStatus], len(raw))
 		for i, v := range raw {
-			out[i] = dnp3.Indexed[dnp3.BinaryOutputStatus]{Index: uint16(start + uint32(i)), Value: v}
+			out[i] = dnp3.Indexed[dnp3.BinaryOutputStatus]{Index: start + uint32(i), Value: v}
 		}
 		s.handler.HandleBinaryOutputStatus(info, out)
 	}
@@ -179,9 +179,9 @@ func (s *Session) dispatchOctetStrings(h app.ObjectHeader, info HeaderInfo, isEv
 		if off+prefixLen+size > len(h.Data) {
 			break
 		}
-		index := uint16(h.Range.IndexOf(uint32(i)))
+		index := h.Range.IndexOf(uint32(i))
 		if prefixLen > 0 {
-			index = uint16(readPrefix(h.Data[off:], prefixLen))
+			index = readPrefix(h.Data[off:], prefixLen)
 			off += prefixLen
 		}
 		// Copied: the header aliases the session's receive buffer, and a

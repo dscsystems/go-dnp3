@@ -187,8 +187,14 @@ type OctetString []byte
 const MaxOctetStringLen = 255
 
 // Indexed pairs a measurement with the point index it was reported at.
+//
+// Index is 32 bits because that is what the protocol can carry: an object
+// header may address points with a four-octet range or prefix. It was once 16,
+// and a master narrowing what an outstation reported to fit it delivered point
+// 70000 as point 4464 — a real measurement attributed to a different point,
+// with nothing to say so.
 type Indexed[T any] struct {
-	Index uint16
+	Index uint32
 	Value T
 }
 

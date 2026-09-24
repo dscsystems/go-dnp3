@@ -110,6 +110,14 @@ func objectDataLen(sizer ObjectSizer, h ObjectHeader, buf []byte, carriesData bo
 	}
 
 	if !carriesData {
+		// No object data follows, but a list of point indexes may. A request
+		// naming individual points — a read of points 3 and 7 — uses a count
+		// qualifier with an index prefix, and the prefixes are on the wire
+		// even though nothing comes after them. Skipping them would take the
+		// first index for the next object header and reject the request.
+		if prefix.IsIndex() && h.Range.Spec.IsCount() {
+			return checkFits(uint64(h.Range.Count)*uint64(prefix.Octets()), buf)
+		}
 		return 0, nil
 	}
 	// Variation zero means "whatever variation you use by default". It appears

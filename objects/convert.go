@@ -27,58 +27,71 @@ func readTime48(buf []byte) uint64 {
 //
 // That matters here. An analog point configured as 16-bit whose reading drifts
 // past 32767 would encode as -32768: a value at the opposite end of the scale,
-// indistinguishable from a real reading. Saturating is not perfect either, but
-// a pegged reading is recognisable as a pegged reading, and the OVER_RANGE
-// quality bit is there to say so.
+// indistinguishable from a real reading. Saturating is not enough on its own
+// either, because a pegged 32767 looks exactly like a real 32767. So each
+// helper also reports whether the value fell outside what the type can hold,
+// and the generated writers set OVER_RANGE when it did — which is what the
+// flag exists for: the value exceeds the range of the variation reported.
+//
+// NaN counts as out of range. It has no integer representation at all, and
+// reporting it as a plain zero would pass a failed reading off as a real one.
 
-// clampInt16 converts to int16, saturating rather than wrapping.
-func clampInt16(v float64) int16 {
+// clampInt16 converts to int16, saturating rather than wrapping, and reports
+// whether v was outside the int16 range.
+func clampInt16(v float64) (int16, bool) {
 	switch {
 	case math.IsNaN(v):
-		return 0
-	case v >= math.MaxInt16:
-		return math.MaxInt16
-	case v <= math.MinInt16:
-		return math.MinInt16
+		return 0, true
+	case v > math.MaxInt16:
+		return math.MaxInt16, true
+	case v < math.MinInt16:
+		return math.MinInt16, true
 	default:
-		return int16(v)
+		return int16(v), false
 	}
 }
 
-// clampInt32 converts to int32, saturating rather than wrapping.
-func clampInt32(v float64) int32 {
+// clampInt32 converts to int32, saturating rather than wrapping, and reports
+// whether v was outside the int32 range.
+func clampInt32(v float64) (int32, bool) {
 	switch {
 	case math.IsNaN(v):
-		return 0
-	case v >= math.MaxInt32:
-		return math.MaxInt32
-	case v <= math.MinInt32:
-		return math.MinInt32
+		return 0, true
+	case v > math.MaxInt32:
+		return math.MaxInt32, true
+	case v < math.MinInt32:
+		return math.MinInt32, true
 	default:
-		return int32(v)
+		return int32(v), false
 	}
 }
 
-// clampUint16 converts to uint16, saturating rather than wrapping.
-func clampUint16(v float64) uint16 {
+// clampUint16 converts to uint16, saturating rather than wrapping, and reports
+// whether v was outside the uint16 range.
+func clampUint16(v float64) (uint16, bool) {
 	switch {
-	case math.IsNaN(v) || v <= 0:
-		return 0
-	case v >= math.MaxUint16:
-		return math.MaxUint16
+	case math.IsNaN(v):
+		return 0, true
+	case v < 0:
+		return 0, true
+	case v > math.MaxUint16:
+		return math.MaxUint16, true
 	default:
-		return uint16(v)
+		return uint16(v), false
 	}
 }
 
-// clampUint32 converts to uint32, saturating rather than wrapping.
-func clampUint32(v float64) uint32 {
+// clampUint32 converts to uint32, saturating rather than wrapping, and reports
+// whether v was outside the uint32 range.
+func clampUint32(v float64) (uint32, bool) {
 	switch {
-	case math.IsNaN(v) || v <= 0:
-		return 0
-	case v >= math.MaxUint32:
-		return math.MaxUint32
+	case math.IsNaN(v):
+		return 0, true
+	case v < 0:
+		return 0, true
+	case v > math.MaxUint32:
+		return math.MaxUint32, true
 	default:
-		return uint32(v)
+		return uint32(v), false
 	}
 }

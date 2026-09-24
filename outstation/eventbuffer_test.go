@@ -189,3 +189,60 @@ func TestDefaultCapacity(t *testing.T) {
 		t.Errorf("%d events buffered, want the default %d", b.Total(), DefaultMaxEvents)
 	}
 }
+
+// EVENT_BUFFER_OVERFLOW exists to tell the master its record has a hole. Once
+// the master has confirmed events reported after the overflow — on a response
+// whose indications carried it — the indication has done its job, and a flag
+// that stays set forever tells the master nothing on every later response.
+func TestOverflowClearsOnceReportedEventsAreConfirmed(t *testing.T) {
+	b := NewEventBuffer(EventBufferConfig{MaxEvents: 2})
+	for i := range uint16(3) {
+		b.Add(Event{Type: dnp3.TypeBinary, Index: i, Class: dnp3.Class1})
+	}
+	if !b.Overflowed() {
+		t.Fatal("adding past capacity did not latch the overflow")
+	}
+
+	b.Select(dnp3.Class1, 10)
+	b.Confirm()
+
+	if b.Overflowed() {
+		t.Error("the overflow indication stayed set after the master confirmed the events " +
+			"reported with it")
+	}
+}
+
+// An overflow that happens after a response is built was not reported on it,
+// so confirming that response must not clear it: the master has not heard
+// about that loss yet.
+func TestOverflowAfterSelectionSurvivesTheConfirm(t *testing.T) {
+	b := NewEventBuffer(EventBufferConfig{MaxEvents: 2})
+	b.Add(Event{Type: dnp3.TypeBinary, Index: 0, Class: dnp3.Class1})
+	b.Add(Event{Type: dnp3.TypeBinary, Index: 1, Class: dnp3.Class1})
+
+	b.Select(dnp3.Class1, 10)
+	// Two more arrive while that response is in flight; the second overflows.
+	b.Add(Event{Type: dnp3.TypeBinary, Index: 2, Class: dnp3.Class1})
+	b.Add(Event{Type: dnp3.TypeBinary, Index: 3, Class: dnp3.Class1})
+	b.Confirm()
+
+	if !b.Overflowed() {
+		t.Error("an overflow that occurred after the response was built was cleared by " +
+			"confirming it, before the master was ever told")
+	}
+}
+
+// Confirming a response that carried no events says nothing about whether
+// the master has caught up, so it must not clear the indication either.
+func TestOverflowSurvivesAConfirmThatRemovedNothing(t *testing.T) {
+	b := NewEventBuffer(EventBufferConfig{MaxEvents: 1})
+	b.Add(Event{Type: dnp3.TypeBinary, Index: 0, Class: dnp3.Class1})
+	b.Add(Event{Type: dnp3.TypeBinary, Index: 1, Class: dnp3.Class1})
+
+	b.Select(dnp3.Class2, 10) // selects nothing
+	b.Confirm()
+
+	if !b.Overflowed() {
+		t.Error("a confirm that removed no events cleared the overflow indication")
+	}
+}

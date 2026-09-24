@@ -1,6 +1,8 @@
 package outstation
 
 import (
+	"encoding/binary"
+
 	"github.com/dscsystems/go-dnp3"
 	"github.com/dscsystems/go-dnp3/internal/app"
 	"github.com/dscsystems/go-dnp3/objects"
@@ -96,16 +98,107 @@ func (s *Session) buildStaticRange(b *responseBuilder, pt dnp3.PointType, variat
 		return
 	}
 
-	if variation == 0 {
-		// Variation zero means "use your default", which is the per-point
-		// static variation the configuration set.
-		_, cfg, ok := s.pointConfig(pt, start)
+	if variation != 0 {
+		// An explicit variation is the master's choice, and every point in the
+		// range is reported as what it asked for.
+		s.buildStaticRun(b, pt, variation, start, stop)
+		return
+	}
+
+	// Variation zero means "each point's own default" — the static variation
+	// its configuration set, which can differ from one point to the next. An
+	// object header carries exactly one variation, so points that disagree
+	// cannot share one: the range is reported as runs of consecutive points
+	// that agree, each under its own header.
+	//
+	// Resolving the variation once from the first point and applying it to the
+	// rest reports every later point in a variation it did not ask for. For a
+	// float analog following an integer one, that means through the integer
+	// codec, and the master reads back a truncated value it has no way to
+	// know is wrong.
+	//
+	// The loop runs on int so a range ending at 0xFFFF cannot wrap.
+	for idx := int(start); idx <= int(stop); {
+		v, ok := s.staticVariation(pt, uint16(idx))
 		if !ok {
 			return
 		}
-		variation = cfg.StaticVariation
+		end := idx
+		for end < int(stop) {
+			next, ok := s.staticVariation(pt, uint16(end+1))
+			if !ok || next != v {
+				break
+			}
+			end++
+		}
+		s.buildStaticRun(b, pt, v, uint16(idx), uint16(end))
+		idx = end + 1
 	}
+}
 
+// forEachPointRun calls fn for each run of consecutive point indexes a
+// request header names, and reports whether the header names points in a
+// form the outstation understands:
+//
+//   - all objects: every point;
+//   - a start-stop range: that range;
+//   - a count with an index prefix: the listed indexes, consecutive ones
+//     merged into a single run.
+//
+// A count with no index prefix says how many points but not which, and is
+// left to the caller. Indexes above the 16-bit point space name no point: a
+// range starting there is empty, one ending there stops at the top, and a
+// listed one is skipped. Narrowing them to uint16 instead would wrap each onto
+// a point that does exist.
+func forEachPointRun(h app.ObjectHeader, fn func(start, stop uint16)) bool {
+	spec := h.Range.Spec
+	switch {
+	case spec == app.RangeAllObjects:
+		fn(0, 0xFFFF)
+
+	case spec.IsStartStop():
+		if h.Range.Start <= 0xFFFF {
+			fn(uint16(h.Range.Start), uint16(min(h.Range.Stop, 0xFFFF)))
+		}
+
+	case spec.IsCount() && h.Qualifier.IndexPrefix().IsIndex():
+		width := h.Qualifier.IndexPrefix().Octets()
+		var first, last uint32
+		open := false
+		for off := 0; off+width <= len(h.Data); off += width {
+			idx := readPrefix(h.Data[off:], width)
+			switch {
+			case idx > 0xFFFF:
+				continue
+			case open && idx == last+1:
+				last = idx
+				continue
+			}
+			if open {
+				fn(uint16(first), uint16(last))
+			}
+			first, last, open = idx, idx, true
+		}
+		if open {
+			fn(uint16(first), uint16(last))
+		}
+
+	default:
+		return false
+	}
+	return true
+}
+
+// staticVariation returns the static variation a point is configured to be
+// reported in.
+func (s *Session) staticVariation(pt dnp3.PointType, index uint16) (uint8, bool) {
+	_, cfg, ok := s.pointConfig(pt, index)
+	return cfg.StaticVariation, ok
+}
+
+// buildStaticRun reports points start through stop, all in one variation,
+// splitting across fragments as the space in each allows.
+func (s *Session) buildStaticRun(b *responseBuilder, pt dnp3.PointType, variation uint8, start, stop uint16) {
 	gv := staticGroupVar(pt, variation)
 	d, ok := objects.Lookup(gv)
 	if !ok {
@@ -116,7 +209,9 @@ func (s *Session) buildStaticRange(b *responseBuilder, pt dnp3.PointType, variat
 		return
 	}
 
-	for idx := start; idx <= stop; {
+	// Indexes are carried as int: stepping a uint16 past a run that ends at
+	// 0xFFFF wraps it to zero, and the loop never terminates.
+	for idx := int(start); idx <= int(stop); {
 		// How many points fit in what is left of the fragment, after the
 		// header and its range field.
 		const headerOverhead = app.ObjectHeaderSize + 4 // worst-case 16-bit range
@@ -129,15 +224,15 @@ func (s *Session) buildStaticRange(b *responseBuilder, pt dnp3.PointType, variat
 			}
 		}
 
-		runLen := min(avail/size, int(stop-idx)+1)
-		last := idx + uint16(runLen) - 1
+		runLen := min(avail/size, int(stop)-idx+1)
+		last := idx + runLen - 1
 
 		data := make([]byte, 0, runLen*size)
 		for i := idx; i <= last; i++ {
-			data = s.encodeStatic(data, pt, gv, i, b.ctx)
+			data = s.encodeStatic(data, pt, gv, uint16(i), b.ctx)
 		}
 
-		b.add(rangeObjectHeader(gv, idx, last, data))
+		b.add(rangeObjectHeader(gv, uint16(idx), uint16(last), data))
 		idx = last + 1
 	}
 }
@@ -267,8 +362,13 @@ func (s *Session) buildOctetStrings(b *responseBuilder, start, stop uint16) {
 		return
 	}
 
-	for idx := start; idx <= stop; {
-		v, _, ok := s.db.OctetString(idx)
+	// Indexes are carried as int for the same reason as in buildStaticRun:
+	// stepping a uint16 past 0xFFFF wraps it to zero and the loop never ends.
+	// Here the run arithmetic can also overflow well before the top — idx plus
+	// a fragment's worth of strings passes 0xFFFF once idx is past about
+	// 63,500 — which would put the end of a run before its start.
+	for idx := int(start); idx <= int(stop); {
+		v, _, ok := s.db.OctetString(uint16(idx))
 		if !ok {
 			return
 		}
@@ -278,8 +378,8 @@ func (s *Session) buildOctetStrings(b *responseBuilder, start, stop uint16) {
 
 		// Collect the run of following points with the same length.
 		last := idx
-		for last < stop {
-			next, _, ok := s.db.OctetString(last + 1)
+		for last < int(stop) {
+			next, _, ok := s.db.OctetString(uint16(last + 1))
 			if !ok || max(len(next), 1) != length {
 				break
 			}
@@ -296,15 +396,15 @@ func (s *Session) buildOctetStrings(b *responseBuilder, start, stop uint16) {
 					return
 				}
 			}
-			runEnd := min(idx+uint16(avail/length)-1, last)
+			runEnd := min(idx+avail/length-1, last)
 
-			data := make([]byte, 0, int(runEnd-idx+1)*length)
+			data := make([]byte, 0, (runEnd-idx+1)*length)
 			for i := idx; i <= runEnd; i++ {
-				str, _, _ := s.db.OctetString(i)
+				str, _, _ := s.db.OctetString(uint16(i))
 				data = appendOctetString(data, str, length)
 			}
 
-			b.add(rangeObjectHeader(objects.GV(110, uint8(length)), idx, runEnd, data))
+			b.add(rangeObjectHeader(objects.GV(110, uint8(length)), uint16(idx), uint16(runEnd), data))
 			idx = runEnd + 1
 		}
 	}
@@ -389,8 +489,22 @@ func (s *Session) buildEvents(b *responseBuilder, events []Event) {
 			j++
 		}
 
-		perObject := 1 + size // a one-octet index prefix plus the object
-		const headerOverhead = app.ObjectHeaderSize + 1
+		// Each event carries its point index as a prefix, and the prefix has to
+		// be wide enough for every index in the run. A one-octet prefix holds
+		// only 0-255: writing index 300 into it reports the event against
+		// point 44, and the master has no way to know. One octet is kept where
+		// it fits, which is the common case and the smaller encoding; a run
+		// reaching past 255 moves to two octets, and so to a two-octet count.
+		prefix, spec, maxCount := app.PrefixIndex1, app.RangeCount8, 0xFF
+		for k := i; k < j; k++ {
+			if events[k].Index > 0xFF {
+				prefix, spec, maxCount = app.PrefixIndex2, app.RangeCount16, 0xFFFF
+				break
+			}
+		}
+		prefixLen := prefix.Octets()
+		perObject := prefixLen + size
+		headerOverhead := app.ObjectHeaderSize + spec.Octets()
 
 		for i < j {
 			avail := b.room() - headerOverhead
@@ -402,19 +516,23 @@ func (s *Session) buildEvents(b *responseBuilder, events []Event) {
 				}
 			}
 
-			runLen := min(avail/perObject, j-i, 255)
+			runLen := min(avail/perObject, j-i, maxCount)
 			data := make([]byte, 0, runLen*perObject)
 			for k := range runLen {
 				e := events[i+k]
-				data = append(data, byte(e.Index))
+				if prefixLen == 1 {
+					data = append(data, byte(e.Index))
+				} else {
+					data = binary.LittleEndian.AppendUint16(data, e.Index)
+				}
 				data = s.encodeEvent(data, gv, e, b.ctx)
 			}
 
 			b.add(app.ObjectHeader{
 				Group:     gv.Group,
 				Variation: gv.Variation,
-				Qualifier: app.MakeQualifier(app.PrefixIndex1, app.RangeCount8),
-				Range:     app.Range{Spec: app.RangeCount8, Count: uint32(runLen)},
+				Qualifier: app.MakeQualifier(prefix, spec),
+				Range:     app.Range{Spec: spec, Count: uint32(runLen)},
 				Data:      data,
 			})
 			i += runLen

@@ -180,7 +180,7 @@ func TestBatchDrainTakesEverythingQueued(t *testing.T) {
 
 	conn := &connection{msgs: make(chan tea.Msg, 4096), ctx: ctx}
 	for i := range 1000 {
-		conn.push(updateMsg{Type: dnp3.TypeBinary, Index: uint16(i)})
+		conn.push(updateMsg{Type: dnp3.TypeBinary, Index: uint32(i)})
 	}
 	if dropped := conn.dropped.Load(); dropped != 0 {
 		t.Fatalf("%d dropped while filling the queue", dropped)
@@ -204,7 +204,7 @@ func TestBatchDrainIsBounded(t *testing.T) {
 
 	conn := &connection{msgs: make(chan tea.Msg, maxBatch*2), ctx: ctx}
 	for i := range maxBatch + 500 {
-		conn.push(updateMsg{Type: dnp3.TypeBinary, Index: uint16(i)})
+		conn.push(updateMsg{Type: dnp3.TypeBinary, Index: uint32(i)})
 	}
 
 	batch, ok := conn.wait()().(batchMsg)

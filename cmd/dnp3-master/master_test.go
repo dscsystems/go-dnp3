@@ -382,8 +382,8 @@ func TestSnapshotFiltersBySite(t *testing.T) {
 func TestSnapshotOrderIsStable(t *testing.T) {
 	s := NewSnapshot()
 	for i := range 20 {
-		s.Apply("a", master.Update{Type: dnp3.TypeAnalog, Index: uint16(19 - i)})
-		s.Apply("a", master.Update{Type: dnp3.TypeBinary, Index: uint16(i)})
+		s.Apply("a", master.Update{Type: dnp3.TypeAnalog, Index: uint32(19 - i)})
+		s.Apply("a", master.Update{Type: dnp3.TypeBinary, Index: uint32(i)})
 	}
 
 	first := s.Points("")

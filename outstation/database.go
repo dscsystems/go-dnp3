@@ -4,7 +4,9 @@ package outstation
 
 import (
 	"bytes"
+	"math"
 	"sync"
+	"time"
 
 	"github.com/dscsystems/go-dnp3"
 	"github.com/dscsystems/go-dnp3/objects"
@@ -181,34 +183,40 @@ func setConfig[T any](pts []point[T], i int, cfg PointConfig) bool {
 	return true
 }
 
-// AssignClass sets the event class of every point of a type, which is what the
-// ASSIGN_CLASS function code does.
+// AssignClass sets the event class of every point of a type.
 func (db *Database) AssignClass(pt dnp3.PointType, class dnp3.Class) {
+	db.assignClassRange(pt, class, 0, 0xFFFF)
+}
+
+// assignClassRange sets the event class of the points of a type from start
+// through stop, which is what an ASSIGN_CLASS request naming those points
+// asks for. Indexes past the last point are ignored.
+func (db *Database) assignClassRange(pt dnp3.PointType, class dnp3.Class, start, stop uint16) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	switch pt {
 	case dnp3.TypeBinary:
-		assignClass(db.binary, class)
+		assignClass(db.binary, class, start, stop)
 	case dnp3.TypeDoubleBitBinary:
-		assignClass(db.doubleBit, class)
+		assignClass(db.doubleBit, class, start, stop)
 	case dnp3.TypeCounter:
-		assignClass(db.counter, class)
+		assignClass(db.counter, class, start, stop)
 	case dnp3.TypeFrozenCounter:
-		assignClass(db.frozen, class)
+		assignClass(db.frozen, class, start, stop)
 	case dnp3.TypeAnalog:
-		assignClass(db.analog, class)
+		assignClass(db.analog, class, start, stop)
 	case dnp3.TypeBinaryOutputStatus:
-		assignClass(db.binaryOut, class)
+		assignClass(db.binaryOut, class, start, stop)
 	case dnp3.TypeAnalogOutputStatus:
-		assignClass(db.analogOut, class)
+		assignClass(db.analogOut, class, start, stop)
 	case dnp3.TypeOctetString:
-		assignClass(db.octet, class)
+		assignClass(db.octet, class, start, stop)
 	}
 }
 
-func assignClass[T any](pts []point[T], class dnp3.Class) {
-	for i := range pts {
+func assignClass[T any](pts []point[T], class dnp3.Class, start, stop uint16) {
+	for i := int(start); i <= int(stop) && i < len(pts); i++ {
 		pts[i].cfg.Class = class
 	}
 }
@@ -302,16 +310,21 @@ func (db *Database) UpdateFrozenCounter(index uint16, v dnp3.FrozenCounter) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	i := int(index)
-	if i >= len(db.frozen) {
-		return
+	if int(index) < len(db.frozen) {
+		db.setFrozen(int(index), v)
 	}
+}
+
+// setFrozen stores a frozen counter value and raises an event if it changed.
+// It is shared by UpdateFrozenCounter and the freeze functions so the two
+// cannot disagree about when a frozen counter reports. The caller holds db.mu.
+func (db *Database) setFrozen(i int, v dnp3.FrozenCounter) {
 	p := &db.frozen[i]
 	changed := p.value.Value != v.Value || p.value.Flags != v.Flags
 	p.value = v
 	if changed {
 		db.raise(p.cfg, Event{
-			Type: dnp3.TypeFrozenCounter, Index: index,
+			Type: dnp3.TypeFrozenCounter, Index: uint16(i),
 			Variation: p.cfg.EventVariation, FrozenCounter: v, Time: v.Time,
 		})
 	}
@@ -380,6 +393,18 @@ func (p *point[T]) shouldReport(v float64, flagsChanged bool) bool {
 	p.hasEvent = true
 
 	if first || flagsChanged {
+		p.reported = v
+		return true
+	}
+
+	// Every comparison against NaN is false, so the deadband check below can
+	// neither see a reading become NaN nor recover from one: a point whose
+	// last reported value was NaN would never report again. A move into or
+	// out of NaN is a change by definition; NaN to NaN is not.
+	if nowNaN, wasNaN := math.IsNaN(v), math.IsNaN(p.reported); nowNaN || wasNaN {
+		if nowNaN == wasNaN {
+			return false
+		}
 		p.reported = v
 		return true
 	}
@@ -504,14 +529,31 @@ func (db *Database) OctetString(index uint16) (dnp3.OctetString, PointConfig, bo
 }
 
 // FreezeCounters copies every counter into its frozen counterpart, which is
-// what the freeze function codes do.
+// what the freeze function codes do. The frozen values are stamped with the
+// current time; see freezeCountersRange.
 func (db *Database) FreezeCounters() {
+	db.freezeCountersRange(0, 0xFFFF, dnp3.Unsynchronized(time.Now()))
+}
+
+// freezeCountersRange freezes the counters from start through stop, which is
+// what a freeze request naming those counters asks for. Indexes past the last
+// counter are ignored.
+//
+// A frozen value is a snapshot, and at is when it was taken: the time the
+// frozen counter variations that carry one report, rather than whenever the
+// running counter last happened to change. Each frozen counter that changes
+// raises an event just as an application update would, which is how a
+// master polling events learns a freeze produced something new — writing the
+// value in place, as this once did, left event-driven masters to discover it
+// only by reading the frozen counters outright.
+func (db *Database) freezeCountersRange(start, stop uint16, at dnp3.Timestamp) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	n := min(len(db.counter), len(db.frozen))
-	for i := range n {
-		db.frozen[i].value = dnp3.FrozenCounter(db.counter[i].value)
+	for i := int(start); i <= int(stop) && i < n; i++ {
+		c := db.counter[i].value
+		db.setFrozen(i, dnp3.FrozenCounter{Value: c.Value, Flags: c.Flags, Time: at})
 	}
 }
 

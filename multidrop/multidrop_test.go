@@ -29,11 +29,11 @@ type collector struct {
 	master.NopHandler
 
 	mu     sync.Mutex
-	analog map[uint16]float64
+	analog map[uint32]float64
 }
 
 func newCollector() *collector {
-	return &collector{analog: map[uint16]float64{}}
+	return &collector{analog: map[uint32]float64{}}
 }
 
 func (c *collector) HandleAnalog(_ master.HeaderInfo, vs []dnp3.Indexed[dnp3.Analog]) {
@@ -44,7 +44,7 @@ func (c *collector) HandleAnalog(_ master.HeaderInfo, vs []dnp3.Indexed[dnp3.Ana
 	}
 }
 
-func (c *collector) value(index uint16) (float64, bool) {
+func (c *collector) value(index uint32) (float64, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	v, ok := c.analog[index]

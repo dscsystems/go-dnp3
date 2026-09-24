@@ -89,8 +89,9 @@ type Update struct {
 	Info     HeaderInfo
 	Fragment ResponseInfo
 
-	Type  dnp3.PointType
-	Index uint16
+	Type dnp3.PointType
+	// Index is as wide as [dnp3.Indexed.Index], for the same reason.
+	Index uint32
 
 	Binary        dnp3.Binary
 	DoubleBit     dnp3.DoubleBitBinary

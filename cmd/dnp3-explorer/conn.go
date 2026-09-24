@@ -119,7 +119,7 @@ type updatesMsg []updateMsg
 // updateMsg is one measurement arriving from the outstation.
 type updateMsg struct {
 	Type    dnp3.PointType
-	Index   uint16
+	Index   uint32
 	Value   string
 	Num     float64
 	HasNum  bool

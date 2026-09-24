@@ -22,10 +22,10 @@ type collector struct {
 	master.NopHandler
 
 	mu        sync.Mutex
-	binary    map[uint16]dnp3.Binary
-	analog    map[uint16]dnp3.Analog
-	counter   map[uint16]dnp3.Counter
-	binaryOut map[uint16]dnp3.BinaryOutputStatus
+	binary    map[uint32]dnp3.Binary
+	analog    map[uint32]dnp3.Analog
+	counter   map[uint32]dnp3.Counter
+	binaryOut map[uint32]dnp3.BinaryOutputStatus
 
 	events    int
 	fragments int
@@ -39,10 +39,10 @@ type collector struct {
 
 func newCollector() *collector {
 	return &collector{
-		binary:    map[uint16]dnp3.Binary{},
-		analog:    map[uint16]dnp3.Analog{},
-		counter:   map[uint16]dnp3.Counter{},
-		binaryOut: map[uint16]dnp3.BinaryOutputStatus{},
+		binary:    map[uint32]dnp3.Binary{},
+		analog:    map[uint32]dnp3.Analog{},
+		counter:   map[uint32]dnp3.Counter{},
+		binaryOut: map[uint32]dnp3.BinaryOutputStatus{},
 	}
 }
 
@@ -97,14 +97,14 @@ func (c *collector) HandleBinaryOutputStatus(_ master.HeaderInfo, vs []dnp3.Inde
 	}
 }
 
-func (c *collector) snapshot() (binary map[uint16]dnp3.Binary, analog map[uint16]dnp3.Analog, events int) {
+func (c *collector) snapshot() (binary map[uint32]dnp3.Binary, analog map[uint32]dnp3.Analog, events int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	b := make(map[uint16]dnp3.Binary, len(c.binary))
+	b := make(map[uint32]dnp3.Binary, len(c.binary))
 	for k, v := range c.binary {
 		b[k] = v
 	}
-	a := make(map[uint16]dnp3.Analog, len(c.analog))
+	a := make(map[uint32]dnp3.Analog, len(c.analog))
 	for k, v := range c.analog {
 		a[k] = v
 	}
@@ -206,12 +206,12 @@ func TestIntegrityPoll(t *testing.T) {
 	if len(binary) != dbCfg.Binary {
 		t.Errorf("received %d binary points, want %d", len(binary), dbCfg.Binary)
 	}
-	for _, i := range []uint16{0, 3} {
+	for _, i := range []uint32{0, 3} {
 		if !binary[i].Value {
 			t.Errorf("binary %d should be on", i)
 		}
 	}
-	for _, i := range []uint16{1, 2, 4} {
+	for _, i := range []uint32{1, 2, 4} {
 		if binary[i].Value {
 			t.Errorf("binary %d should be off", i)
 		}
@@ -421,7 +421,7 @@ func TestMultiFragmentResponse(t *testing.T) {
 		t.Fatalf("received %d analog points, want 400", len(analog))
 	}
 	for i := range 400 {
-		if got := analog[uint16(i)].Value; got != float64(i) {
+		if got := analog[uint32(i)].Value; got != float64(i) {
 			t.Fatalf("analog %d = %v, want %d", i, got, i)
 		}
 	}
@@ -459,7 +459,7 @@ func TestRangeScan(t *testing.T) {
 	if len(analog) != 5 {
 		t.Fatalf("received %d points, want 5", len(analog))
 	}
-	for i := uint16(5); i <= 9; i++ {
+	for i := uint32(5); i <= 9; i++ {
 		if got := analog[i].Value; got != float64(i*10) {
 			t.Errorf("analog %d = %v, want %d", i, got, i*10)
 		}

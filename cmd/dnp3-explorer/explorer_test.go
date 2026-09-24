@@ -236,7 +236,7 @@ func TestEventsScreenCollectsEvents(t *testing.T) {
 	m := testModel()
 	for i := range 3 {
 		m.applyUpdate(updateMsg{
-			Type: dnp3.TypeBinary, Index: uint16(i), Value: "ON",
+			Type: dnp3.TypeBinary, Index: uint32(i), Value: "ON",
 			Flags: dnp3.Online, IsEvent: true,
 		})
 	}
@@ -263,7 +263,7 @@ func TestEventListIsBounded(t *testing.T) {
 	m := testModel()
 	for i := range 5000 {
 		m.applyUpdate(updateMsg{
-			Type: dnp3.TypeBinary, Index: uint16(i % 10), Value: "ON", IsEvent: true,
+			Type: dnp3.TypeBinary, Index: uint32(i % 10), Value: "ON", IsEvent: true,
 		})
 	}
 	if len(m.events) > 2000 {
@@ -646,7 +646,7 @@ func TestFollowPinsToTheNewestRow(t *testing.T) {
 	m := testModel()
 	m.screen = ScreenEvents
 	for i := range 100 {
-		m.applyUpdate(updateMsg{Type: dnp3.TypeBinary, Index: uint16(i % 4),
+		m.applyUpdate(updateMsg{Type: dnp3.TypeBinary, Index: uint32(i % 4),
 			Value: "ON", IsEvent: true})
 	}
 	m.layout() // clamps
@@ -1390,7 +1390,7 @@ func TestToastExpires(t *testing.T) {
 func seedPoints(m *Model, n int) {
 	for i := range n {
 		m.applyUpdate(updateMsg{
-			Type: dnp3.TypeAnalog, Index: uint16(i),
+			Type: dnp3.TypeAnalog, Index: uint32(i),
 			Value: formatFloat(float64(i) * 1.5), Num: float64(i) * 1.5, HasNum: true,
 			Flags: dnp3.Online, Stamp: dnp3.Now(time.Now()),
 		})

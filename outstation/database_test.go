@@ -1,7 +1,9 @@
 package outstation
 
 import (
+	"math"
 	"testing"
+	"time"
 
 	"github.com/dscsystems/go-dnp3"
 )
@@ -248,5 +250,87 @@ func TestDefaultVariationsAreLossless(t *testing.T) {
 	}
 	if _, c, _ := db.Binary(0); c.StaticVariation != 2 {
 		t.Errorf("binary default static variation = %d, want 2 (with flags)", c.StaticVariation)
+	}
+}
+
+// Every comparison against NaN is false, so a deadband check alone can neither
+// see a reading turn into NaN nor come back from one. An analog whose first
+// reading is NaN — a sensor reporting a fault at startup — must still report
+// the real value that follows.
+func TestAnalogDeadbandRecoversFromNaN(t *testing.T) {
+	db, buf := testDB(DatabaseConfig{Analog: 1, DefaultClass: dnp3.Class1})
+	db.Configure(dnp3.TypeAnalog, 0, PointConfig{Class: dnp3.Class1, Deadband: 5})
+
+	db.UpdateAnalog(0, dnp3.Analog{Value: math.NaN(), Flags: dnp3.Online})
+	before := buf.Total()
+	db.UpdateAnalog(0, dnp3.Analog{Value: 42, Flags: dnp3.Online})
+
+	if buf.Total() == before {
+		t.Error("a real reading following a NaN one raised no event: the deadband " +
+			"compared against NaN and can never be exceeded")
+	}
+}
+
+// The other direction: a reading that becomes NaN is a change the master
+// needs to hear about, however small the deadband's view of it.
+func TestAnalogDeadbandReportsAMoveToNaN(t *testing.T) {
+	db, buf := testDB(DatabaseConfig{Analog: 1, DefaultClass: dnp3.Class1})
+	db.Configure(dnp3.TypeAnalog, 0, PointConfig{Class: dnp3.Class1, Deadband: 5})
+
+	db.UpdateAnalog(0, dnp3.Analog{Value: 42, Flags: dnp3.Online})
+	before := buf.Total()
+	db.UpdateAnalog(0, dnp3.Analog{Value: math.NaN(), Flags: dnp3.Online})
+
+	if buf.Total() == before {
+		t.Error("a reading becoming NaN raised no event")
+	}
+
+	// And NaN to NaN is no change at all.
+	before = buf.Total()
+	db.UpdateAnalog(0, dnp3.Analog{Value: math.NaN(), Flags: dnp3.Online})
+	if buf.Total() != before {
+		t.Error("a NaN reading repeated raised another event")
+	}
+}
+
+// A freeze is a change to the frozen counters, and a frozen counter assigned
+// to an event class reports its changes as events — however the change came
+// about. Writing the frozen value in place skipped that, so a master polling
+// events never heard that a freeze had produced anything.
+func TestFreezeRaisesFrozenCounterEvents(t *testing.T) {
+	db, buf := testDB(DatabaseConfig{Counter: 2, FrozenCounter: 2})
+	db.Configure(dnp3.TypeFrozenCounter, 0, PointConfig{Class: dnp3.Class1})
+	db.Configure(dnp3.TypeFrozenCounter, 1, PointConfig{Class: dnp3.Class1})
+	db.UpdateCounter(0, dnp3.Counter{Value: 100, Flags: dnp3.Online})
+	db.UpdateCounter(1, dnp3.Counter{Value: 200, Flags: dnp3.Online})
+
+	before := buf.Count(dnp3.Class1)
+	db.FreezeCounters()
+
+	if got := buf.Count(dnp3.Class1) - before; got != 2 {
+		t.Errorf("a freeze of two changed counters raised %d frozen counter events, want 2", got)
+	}
+
+	// A freeze that changes nothing reports nothing, exactly as an
+	// application update to the same value would.
+	before = buf.Count(dnp3.Class1)
+	db.FreezeCounters()
+	if got := buf.Count(dnp3.Class1) - before; got != 0 {
+		t.Errorf("a freeze that changed no frozen value raised %d events", got)
+	}
+}
+
+// A frozen counter's timestamp is when it was frozen, not when the running
+// counter last happened to change.
+func TestFreezeStampsTheTimeOfTheFreeze(t *testing.T) {
+	db, _ := testDB(DatabaseConfig{Counter: 1, FrozenCounter: 1})
+	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	db.UpdateCounter(0, dnp3.Counter{Value: 5, Flags: dnp3.Online, Time: dnp3.Now(old)})
+
+	at := dnp3.Now(time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC))
+	db.freezeCountersRange(0, 0, at)
+
+	if v, _, _ := db.FrozenCounter(0); !v.Time.Time.Equal(at.Time) {
+		t.Errorf("frozen counter time = %v, want the freeze time %v", v.Time.Time, at.Time)
 	}
 }

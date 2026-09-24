@@ -285,6 +285,19 @@ func emitWrite(b *bytes.Buffer, o Object, goType string) {
 	fmt.Fprintf(b, "func write%s(dst []byte, v %s, ctx Context) []byte {\n", o.GoName(), goType)
 	b.WriteString("\t_ = ctx\n")
 
+	// An analog value narrowed into an integer field is clamped before
+	// anything is written, because whether it saturated decides the flags
+	// octet, and the flags come first on the wire.
+	clamp := clampOf(o)
+	if clamp != "" {
+		if _, hasFlags := o.flagsField(); hasFlags {
+			fmt.Fprintf(b, "\tn, over := %s(v.Value)\n", clamp)
+		} else {
+			// No flags octet to report it in; the value still saturates.
+			fmt.Fprintf(b, "\tn, _ := %s(v.Value)\n", clamp)
+		}
+	}
+
 	for _, f := range o.Fields {
 		switch f.Type {
 		case "flags":
@@ -296,7 +309,13 @@ func emitWrite(b *bytes.Buffer, o Object, goType string) {
 			case "doublebit":
 				b.WriteString("\tdst = append(dst, byte(v.Flags&0x3F)|byte(v.Value&0x03)<<6)\n")
 			default:
-				b.WriteString("\tdst = append(dst, byte(v.Flags))\n")
+				if clamp != "" {
+					b.WriteString("\tflags := v.Flags\n")
+					b.WriteString("\tif over {\n\t\tflags |= dnp3.OverRange\n\t}\n")
+					b.WriteString("\tdst = append(dst, byte(flags))\n")
+				} else {
+					b.WriteString("\tdst = append(dst, byte(v.Flags))\n")
+				}
 			}
 		case "time48":
 			b.WriteString("\tdst = appendTime48(dst, dnp3.TimeToDNP3(v.Time.Time))\n")
@@ -354,34 +373,57 @@ func wrap(expr string, do bool, as string) string {
 	return expr
 }
 
+// clampOf names the helper that narrows an analog value into this object's
+// integer value field, or returns "" when the field needs no narrowing.
+func clampOf(o Object) string {
+	if o.Measure != "analog" && o.Measure != "analogoutput" {
+		return ""
+	}
+	f, _, ok := o.valueField()
+	if !ok {
+		return ""
+	}
+	switch f.Type {
+	case "i16":
+		return "clampInt16"
+	case "u16":
+		return "clampUint16"
+	case "i32":
+		return "clampInt32"
+	case "u32":
+		return "clampUint32"
+	}
+	return ""
+}
+
 // writeExpr builds the statement that encodes a value field.
 //
-// Narrowing conversions go through the clamp helpers rather than a bare cast:
-// converting an out-of-range float64 to an integer is not defined in Go, and
-// an analog reading that drifts past a 16-bit point's range would otherwise
-// encode as an arbitrary value instead of a saturated one.
+// Narrowing an analog value into an integer field goes through the clamp
+// helpers rather than a bare cast (see clampOf and emitWrite): converting an
+// out-of-range float64 to an integer is not defined in Go. By the time this
+// statement runs, emitWrite has already stored the narrowed value in n.
 func writeExpr(typ, measure string) string {
 	fromFloat := measure == "analog" || measure == "analogoutput"
 
 	switch typ {
 	case "i16":
 		if fromFloat {
-			return "dst = binary.LittleEndian.AppendUint16(dst, uint16(clampInt16(v.Value)))"
+			return "dst = binary.LittleEndian.AppendUint16(dst, uint16(n))"
 		}
 		return "dst = binary.LittleEndian.AppendUint16(dst, uint16(v.Value))"
 	case "u16":
 		if fromFloat {
-			return "dst = binary.LittleEndian.AppendUint16(dst, clampUint16(v.Value))"
+			return "dst = binary.LittleEndian.AppendUint16(dst, n)"
 		}
 		return "dst = binary.LittleEndian.AppendUint16(dst, uint16(v.Value))"
 	case "i32":
 		if fromFloat {
-			return "dst = binary.LittleEndian.AppendUint32(dst, uint32(clampInt32(v.Value)))"
+			return "dst = binary.LittleEndian.AppendUint32(dst, uint32(n))"
 		}
 		return "dst = binary.LittleEndian.AppendUint32(dst, uint32(v.Value))"
 	case "u32":
 		if fromFloat {
-			return "dst = binary.LittleEndian.AppendUint32(dst, clampUint32(v.Value))"
+			return "dst = binary.LittleEndian.AppendUint32(dst, n)"
 		}
 		return "dst = binary.LittleEndian.AppendUint32(dst, uint32(v.Value))"
 	case "f32":

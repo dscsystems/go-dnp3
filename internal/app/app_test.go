@@ -871,3 +871,25 @@ func BenchmarkParseFragment(b *testing.B) {
 		}
 	}
 }
+
+// A request naming individual points carries their indexes even when it
+// carries no object data. Walking past the list without consuming it takes
+// the first index for the next object header and rejects a valid request.
+func TestIndexListInARequestWithoutObjectData(t *testing.T) {
+	// READ g30v0, qualifier 0x17, indexes 3 and 7; then g1v0, all objects.
+	req := []byte{0xC0, 0x01, 30, 0, 0x17, 2, 3, 7, 1, 0, 0x06}
+
+	f, err := ParseFragment(nil, req)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(f.Objects) != 2 {
+		t.Fatalf("parsed %d object headers, want 2: %v", len(f.Objects), f.Objects)
+	}
+	if got := f.Objects[0].Data; len(got) != 2 || got[0] != 3 || got[1] != 7 {
+		t.Errorf("index list = %v, want [3 7]", got)
+	}
+	if f.Objects[1].Group != 1 {
+		t.Errorf("second header is g%d, want g1", f.Objects[1].Group)
+	}
+}

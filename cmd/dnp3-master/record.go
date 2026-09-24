@@ -189,14 +189,14 @@ func formatFloat(v float64) string {
 // pointKey identifies a point within a site.
 type pointKey struct {
 	Type  dnp3.PointType
-	Index uint16
+	Index uint32
 }
 
 // PointValue is one point as the snapshot holds it.
 type PointValue struct {
 	Site     string `json:"site"`
 	Type     string `json:"type"`
-	Index    uint16 `json:"index"`
+	Index    uint32 `json:"index"`
 	Value    string `json:"value"`
 	Quality  string `json:"quality"`
 	Good     bool   `json:"good"`
