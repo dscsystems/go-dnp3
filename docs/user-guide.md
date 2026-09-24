@@ -764,6 +764,18 @@ The constructors:
 | `master.CROB(index, crob)` | any control relay output block you build |
 | `master.AnalogOutputInt16/Int32/Float32/Float64(index, v)` | g41 setpoints |
 
+The `index` these take is 16-bit, but measurements arrive with the full 32-bit
+index the outstation reported (`dnp3.Indexed.Index`). The two are usually the
+same number; when you command a point you found by reading it, check that its
+index fits rather than converting it, because `uint16(70000)` is point 4464:
+
+```go
+if v.Index > math.MaxUint16 {
+	return fmt.Errorf("point %d is beyond the 16-bit command index", v.Index)
+}
+res, err := m.SelectAndOperate(ctx, master.LatchOn(uint16(v.Index)))
+```
+
 **Use `SelectAndOperate` for operator-initiated controls on plant that matters.**
 The select is not a formality: it is the outstation's opportunity to say "not
 that point, not right now" before anything moves, and a failed select is never
@@ -1144,6 +1156,11 @@ Controls are deliberate: `enter` on an output opens a dialog naming exactly what
 will be sent, select-before-operate by default, with a confirmation before
 anything moves. `-direct` and `-no-confirm` turn that off for the situations
 that need it, and while `-no-confirm` is in effect the toolbar says so.
+
+Points are shown at whatever index the outstation reports, 32-bit ones
+included. A point above 65535 can be watched but not controlled — commands carry
+16-bit indexes — so the explorer refuses with a warning rather than send the
+control to whichever point the narrowed index happens to name.
 
 `C` edits the connection while it runs — address, both link addresses, timeouts,
 poll interval — and applies it by tearing the session down and bringing a new one

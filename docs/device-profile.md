@@ -193,6 +193,7 @@ thing to check when values look wrong.
 | Integrity poll | Classes 0, 1, 2 and 3 |
 | Class polls | One-shot and periodic |
 | Range reads | Yes, any group and variation |
+| Point indexes received | Full 32-bit width, from four-octet ranges and index prefixes |
 | Unsolicited handling | Yes, separate sequence space, duplicate detection |
 | Commands | Direct operate, direct operate no-reply, select-before-operate |
 | Command results | Per-point status; a partial success is reported as a failure |
@@ -245,6 +246,12 @@ Listed rather than left to be discovered:
   `GET_FILE_INFO` follows this implementation's reading of the standard, with
   the file named in a variation 7 descriptor; it has not been exercised against
   another vendor's device.
+- **Point indexes above 65535** are received by a master at full width but
+  cannot be commanded: the master's command constructors take 16-bit indexes.
+  An outstation's database is likewise 16-bit, holding at most 65536 points of
+  each type; a request naming a higher index is answered as naming no point
+  (a command for one is refused with `NOT_SUPPORTED`) rather than wrapped onto
+  one that exists.
 - **Datasets** (groups 85–87) are not implemented.
 - **Secure Authentication v5** is out of scope by design; use TLS.
 - **`FREEZE_AT_TIME`** is not implemented, and the framing layer's rule for

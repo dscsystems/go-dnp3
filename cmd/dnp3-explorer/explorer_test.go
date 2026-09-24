@@ -1601,3 +1601,41 @@ func TestReconnectToADeadAddressStaysUsable(t *testing.T) {
 		t.Errorf("target = %q, want the address that was asked for", got)
 	}
 }
+
+// A master can now report a point above index 65535, but a command still
+// carries a 16-bit index. Narrowing the point's index to send one would
+// address the control to a different point — so the explorer refuses,
+// whichever way the operator reaches for the control.
+func TestPointAbove65535CannotBeCommanded(t *testing.T) {
+	if _, ok := (pointKey{Type: dnp3.TypeBinaryOutputStatus, Index: 70000}).commandIndex(); ok {
+		t.Error("commandIndex accepted index 70000")
+	}
+	if idx, ok := (pointKey{Type: dnp3.TypeBinaryOutputStatus, Index: 65535}).commandIndex(); !ok || idx != 65535 {
+		t.Errorf("commandIndex(65535) = %d, %v; want 65535, true", idx, ok)
+	}
+
+	for _, tc := range []struct {
+		name string
+		pt   dnp3.PointType
+		key  string
+	}{
+		{"quick close", dnp3.TypeBinaryOutputStatus, "c"},
+		{"control dialog", dnp3.TypeBinaryOutputStatus, "enter"},
+		{"analog write", dnp3.TypeAnalogOutputStatus, "enter"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := testModel()
+			m.screen = ScreenPoints
+			m.applyUpdate(updateMsg{Type: tc.pt, Index: 70000, Value: "0"})
+
+			m, cmd := pressCmd(m, tc.key)
+			if cmd != nil {
+				t.Error("a command was sent for a point above 65535")
+			}
+			if m.modal.kind != modalNone || m.prompt.active {
+				t.Errorf("a control was offered for a point above 65535 (modal %v, prompt %v)",
+					m.modal.kind, m.prompt.active)
+			}
+		})
+	}
+}

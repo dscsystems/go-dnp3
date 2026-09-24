@@ -107,13 +107,38 @@ the encoding doing what it says, not a bug. See
 
 ```go
 type Indexed[T any] struct {
-    Index uint16
+    Index uint32
     Value T
 }
 ```
 
 `Indexed` pairs a measurement with the point index it was reported at. Handler
 methods receive `[]Indexed[T]`.
+
+**`Index` is 32 bits** because that is what the protocol can carry: an object
+header may address points with a four-octet range or index prefix. A master
+reports every index exactly as the outstation sent it. It used to be 16 bits,
+and narrowing to fit delivered point 70000 as point 4464 — a real measurement
+attributed to the wrong point, with nothing to say so.
+
+The receive side is the only 32-bit part of the API. Everything the library
+*addresses* is still 16-bit: the outstation's [`Database`](#database), its
+[`CommandHandler`](#commandhandler), and the master's
+[command constructors](#building-commands). An index you received does not
+always fit one you can send, so check it rather than converting it:
+
+```go
+// Not uint16(v.Index): past 65535 that addresses a different point.
+if v.Index > math.MaxUint16 {
+    return fmt.Errorf("point %d cannot be commanded: commands carry 16-bit indexes", v.Index)
+}
+cmd := master.LatchOn(uint16(v.Index))
+```
+
+*Upgrading from a release with a 16-bit `Index`:* the compiler finds every
+affected line. Widen map keys and fields that store `Index` to `uint32` — the
+values are unchanged for every point below 65536 — and use the check above
+wherever an index goes back out to a 16-bit API.
 
 ### DoubleBit
 
@@ -898,6 +923,11 @@ outstation's echo is what fills it in.
 Commands sharing a group and variation are packed into one object header with
 per-object index prefixes, so a multi-point control is one request.
 
+Commands are addressed with **16-bit** indexes, while measurements arrive with
+the 32-bit [`dnp3.Indexed`](#measurements) index. A point read above 65535 can
+be monitored but not commanded; check before building a command from a received
+index rather than converting it, since `uint16(70000)` is point 4464.
+
 ### CommandResult
 
 ```go
@@ -1051,6 +1081,10 @@ implement only the methods you care about.
 versions and serial numbers a device reports as text rather than as
 measurements.
 
+Each value's `Index` is the full 32-bit index the outstation reported — see
+[`Indexed`](#measurements) for why, and for what that means when a handler
+passes an index on to a 16-bit API.
+
 ```go
 type ResponseInfo struct {
     IIN         app.IIN   // internal indications the outstation reported
@@ -1086,7 +1120,7 @@ type Update struct {
     Fragment ResponseInfo
 
     Type  dnp3.PointType // selects which measurement field below is meaningful
-    Index uint16
+    Index uint32         // as received; see dnp3.Indexed
 
     Binary        dnp3.Binary
     DoubleBit     dnp3.DoubleBitBinary
