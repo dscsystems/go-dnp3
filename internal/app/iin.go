@@ -57,6 +57,14 @@ const (
 // EventClassMask is every "events available" bit.
 const EventClassMask = IINClass1Events | IINClass2Events | IINClass3Events
 
+// RequestErrorMask is the IIN2 bits that describe the request being answered
+// rather than the state of the device: they are reported once, on the
+// response to the request that raised them (or, for a request that gets no
+// response, on the next one), and then cleared. CONFIG_CORRUPT is left out —
+// it is a condition of the device and stays until the device is fixed.
+const RequestErrorMask = IINNoFuncCodeSupport | IINObjectUnknown | IINParameterError |
+	IINAlreadyExecuting
+
 // ErrorMask is every IIN2 bit that reports a problem with the request.
 const ErrorMask = IINNoFuncCodeSupport | IINObjectUnknown | IINParameterError |
 	IINAlreadyExecuting | IINConfigCorrupt

@@ -316,8 +316,8 @@ const (
 // Trip/close modifiers, which pair with an operation type to drive the two
 // coils of a breaker.
 const (
-    ControlClose ControlCode = 0x80
-    ControlTrip  ControlCode = 0x40
+    ControlClose ControlCode = 0x40 // trip-close code 1
+    ControlTrip  ControlCode = 0x80 // trip-close code 2
 )
 
 func (c ControlCode) OpType() ControlCode
@@ -326,6 +326,17 @@ func (c ControlCode) IsClose() bool
 func (c ControlCode) Clear() bool
 func (c ControlCode) String() string   // e.g. "PULSE_ON|TRIP"
 ```
+
+The trip-close code is bits 7–6 of the control code, which IEEE 1815-2012
+numbers 1 for close and 2 for trip — so a pulsed close is **0x41** and a pulsed
+trip **0x81**, the values opendnp3 and every conforming device use.
+
+*Upgrading from an earlier release:* these two were transposed (close 0x80,
+trip 0x40). Two ends both built on this library agreed with each other, but
+against any other implementation `master.Trip` sent a close and `master.Close`
+a trip, and an outstation read another vendor's trip as a close. Code that uses
+the named constants, `IsTrip`/`IsClose` or `master.Trip`/`Close` needs no
+change; code that wrote the octets by hand does.
 
 ```go
 type ControlRelayOutputBlock struct {
@@ -1736,7 +1747,7 @@ showing nothing.
 
 ```go
 type Value struct {
-    Index uint16
+    Index uint32 // exactly as the header carried it, 32-bit ranges and prefixes included
     Type  dnp3.PointType
     Value string // formatted, not typed
     Flags dnp3.Flags

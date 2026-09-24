@@ -68,7 +68,7 @@ func TestDecodeBinaryValues(t *testing.T) {
 		if vals[i].Value != want {
 			t.Errorf("index %d = %q, want %q", i, vals[i].Value, want)
 		}
-		if vals[i].Index != uint16(i) {
+		if vals[i].Index != uint32(i) {
 			t.Errorf("value %d carries index %d", i, vals[i].Index)
 		}
 		if vals[i].Type != dnp3.TypeBinary {
@@ -221,7 +221,8 @@ func TestDecodeCROBCommand(t *testing.T) {
 			Group: 12, Variation: 1,
 			Qualifier: app.MakeQualifier(app.PrefixIndex1, app.RangeCount8),
 			Range:     app.Range{Spec: app.RangeCount8, Count: 1},
-			Data:      []byte{3, 0x41, 1, 0xE8, 0x03, 0, 0, 0, 0, 0, 0, 0},
+			// 0x81: PULSE_ON with trip-close code 2, which is TRIP.
+			Data: []byte{3, 0x81, 1, 0xE8, 0x03, 0, 0, 0, 0, 0, 0, 0},
 		})
 
 	var s transport.Segmenter
@@ -386,5 +387,33 @@ func timeOctets(t time.Time) []byte {
 	return []byte{
 		byte(ms), byte(ms >> 8), byte(ms >> 16),
 		byte(ms >> 24), byte(ms >> 32), byte(ms >> 40),
+	}
+}
+
+// A decoder exists to show what was on the wire, so an index carried by a
+// four-octet range or prefix has to come out exactly as it went in. Narrowing
+// to 16 bits printed point 70000 as point 4464 — the one tool meant to settle
+// "what did the device actually send" giving the wrong answer.
+func TestDecoderKeepsIndexesAbove16Bits(t *testing.T) {
+	ranged := app.ObjectHeader{
+		Group: 1, Variation: 2,
+		Qualifier: app.MakeQualifier(app.PrefixNone, app.RangeStartStop32),
+		Range:     app.Range{Spec: app.RangeStartStop32, Start: 70000, Stop: 70000, Count: 1},
+		Data:      []byte{0x81},
+	}
+	prefixed := app.ObjectHeader{
+		Group: 1, Variation: 2,
+		Qualifier: app.MakeQualifier(app.PrefixIndex4, app.RangeCount32),
+		Range:     app.Range{Spec: app.RangeCount32, Count: 1},
+		Data:      []byte{0x7A, 0x11, 0x01, 0x00, 0x81}, // index 70010, then the flags
+	}
+
+	info := respond(t, 0, ranged, prefixed)
+
+	for i, want := range []uint32{70000, 70010} {
+		vals := info.Values[i]
+		if len(vals) != 1 || vals[0].Index != want {
+			t.Errorf("header %d decoded as %v, want index %d", i, vals, want)
+		}
 	}
 }

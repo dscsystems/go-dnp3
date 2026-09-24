@@ -61,7 +61,7 @@ func TestDecodeAttributes(t *testing.T) {
 			}
 			// The index column carries the variation, which is the nearest
 			// thing an attribute has to a point index.
-			if values[0].Index != uint16(c.attr.Variation) {
+			if values[0].Index != uint32(c.attr.Variation) {
 				t.Errorf("index %d, want the variation %d", values[0].Index, c.attr.Variation)
 			}
 			for _, want := range c.want {

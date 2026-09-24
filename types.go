@@ -255,11 +255,18 @@ const (
 
 // Trip/close modifiers, which pair with an operation type to drive the two
 // coils of a breaker.
+//
+// They fill the trip-close code, bits 7-6 of the control code, which IEEE
+// 1815-2012 numbers 0 for none, 1 for close and 2 for trip — so close is 0x40
+// and trip 0x80, making a pulsed close 0x41 and a pulsed trip 0x81, as
+// opendnp3 sends them. The two were once transposed here, which two ends both
+// built on this library could not notice: each read back what the other wrote.
+// Against any other implementation, a trip closed the breaker.
 const (
-	// ControlClose sets the close coil field.
-	ControlClose ControlCode = 0x80
-	// ControlTrip sets the trip coil field.
-	ControlTrip ControlCode = 0x40
+	// ControlClose selects the close coil: trip-close code 1.
+	ControlClose ControlCode = 0x40
+	// ControlTrip selects the trip coil: trip-close code 2.
+	ControlTrip ControlCode = 0x80
 )
 
 // OpType returns the operation type nibble.

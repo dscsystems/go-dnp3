@@ -227,3 +227,19 @@ func TestDoubleBitString(t *testing.T) {
 		t.Errorf("String() = %q, want On", got)
 	}
 }
+
+// The trip-close code occupies bits 7-6 with close = 1 and trip = 2, so the
+// modifiers are 0x40 and 0x80 as absolute values — not merely distinct from
+// each other, which is all a test comparing the constants with themselves can
+// show, and which they were even when transposed.
+func TestTripCloseCodeValues(t *testing.T) {
+	if ControlClose != 0x40 {
+		t.Errorf("ControlClose = %#02x, want 0x40 (trip-close code 1)", uint8(ControlClose))
+	}
+	if ControlTrip != 0x80 {
+		t.Errorf("ControlTrip = %#02x, want 0x80 (trip-close code 2)", uint8(ControlTrip))
+	}
+	if !ControlCode(0x81).IsTrip() || !ControlCode(0x41).IsClose() {
+		t.Error("0x81 must read as a trip and 0x41 as a close")
+	}
+}

@@ -33,7 +33,7 @@ func decodeAttributes(h app.ObjectHeader) ([]Value, bool) {
 			// not decode is the most interesting thing on the line when it
 			// happens, so it is reported rather than dropped.
 			out = append(out, Value{
-				Index: uint16(h.Variation),
+				Index: uint32(h.Variation),
 				Value: "malformed: " + err.Error(),
 			})
 			break
@@ -43,7 +43,7 @@ func decodeAttributes(h app.ObjectHeader) ([]Value, bool) {
 		// The index column carries the variation, which for group 0 is the
 		// attribute's identity — the nearest thing it has to a point index.
 		out = append(out, Value{
-			Index: uint16(a.Variation),
+			Index: uint32(a.Variation),
 			Value: fmt.Sprintf("%s = %s [%s]", a.Name(), a.Value(), a.Type),
 		})
 	}

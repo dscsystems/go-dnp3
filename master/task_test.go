@@ -266,3 +266,26 @@ func TestScanTaskPriority(t *testing.T) {
 		t.Error("an integrity poll should outrank a class poll")
 	}
 }
+
+// The trip and close constructors must put the octets on the wire that every
+// other implementation reads as trip and close. Checking the constants
+// against themselves proves nothing — the two were once transposed, and a
+// master and outstation both built on this library agreed perfectly while a
+// trip closed the breaker at any other device. These are opendnp3's values:
+// PULSE_ON with trip-close code 2 (trip) is 0x81, with code 1 (close) 0x41.
+func TestTripAndCloseWireCodes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cmd  Command
+		want byte
+	}{
+		{"trip", Trip(0, 1000), 0x81},
+		{"close", Close(0, 1000), 0x41},
+		{"latch on", LatchOn(0), 0x03},
+		{"latch off", LatchOff(0), 0x04},
+	} {
+		if got := tc.cmd.data[0]; got != tc.want {
+			t.Errorf("%s encodes control code %#02x, want %#02x", tc.name, got, tc.want)
+		}
+	}
+}

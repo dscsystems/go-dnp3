@@ -20,7 +20,9 @@ import (
 // a log line, a terminal table, a text dump — wants text. Callers that need
 // typed measurements should use the object codecs directly.
 type Value struct {
-	Index uint16
+	// Index is the full 32-bit index the object header carried. A decoder
+	// exists to show what was on the wire, so it never narrows one to fit.
+	Index uint32
 	Type  dnp3.PointType
 	Value string
 	Flags dnp3.Flags
@@ -119,9 +121,9 @@ func DecodeValues(h app.ObjectHeader, ctx objects.Context) ([]Value, bool) {
 			break // the framing layer validated this; stop rather than panic
 		}
 
-		index := uint16(h.Range.IndexOf(uint32(i)))
+		index := h.Range.IndexOf(uint32(i))
 		if prefixLen > 0 {
-			index = uint16(readPrefix(h.Data[off:], prefixLen))
+			index = readPrefix(h.Data[off:], prefixLen)
 			off += prefixLen
 		}
 
@@ -132,7 +134,7 @@ func DecodeValues(h app.ObjectHeader, ctx objects.Context) ([]Value, bool) {
 }
 
 // decodeOne dispatches to the codec for the measurement type.
-func decodeOne(gv objects.GroupVar, d objects.Descriptor, index uint16, buf []byte, ctx objects.Context) Value {
+func decodeOne(gv objects.GroupVar, d objects.Descriptor, index uint32, buf []byte, ctx objects.Context) Value {
 	v := Value{Index: index, Type: d.Measurement}
 
 	switch d.Measurement {
@@ -184,7 +186,7 @@ func decodePacked(h app.ObjectHeader, d objects.Descriptor, count int) []Value {
 	case dnp3.TypeDoubleBitBinary:
 		for i, m := range objects.ParsePackedDoubleBit(h.Data, count, nil) {
 			out = append(out, Value{
-				Index: uint16(h.Range.IndexOf(uint32(i))),
+				Index: h.Range.IndexOf(uint32(i)),
 				Type:  d.Measurement,
 				Value: m.Value.String(),
 				Flags: m.Flags,
@@ -193,7 +195,7 @@ func decodePacked(h app.ObjectHeader, d objects.Descriptor, count int) []Value {
 	case dnp3.TypeBinaryOutputStatus:
 		for i, m := range objects.ParsePackedBinaryOutput(h.Data, count, nil) {
 			out = append(out, Value{
-				Index: uint16(h.Range.IndexOf(uint32(i))),
+				Index: h.Range.IndexOf(uint32(i)),
 				Type:  d.Measurement,
 				Value: boolText(m.Value),
 				Flags: m.Flags,
@@ -202,7 +204,7 @@ func decodePacked(h app.ObjectHeader, d objects.Descriptor, count int) []Value {
 	default:
 		for i, m := range objects.ParsePackedBinary(h.Data, count, nil) {
 			out = append(out, Value{
-				Index: uint16(h.Range.IndexOf(uint32(i))),
+				Index: h.Range.IndexOf(uint32(i)),
 				Type:  d.Measurement,
 				Value: boolText(m.Value),
 				Flags: m.Flags,
@@ -233,9 +235,9 @@ func decodeCommands(h app.ObjectHeader, d objects.Descriptor) ([]Value, bool) {
 			break
 		}
 
-		index := uint16(h.Range.IndexOf(uint32(i)))
+		index := h.Range.IndexOf(uint32(i))
 		if prefixLen > 0 {
-			index = uint16(readPrefix(h.Data[off:], prefixLen))
+			index = readPrefix(h.Data[off:], prefixLen)
 			off += prefixLen
 		}
 
@@ -296,9 +298,9 @@ func decodeOctetStrings(h app.ObjectHeader) []Value {
 		if off+prefixLen+size > len(h.Data) {
 			break
 		}
-		index := uint16(h.Range.IndexOf(uint32(i)))
+		index := h.Range.IndexOf(uint32(i))
 		if prefixLen > 0 {
-			index = uint16(readPrefix(h.Data[off:], prefixLen))
+			index = readPrefix(h.Data[off:], prefixLen)
 			off += prefixLen
 		}
 		raw := h.Data[off : off+size]

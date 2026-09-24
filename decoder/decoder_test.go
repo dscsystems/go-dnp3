@@ -82,8 +82,8 @@ func crobRequest(t *testing.T) []byte {
 			Group: 12, Variation: 1,
 			Qualifier: app.MakeQualifier(app.PrefixIndex1, app.RangeCount8),
 			Range:     app.Range{Spec: app.RangeCount8, Count: 1},
-			// index 3, PULSE_ON|TRIP, count 1, on 1000ms, off 0, status 0
-			Data: []byte{3, 0x41, 1, 0xE8, 0x03, 0, 0, 0, 0, 0, 0, 0},
+			// index 3, PULSE_ON|TRIP (0x81), count 1, on 1000ms, off 0, status 0
+			Data: []byte{3, 0x81, 1, 0xE8, 0x03, 0, 0, 0, 0, 0, 0, 0},
 		})
 	return frame(t, true, link.FuncUnconfirmedUserData, 10, 1, segment(t, frag))
 }

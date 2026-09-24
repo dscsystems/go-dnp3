@@ -296,3 +296,73 @@ func TestFreezeIsReportedToAnEventPoll(t *testing.T) {
 			frozenEvents, resp.Objects)
 	}
 }
+
+// crobHandler records the control code of every CROB operated.
+type crobHandler struct {
+	mu    sync.Mutex
+	codes []dnp3.ControlCode
+}
+
+func (h *crobHandler) seen() []dnp3.ControlCode {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]dnp3.ControlCode(nil), h.codes...)
+}
+
+func (h *crobHandler) SelectCROB(uint16, dnp3.ControlRelayOutputBlock) dnp3.CommandStatus {
+	return dnp3.CommandSuccess
+}
+
+func (h *crobHandler) OperateCROB(_ uint16, c dnp3.ControlRelayOutputBlock, _ outstation.OperateType) dnp3.CommandStatus {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.codes = append(h.codes, c.Code)
+	return dnp3.CommandSuccess
+}
+
+func (h *crobHandler) SelectAnalog(uint16, outstation.AnalogOutput) dnp3.CommandStatus {
+	return dnp3.CommandSuccess
+}
+
+func (h *crobHandler) OperateAnalog(uint16, outstation.AnalogOutput, outstation.OperateType) dnp3.CommandStatus {
+	return dnp3.CommandSuccess
+}
+
+// A conforming master sends a pulsed trip as 0x81 and a pulsed close as 0x41
+// (trip-close code 2 and 1 in bits 7-6). The outstation has to hand the
+// application the coil the master meant: with the codes transposed, a trip
+// from any other vendor's master reached the application as a close.
+func TestOutstationReadsTripAndCloseAsTheStandardDefines(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		raw     byte
+		trip    bool
+		closing bool
+	}{
+		{"pulse trip 0x81", 0x81, true, false},
+		{"pulse close 0x41", 0x41, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hd := &crobHandler{}
+			h := newHarness(t, outstation.Config{
+				Database: outstation.DatabaseConfig{BinaryOutputStatus: 4},
+			}, hd)
+
+			h.request(app.FuncDirectOperate, app.ObjectHeader{
+				Group: 12, Variation: 1,
+				Qualifier: app.MakeQualifier(app.PrefixIndex1, app.RangeCount8),
+				Range:     app.Range{Spec: app.RangeCount8, Count: 1},
+				Data:      []byte{0, tc.raw, 1, 0xE8, 0x03, 0, 0, 0, 0, 0, 0, 0},
+			})
+
+			codes := hd.seen()
+			if len(codes) != 1 {
+				t.Fatalf("handler saw %d operates, want 1", len(codes))
+			}
+			if codes[0].IsTrip() != tc.trip || codes[0].IsClose() != tc.closing {
+				t.Errorf("code %#02x reached the handler as trip=%v close=%v, want trip=%v close=%v",
+					tc.raw, codes[0].IsTrip(), codes[0].IsClose(), tc.trip, tc.closing)
+			}
+		})
+	}
+}

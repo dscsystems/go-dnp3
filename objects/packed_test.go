@@ -135,8 +135,11 @@ func TestCROBRoundTrip(t *testing.T) {
 	if len(buf) != CROBSize {
 		t.Fatalf("encoded %d octets, want %d", len(buf), CROBSize)
 	}
-	// Control code, count, on time, off time, status — all little-endian.
-	golden := []byte{0x41, 0x01, 0xE8, 0x03, 0x00, 0x00, 0xF4, 0x01, 0x00, 0x00, 0x00}
+	// Control code, count, on time, off time, status — all little-endian. A
+	// pulsed trip is 0x81: trip-close code 2 in bits 7-6. This golden value
+	// once read 0x41, which is a pulsed close; it pinned the transposition in
+	// place rather than catching it.
+	golden := []byte{0x81, 0x01, 0xE8, 0x03, 0x00, 0x00, 0xF4, 0x01, 0x00, 0x00, 0x00}
 	if !bytes.Equal(buf, golden) {
 		t.Errorf("encoded % x\nwant     % x", buf, golden)
 	}

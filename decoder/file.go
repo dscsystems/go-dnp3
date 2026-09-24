@@ -30,7 +30,7 @@ func decodeFileObjects(h app.ObjectHeader) ([]Value, bool) {
 		if !ok {
 			continue
 		}
-		out = append(out, Value{Index: uint16(i), Value: text})
+		out = append(out, Value{Index: uint32(i), Value: text})
 	}
 	return out, len(out) > 0
 }

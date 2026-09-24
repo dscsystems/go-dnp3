@@ -49,6 +49,17 @@ type harness struct {
 
 func newHarness(t *testing.T, cfg outstation.Config, cmds outstation.CommandHandler) *harness {
 	t.Helper()
+	return newHarnessWith(t, cfg, nil, cmds)
+}
+
+// newHarnessWithApp is newHarness for an outstation with its own application.
+func newHarnessWithApp(t *testing.T, cfg outstation.Config, appl outstation.Application) *harness {
+	t.Helper()
+	return newHarnessWith(t, cfg, appl, nil)
+}
+
+func newHarnessWith(t *testing.T, cfg outstation.Config, appl outstation.Application, cmds outstation.CommandHandler) *harness {
+	t.Helper()
 
 	if cfg.LocalAddr == 0 {
 		cfg.LocalAddr = outstationAddr
@@ -61,7 +72,7 @@ func newHarness(t *testing.T, cfg outstation.Config, cmds outstation.CommandHand
 	}
 
 	mch, och := channel.Pipe()
-	out := outstation.New(cfg, nil, cmds)
+	out := outstation.New(cfg, appl, cmds)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	var wg sync.WaitGroup

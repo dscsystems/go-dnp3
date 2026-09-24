@@ -178,6 +178,10 @@ type Session struct {
 	lastReqFrag    []byte
 	lastRespBodies [][]byte
 	lastRespEvents bool
+	// lastRespErrors is the request error indications that response carried.
+	// They are cleared once reported, so a replay has to put them back: the
+	// repeat is owed the same answer, refusal and all.
+	lastRespErrors app.IIN
 
 	// sel is the live select-before-operate reservation, and cmds executes
 	// the controls themselves.
@@ -1045,6 +1049,7 @@ func (s *Session) rememberRequest(r stack.Received, frag app.Fragment) {
 	// this one; it is replaced when this request produces its own response.
 	s.lastRespBodies = nil
 	s.lastRespEvents = false
+	s.lastRespErrors = 0
 }
 
 // replayResponse re-sends the response the identical previous request
@@ -1063,6 +1068,12 @@ func (s *Session) replayResponse(w io.Writer, r stack.Received, req app.Header) 
 	s.awaitingConfirm = false
 	s.pendingBodies = nil
 	s.pendingIndex = 0
+
+	// The request error indications the original response carried were
+	// cleared once it was sent, and the repeat is owed the same answer:
+	// without them, a master whose refused request's response was lost would
+	// read the replay as that request succeeding.
+	s.iin = s.iin.Set(s.lastRespErrors)
 
 	return s.sendFragments(w, r, req, s.lastRespBodies, s.lastRespEvents)
 }
@@ -1106,6 +1117,7 @@ func (s *Session) sendFragments(w io.Writer, r stack.Received, req app.Header, b
 	// with this same response rather than by running the request again.
 	s.lastRespBodies = bodies
 	s.lastRespEvents = hasEvents
+	s.lastRespErrors = s.iin & app.RequestErrorMask
 
 	return s.advanceResponse(w)
 }
@@ -1185,8 +1197,14 @@ func (s *Session) finishResponse() error {
 	}
 	s.bump(func(st *Stats) { st.ResponsesSent++ })
 	// The broadcast indication reports only the request that arrived by
-	// broadcast, so it is cleared once reported.
-	s.iin = s.iin.Clear(app.IINBroadcast)
+	// broadcast, so it is cleared once reported. The request error
+	// indications are the same: they answer one request, and a response that
+	// carried them has told the master. Left set, one refused request — a
+	// clock write the application does not accept, a read of an object it
+	// does not have — would make every later response report the refusal,
+	// and a master reads a response carrying NO_FUNC_CODE_SUPPORT or
+	// OBJECT_UNKNOWN as its own request refused.
+	s.iin = s.iin.Clear(app.IINBroadcast | app.RequestErrorMask)
 	return nil
 }
 

@@ -18,5 +18,5 @@
 
 # direct operate: trip the breaker at index 3
 05 64 18 C4 0A 00 01 00 3D 3A C0 C1 05 0C 01 17 
-01 03 41 01 E8 03 00 00 00 00 14 36 00 00 00 FF 
+01 03 81 01 E8 03 00 00 00 00 C1 A8 00 00 00 FF 
 FF 
