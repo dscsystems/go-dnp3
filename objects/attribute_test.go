@@ -17,9 +17,9 @@ func TestAttributeRoundTrip(t *testing.T) {
 	}{
 		{"a string", StringAttribute(250, "GO-DNP3 RTU"), "GO-DNP3 RTU"},
 		{"an empty string", StringAttribute(245, ""), ""},
-		{"a small count", UintAttribute(226, 6), "6"},
-		{"a fragment size", UintAttribute(228, 2048), "2048"},
-		{"a large count", UintAttribute(220, 70000), "70000"},
+		{"a small count", UintAttribute(239, 6), "6"},
+		{"a fragment size", UintAttribute(241, 2048), "2048"},
+		{"a large count", UintAttribute(233, 70000), "70000"},
 		{"a negative number", IntAttribute(204, -3), "-3"},
 		{
 			"octets",
@@ -207,5 +207,66 @@ func TestAttributeNames(t *testing.T) {
 	}
 	if _, ok := dnp3.AttributeName(250); !ok {
 		t.Error("250 should be a known attribute")
+	}
+}
+
+// TestAttributeListRoundTrip checks g0v255 both ways, in the plain form and,
+// past 255 octets, the extended one whose length counts from 256.
+func TestAttributeListRoundTrip(t *testing.T) {
+	for _, n := range []int{1, 3, 127, 128, 200} {
+		items := make([]dnp3.AttributeListItem, n)
+		for i := range items {
+			items[i] = dnp3.AttributeListItem{Variation: uint8(i), Writable: i%3 == 0}
+		}
+
+		buf, err := AppendAttribute(nil, ListAttribute(items))
+		if err != nil {
+			t.Fatalf("%d entries: %v", n, err)
+		}
+		wantType := dnp3.AttrAttributeList
+		if 2*n > MaxAttributeValue {
+			wantType = dnp3.AttrExtAttributeList
+		}
+		if dnp3.AttributeType(buf[0]) != wantType {
+			t.Errorf("%d entries sent as type %d, want %d", n, buf[0], wantType)
+		}
+
+		back, used, err := ParseAttribute(0, dnp3.AttrList, buf)
+		if err != nil {
+			t.Fatalf("%d entries: parse: %v", n, err)
+		}
+		if used != len(buf) {
+			t.Errorf("%d entries: parse consumed %d of %d octets", n, used, len(buf))
+		}
+		got := back.List()
+		if len(got) != n {
+			t.Fatalf("%d entries came back as %d", n, len(got))
+		}
+		for i := range items {
+			if got[i] != items[i] {
+				t.Errorf("entry %d = %+v, want %+v", i, got[i], items[i])
+			}
+		}
+	}
+
+	// A list that does not fit even the extended form is refused.
+	if _, err := AppendAttribute(nil, ListAttribute(make([]dnp3.AttributeListItem, 256))); err == nil {
+		t.Error("a 512-octet list was encoded")
+	}
+}
+
+// TestAttributeListWireFormat pins the octets against the standard's layout:
+// data type 254, a length counting octets, then variation and property pairs
+// with bit 0 marking a writable attribute.
+func TestAttributeListWireFormat(t *testing.T) {
+	buf, err := AppendAttribute(nil, ListAttribute([]dnp3.AttributeListItem{
+		{Variation: 20}, {Variation: 21, Writable: true}, {Variation: 22},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte{254, 6, 20, 0, 21, 1, 22, 0}
+	if string(buf) != string(want) {
+		t.Errorf("encoded % X, want % X", buf, want)
 	}
 }

@@ -92,16 +92,16 @@ func derivedAttributes(cfg Config) []dnp3.Attribute {
 //
 // They are named here rather than in the dnp3 package's display table because
 // this is code that has to be right: a number used to answer a request is not
-// a label. See the note on [dnp3.AttributeName].
+// a label. The numbers are IEEE 1815-2012's set 0.
 const (
-	AttrBinaryOutputCount   uint8 = 211
-	AttrCounterCount        uint8 = 216
-	AttrAnalogInputCount    uint8 = 220
-	AttrDoubleBitInputCount uint8 = 223
-	AttrBinaryInputCount    uint8 = 226
-	AttrMaxTxFragment       uint8 = 227
-	AttrMaxRxFragment       uint8 = 228
-	AttrAnalogOutputCount   uint8 = 208
+	AttrAnalogOutputCount   uint8 = 221
+	AttrBinaryOutputCount   uint8 = 224
+	AttrCounterCount        uint8 = 229
+	AttrAnalogInputCount    uint8 = 233
+	AttrDoubleBitInputCount uint8 = 236
+	AttrBinaryInputCount    uint8 = 239
+	AttrMaxTxFragment       uint8 = 240
+	AttrMaxRxFragment       uint8 = 241
 )
 
 // attributesFor returns what answers one request, sorted so two reads of the
@@ -137,16 +137,23 @@ func (s *Session) onAttributeRead(w io.Writer, r stack.Received, frag app.Fragme
 		set = uint8(h.Range.Start)
 	}
 
-	if h.Variation == dnp3.AttrList {
-		// Reporting which attributes exist is a distinct encoding this
-		// implementation does not have, and answering it with the attributes
-		// themselves would be a different answer to the question asked.
-		s.iin = s.iin.Set(app.IINObjectUnknown)
-		s.log.Debug("attribute list request refused; not implemented")
-		return s.respond(w, r, frag.Header, nil)
-	}
-
 	attrs := s.attributesFor(set, h.Variation)
+	if h.Variation == dnp3.AttrList {
+		// Which attributes exist, rather than what they say: one list of the
+		// set's variations, none of them writable because nothing here accepts
+		// a write. A set with nothing in it has no list to give.
+		all := s.attributesFor(set, dnp3.AttrAll)
+		attrs = nil
+		if len(all) > 0 {
+			items := make([]dnp3.AttributeListItem, len(all))
+			for i, a := range all {
+				items[i] = dnp3.AttributeListItem{Variation: a.Variation}
+			}
+			list := objects.ListAttribute(items)
+			list.Set = set
+			attrs = []dnp3.Attribute{list}
+		}
+	}
 	if len(attrs) == 0 {
 		s.iin = s.iin.Set(app.IINObjectUnknown)
 		s.log.Debug("no such device attribute", "set", set, "variation", h.Variation)

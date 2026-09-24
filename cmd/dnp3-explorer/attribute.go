@@ -243,18 +243,18 @@ func (m *Model) overviewDevice(rows int) []string {
 // pointCountLabels are the attributes that become the one "points" row, in the
 // shorthand a panel has room for.
 var pointCountLabels = map[uint8]string{
-	226: "BI",
-	223: "DBBI",
-	216: "CT",
-	220: "AI",
-	211: "BO",
-	208: "AO",
+	239: "BI",
+	236: "DBBI",
+	229: "CT",
+	233: "AI",
+	224: "BO",
+	221: "AO",
 }
 
 // The fragment sizes, which become their own row.
 const (
-	attrMaxTxFragment uint8 = 227
-	attrMaxRxFragment uint8 = 228
+	attrMaxTxFragment uint8 = 240
+	attrMaxRxFragment uint8 = 241
 )
 
 // attributeLabel is what the panel calls an attribute.
@@ -282,30 +282,39 @@ func attributeLabel(a dnp3.Attribute) string {
 
 // shortAttributeNames fit the panel. Only the ones whose full name does not.
 var shortAttributeNames = map[uint8]string{
-	203: "max BO per req",
-	206: "AO events",
-	207: "max AO index",
-	208: "analog outputs",
-	209: "BO events",
-	210: "max BO index",
-	211: "binary outputs",
-	212: "frozen ctr events",
-	213: "frozen counters",
-	214: "counter events",
-	215: "max counter index",
-	216: "counters",
-	217: "frozen analogs",
-	218: "AI events",
-	219: "max AI index",
-	220: "analog inputs",
-	221: "DBBI events",
-	222: "max DBBI index",
-	223: "double-bit inputs",
-	224: "BI events",
-	225: "max BI index",
-	226: "binary inputs",
-	227: "max tx fragment",
-	228: "max rx fragment",
+	202: "mRID",
+	210: "sec stats/assoc",
+	211: "user attr sets",
+	212: "master DS protos",
+	213: "outstation DS protos",
+	214: "master data sets",
+	215: "outstation data sets",
+	216: "max BO per req",
+	217: "timing accuracy",
+	218: "accuracy duration",
+	219: "AO events",
+	220: "max AO index",
+	221: "analog outputs",
+	222: "BO events",
+	223: "max BO index",
+	224: "binary outputs",
+	225: "frozen ctr events",
+	226: "frozen counters",
+	227: "counter events",
+	228: "max counter index",
+	229: "counters",
+	230: "frozen analogs",
+	231: "AI events",
+	232: "max AI index",
+	233: "analog inputs",
+	234: "DBBI events",
+	235: "max DBBI index",
+	236: "double-bit inputs",
+	237: "BI events",
+	238: "max BI index",
+	239: "binary inputs",
+	240: "max tx fragment",
+	241: "max rx fragment",
 	242: "version",
 	243: "hardware",
 	244: "owner",

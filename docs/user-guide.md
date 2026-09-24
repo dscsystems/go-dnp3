@@ -855,7 +855,14 @@ for _, a := range attrs {
 }
 
 a, err := m.ReadAttribute(ctx, 0, 250)  // or one, by number
+
+list, err := m.ReadAttribute(ctx, 0, dnp3.AttrList) // or which ones it has
+fmt.Println(list.Value())               // the variations, e.g. 239 240 241 250
 ```
+
+The last form asks what a set holds without reading the values: the answer is a
+single attribute whose `List()` gives each variation the device implements and
+whether a master may write it.
 
 `dnp3.ErrNotSupported` means the device implements no attributes at all, which
 is worth telling apart from a device that implements them and has none to
@@ -865,8 +872,9 @@ The variation *is* the attribute — 250 is the product name, not "the product
 name encoded one way" — so there is no codec table, and an attribute a vendor
 invented for itself decodes exactly as well as one the standard named. Its value
 carries its own type and length. This library prints names for the standard
-set's variations; anything else comes back numbered, because guessing what a
-vendor calls something it invented is worse than saying `attribute 17`.
+set's variations, numbered as in IEEE 1815-2012's set 0; anything else comes
+back numbered, because guessing what a vendor calls something it invented is
+worse than saying `attribute 17`.
 
 ### Serving them from an outstation
 
@@ -880,14 +888,15 @@ cfg.Attributes = []dnp3.Attribute{
 ```
 
 The point counts and the fragment sizes are **not** in that list: the outstation
-derives them from the same configuration that sizes its database. A count
-configured by hand is a count that drifts from the database it describes the
-first time somebody adds a point.
+derives them from the same configuration that sizes its database — variations
+221, 224, 229, 233, 236 and 239 for the counts, 240 and 241 for the fragment
+sizes. A count configured by hand is a count that drifts from the database it
+describes the first time somebody adds a point.
 
 An attribute the device does not have is refused with the object-unknown
-indication rather than answered with something else, and so is variation 255 —
-"which attributes do you have" — which is a distinct encoding this
-implementation does not have.
+indication rather than answered with something else. Variation 255 — "which
+attributes do you have" — is answered with the list of everything the set
+holds, derived and configured alike, none of it writable.
 
 ---
 

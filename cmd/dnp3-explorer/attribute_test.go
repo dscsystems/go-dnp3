@@ -25,8 +25,8 @@ func deviceAttrs() []dnp3.Attribute {
 		objects.StringAttribute(attrProductName, "RTU-9000"),
 		objects.StringAttribute(attrSoftwareVersion, "2.1.0"),
 		objects.StringAttribute(attrSerialNumber, "SN-7"),
-		objects.UintAttribute(226, 32),
-		objects.UintAttribute(220, 16),
+		objects.UintAttribute(239, 32),
+		objects.UintAttribute(233, 16),
 		objects.UintAttribute(attrMaxTxFragment, 2048),
 	}
 }

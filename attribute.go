@@ -34,6 +34,13 @@ const (
 	AttrOctetString   AttributeType = 5
 	AttrBitString     AttributeType = 6
 	AttrTime          AttributeType = 7
+
+	// AttrAttributeList is a list of (variation, properties) pairs: the
+	// answer to [AttrList]. Its length octet counts octets, two per entry.
+	AttrAttributeList AttributeType = 254
+	// AttrExtAttributeList is the same list when it runs past 255 octets:
+	// the length octet then counts octets beyond the first 256.
+	AttrExtAttributeList AttributeType = 255
 )
 
 func (t AttributeType) String() string {
@@ -52,6 +59,8 @@ func (t AttributeType) String() string {
 		return "bits"
 	case AttrTime:
 		return "time"
+	case AttrAttributeList, AttrExtAttributeList:
+		return "list"
 	default:
 		return fmt.Sprintf("AttributeType(%d)", uint8(t))
 	}
@@ -108,6 +117,16 @@ func (a Attribute) Value() string {
 		return a.Time.Format(time.RFC3339)
 	case AttrOctetString, AttrBitString:
 		return octetText(a.Octets)
+	case AttrAttributeList, AttrExtAttributeList:
+		items := a.List()
+		parts := make([]string, len(items))
+		for i, it := range items {
+			parts[i] = strconv.Itoa(int(it.Variation))
+			if it.Writable {
+				parts[i] += "(w)"
+			}
+		}
+		return strings.Join(parts, " ")
 	default:
 		return octetText(a.Octets)
 	}
@@ -141,6 +160,31 @@ func octetText(b []byte) string {
 	return sb.String()
 }
 
+// AttributeListItem is one entry of a device's list of attributes: which
+// variation it implements, and whether a master may write it.
+type AttributeListItem struct {
+	Variation uint8
+	Writable  bool
+}
+
+// attrPropWritable is the property bit that marks an attribute writable.
+const attrPropWritable = 0x01
+
+// List decodes an attribute list. It returns nil for any other type.
+func (a Attribute) List() []AttributeListItem {
+	if a.Type != AttrAttributeList && a.Type != AttrExtAttributeList {
+		return nil
+	}
+	out := make([]AttributeListItem, 0, len(a.Octets)/2)
+	for i := 0; i+1 < len(a.Octets); i += 2 {
+		out = append(out, AttributeListItem{
+			Variation: a.Octets[i],
+			Writable:  a.Octets[i+1]&attrPropWritable != 0,
+		})
+	}
+	return out
+}
+
 // Name returns what the attribute is called, or a placeholder naming its
 // number for one this package does not know.
 func (a Attribute) Name() string {
@@ -159,47 +203,58 @@ func (a Attribute) String() string { return a.Name() + ": " + a.Value() }
 
 // attributeNames are the standard set's attributes.
 //
-// These names are for display and nothing else. The wire carries numbers, this
-// package never routes on a name, and an entry that is wrong mislabels a row
-// in a listing without affecting a single octet — which is the only reason it
-// is safe to ship a table transcribed from the standard's set 0 rather than
-// one verified against a device.
+// These names are for display and nothing else. The wire carries numbers, and
+// this package never routes on a name. The numbering is IEEE 1815-2012's set 0,
+// the same table Wireshark's DNP3 dissector uses.
 //
 // A device's own attributes, and any set other than 0, come back numbered.
 var attributeNames = map[uint8]string{
-	196: "secure authentication statistics per association",
-	197: "number of security statistics per association",
-	198: "user-specific attributes supported",
-	199: "master-defined data set prototypes",
-	200: "outstation-defined data set prototypes",
-	201: "master-defined data sets",
-	202: "outstation-defined data sets",
-	203: "max binary outputs per request",
-	204: "local timing accuracy",
-	205: "duration of time accuracy",
-	206: "analog output events supported",
-	207: "max analog output index",
-	208: "number of analog outputs",
-	209: "binary output events supported",
-	210: "max binary output index",
-	211: "number of binary outputs",
-	212: "frozen counter events supported",
-	213: "frozen counters supported",
-	214: "counter events supported",
-	215: "max counter index",
-	216: "number of counters",
-	217: "frozen analog inputs supported",
-	218: "analog input events supported",
-	219: "max analog input index",
-	220: "number of analog inputs",
-	221: "double-bit binary input events supported",
-	222: "max double-bit binary input index",
-	223: "number of double-bit binary inputs",
-	224: "binary input events supported",
-	225: "max binary input index",
-	226: "number of binary inputs",
-	227: "max transmit fragment size",
-	228: "max receive fragment size",
+	196: "configuration ID",
+	197: "configuration version",
+	198: "configuration build date",
+	199: "configuration last change date",
+	200: "configuration signature",
+	201: "configuration signature algorithm",
+	202: "master resource ID (mRID)",
+	203: "device location altitude",
+	204: "device location longitude",
+	205: "device location latitude",
+	206: "secondary operator name",
+	207: "primary operator name",
+	208: "system name",
+	209: "secure authentication version",
+	210: "number of security statistics per association",
+	211: "user-specific attribute sets",
+	212: "master-defined data set prototypes",
+	213: "outstation-defined data set prototypes",
+	214: "master-defined data sets",
+	215: "outstation-defined data sets",
+	216: "max binary outputs per request",
+	217: "local timing accuracy",
+	218: "duration of time accuracy",
+	219: "analog output events supported",
+	220: "max analog output index",
+	221: "number of analog outputs",
+	222: "binary output events supported",
+	223: "max binary output index",
+	224: "number of binary outputs",
+	225: "frozen counter events supported",
+	226: "frozen counters supported",
+	227: "counter events supported",
+	228: "max counter index",
+	229: "number of counters",
+	230: "frozen analog inputs supported",
+	231: "analog input events supported",
+	232: "max analog input index",
+	233: "number of analog inputs",
+	234: "double-bit binary input events supported",
+	235: "max double-bit binary input index",
+	236: "number of double-bit binary inputs",
+	237: "binary input events supported",
+	238: "max binary input index",
+	239: "number of binary inputs",
+	240: "max transmit fragment size",
+	241: "max receive fragment size",
 	242: "software version",
 	243: "hardware version",
 	244: "owner name",

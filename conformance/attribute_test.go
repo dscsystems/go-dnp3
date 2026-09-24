@@ -133,14 +133,49 @@ func TestAttributeUnknownSet(t *testing.T) {
 	}
 }
 
-// Asking which attributes exist is a distinct encoding this implementation
-// does not have. Refusing it is right; inventing an answer would not be.
-func TestAttributeListRefused(t *testing.T) {
+// Asking which attributes exist is answered with one g0v255 object listing
+// every variation the set holds, none of them writable, and nothing else.
+func TestAttributeList(t *testing.T) {
 	h := attributeHarness(t)
+	all := attributesIn(t, h.request(app.FuncRead, readAttributes(0, dnp3.AttrAll)))
+
 	resp := h.request(app.FuncRead, readAttributes(0, dnp3.AttrList))
+	if resp.Header.IIN.Has(app.IINObjectUnknown) {
+		t.Fatalf("IIN %v: the list request was refused", resp.Header.IIN)
+	}
+	got := attributesIn(t, resp)
+	list, ok := got[dnp3.AttrList]
+	if !ok || len(got) != 1 {
+		t.Fatalf("got %d attributes, want the list alone", len(got))
+	}
+	if list.Type != dnp3.AttrAttributeList {
+		t.Errorf("list has type %v, want %v", list.Type, dnp3.AttrAttributeList)
+	}
+
+	listed := map[uint8]bool{}
+	for _, it := range list.List() {
+		if it.Writable {
+			t.Errorf("g0v%d listed as writable", it.Variation)
+		}
+		listed[it.Variation] = true
+	}
+	if len(listed) != len(all) {
+		t.Errorf("list names %d variations, the set holds %d", len(listed), len(all))
+	}
+	for v := range all {
+		if !listed[v] {
+			t.Errorf("g0v%d is served but not listed", v)
+		}
+	}
+}
+
+// A set with nothing in it has no list either.
+func TestAttributeListOfEmptySet(t *testing.T) {
+	h := attributeHarness(t)
+	resp := h.request(app.FuncRead, readAttributes(9, dnp3.AttrList))
 
 	if len(attributesIn(t, resp)) != 0 {
-		t.Error("the list request was answered with attributes")
+		t.Error("set 9 returned a list")
 	}
 	if !resp.Header.IIN.Has(app.IINObjectUnknown) {
 		t.Errorf("IIN %v, want OBJECT_UNKNOWN", resp.Header.IIN)

@@ -45,6 +45,11 @@ func ParseAttribute(set, variation uint8, buf []byte) (dnp3.Attribute, int, erro
 		Type:      dnp3.AttributeType(buf[0]),
 	}
 	size := int(buf[1])
+	if a.Type == dnp3.AttrExtAttributeList {
+		// The extended list exists because the plain one tops out at 255
+		// octets; its length octet counts from 256.
+		size += 256
+	}
 
 	end := AttributeHeaderSize + size
 	if end > len(buf) {
@@ -156,6 +161,25 @@ func AppendAttribute(dst []byte, a dnp3.Attribute) ([]byte, error) {
 	case dnp3.AttrTime:
 		value = appendTime48(nil, dnp3.TimeToDNP3(a.Time))
 
+	case dnp3.AttrAttributeList, dnp3.AttrExtAttributeList:
+		if len(a.Octets)%2 != 0 {
+			return nil, fmt.Errorf("%w: g0v%d list of %d octets is not a whole number of entries",
+				ErrAttribute, a.Variation, len(a.Octets))
+		}
+		// The type follows the length rather than the caller: a list that
+		// fits the plain form is sent in it, and one that does not in the
+		// extended form, whose length octet counts from 256.
+		if len(a.Octets) > MaxAttributeValue {
+			if len(a.Octets) > MaxAttributeValue+256 {
+				return nil, fmt.Errorf("%w: g0v%d list is %d octets, and the extended length holds %d",
+					ErrAttribute, a.Variation, len(a.Octets), MaxAttributeValue+256)
+			}
+			dst = append(dst, byte(dnp3.AttrExtAttributeList), byte(len(a.Octets)-256))
+			return append(dst, a.Octets...), nil
+		}
+		dst = append(dst, byte(dnp3.AttrAttributeList), byte(len(a.Octets)))
+		return append(dst, a.Octets...), nil
+
 	default:
 		value = a.Octets
 	}
@@ -204,6 +228,22 @@ func StringAttribute(variation uint8, text string) dnp3.Attribute {
 func UintAttribute(variation uint8, v uint64) dnp3.Attribute {
 	return dnp3.Attribute{
 		Variation: variation, Type: dnp3.AttrUnsignedInt, Number: int64(v),
+	}
+}
+
+// ListAttribute builds the list of attributes a device implements, the value
+// of g0v255.
+func ListAttribute(items []dnp3.AttributeListItem) dnp3.Attribute {
+	octets := make([]byte, 0, 2*len(items))
+	for _, it := range items {
+		props := byte(0)
+		if it.Writable {
+			props = 0x01
+		}
+		octets = append(octets, it.Variation, props)
+	}
+	return dnp3.Attribute{
+		Variation: dnp3.AttrList, Type: dnp3.AttrAttributeList, Octets: octets,
 	}
 }
 

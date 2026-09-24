@@ -40,7 +40,7 @@ func TestDecodeAttributes(t *testing.T) {
 		},
 		{
 			"a count",
-			objects.UintAttribute(226, 32),
+			objects.UintAttribute(239, 32),
 			[]string{"number of binary inputs", "32", "uint"},
 		},
 		{

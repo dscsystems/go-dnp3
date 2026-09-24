@@ -428,6 +428,7 @@ type Attribute struct {
 
 func (a Attribute) Value() string  // the value as text, whatever its type
 func (a Attribute) Name() string   // "product name and model", or "attribute 17"
+func (a Attribute) List() []AttributeListItem // decodes a list; nil for any other type
 
 func AttributeName(variation uint8) (string, bool)
 ```
@@ -436,16 +437,42 @@ The variation is the attribute's identity rather than an encoding, so there is
 no codec table and an attribute a device invented for itself decodes as well as
 one the standard named — its value carries its own type and length.
 
-Names are display only: nothing routes on one, and the table is transcribed
-from the standard rather than verified against a device.
+Names are display only: nothing routes on one. The numbering is IEEE
+1815-2012's set 0 — the same table Wireshark's DNP3 dissector uses — so, for
+example, 239 is the number of binary inputs and 240 and 241 are the transmit
+and receive fragment sizes.
 
 ```go
 const (
     AttrSetStandard uint8 = 0   // the standard's set
     AttrAll         uint8 = 254 // read this to ask for every attribute
-    AttrList        uint8 = 255 // "which do you have?" — not implemented here
+    AttrList        uint8 = 255 // read this to ask which attributes a set holds
 )
 ```
+
+### Attribute lists
+
+Reading variation 255 asks *which* attributes a set holds rather than what they
+say. The answer is one attribute whose value is a list of variations, each with
+a flag saying whether a master may write it:
+
+```go
+const (
+    AttrAttributeList    AttributeType = 254 // the list, up to 255 octets
+    AttrExtAttributeList AttributeType = 255 // the list past 255 octets
+)
+
+type AttributeListItem struct {
+    Variation uint8
+    Writable  bool
+}
+```
+
+Each entry is two octets on the wire, the variation then a property octet whose
+bit 0 marks it writable, so the plain form holds 127 entries. A longer list
+uses the extended type, whose length octet counts from 256; the encoder picks
+the form from the length, so a caller never chooses. `Value()` prints a list as
+its variations, with `(w)` after any that are writable — `"239 240 241"`.
 
 ## File transfer
 
@@ -966,6 +993,17 @@ for _, a := range attrs {
 }
 ```
 
+To ask which attributes a set holds without reading their values, read the
+list — see [Attribute lists](#attribute-lists):
+
+```go
+list, err := m.ReadAttribute(ctx, dnp3.AttrSetStandard, dnp3.AttrList)
+for _, it := range list.List() {
+    name, _ := dnp3.AttributeName(it.Variation)
+    fmt.Println(it.Variation, name, it.Writable)
+}
+```
+
 ## File transfer
 
 ```go
@@ -1379,12 +1417,32 @@ cfg.Attributes = []dnp3.Attribute{
 
 The variations this package answers with are named in `outstation/attribute.go`
 — `AttrBinaryInputCount`, `AttrMaxRxFragment` and the rest — because a number
-used to answer a request is not a label.
+used to answer a request is not a label. They follow IEEE 1815-2012's set 0:
+
+| Constant | Variation |
+| --- | --- |
+| `AttrAnalogOutputCount` | 221 |
+| `AttrBinaryOutputCount` | 224 |
+| `AttrCounterCount` | 229 |
+| `AttrAnalogInputCount` | 233 |
+| `AttrDoubleBitInputCount` | 236 |
+| `AttrBinaryInputCount` | 239 |
+| `AttrMaxTxFragment` | 240 |
+| `AttrMaxRxFragment` | 241 |
+
+*Upgrading from an earlier release:* these numbers changed (they were 208–228)
+when the table was aligned with the standard. A master that read point counts or
+fragment sizes by number from an outstation built on this library needs the
+new ones; one that reads them by name is unaffected.
 
 An attribute the device does not have is refused with OBJECT_UNKNOWN rather
-than answered with something else. Variation 255, "which attributes do you
-have", is a distinct encoding this implementation does not have and is refused
-the same way.
+than answered with something else.
+
+Variation 255, "which attributes do you have", is answered with a single
+[attribute list](#attribute-lists) naming every variation the set holds —
+the derived ones and anything in `Config.Attributes` — none marked writable,
+since nothing here accepts a write. A set with nothing in it has no list either,
+and is refused with OBJECT_UNKNOWN.
 
 ## File transfer
 

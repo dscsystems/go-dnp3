@@ -305,6 +305,7 @@ its whole duration** — polls wait behind it.
 ```go
 attrs, err := m.ReadAttributes(ctx)          // the standard set
 a, err := m.ReadAttribute(ctx, 0, 250)       // one, by number
+list, err := m.ReadAttribute(ctx, 0, dnp3.AttrList) // which ones exist: list.List()
 for _, a := range attrs {
 	fmt.Println(a.Name(), a.Value())          // "product name and model RTU-9000"
 }
@@ -320,6 +321,9 @@ cfg.Attributes = []dnp3.Attribute{
 `dnp3.ErrNotSupported` means the device has no attributes. The variation *is*
 the attribute — 250 is the product name, not "the product name encoded one way"
 — so there is no codec table and a device's own attributes decode fine.
+Numbering is IEEE 1815-2012's set 0: the derived point counts are 221, 224,
+229, 233, 236 and 239, the fragment sizes 240 and 241 (earlier releases used
+208–228, before the table was aligned with the standard).
 
 **Decode octets**
 
@@ -348,8 +352,8 @@ unimplemented rather than writing a call that will not compile.
   calls, not protocol requests.)
 - **No datasets** (groups 85–87), **no `FREEZE_AT_TIME`**, **no Secure
   Authentication v5** (out of scope — use TLS), **no self-address** (0xFFFC).
-- **Device attributes are implemented** (group 0) for reading. No writing, and
-  no variation 255 "list of attributes" request.
+- **Device attributes are implemented** (group 0) for reading, including the
+  variation 255 "list of attributes" request. No writing.
 - **File transfer is implemented** (group 70) — read, write, list, delete — but
   there is **no `AUTHENTICATE_FILE` handshake**, and an outstation serves **one
   transfer at a time**.

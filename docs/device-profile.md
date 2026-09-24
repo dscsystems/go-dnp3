@@ -223,17 +223,15 @@ Listed rather than left to be discovered:
 - **Device attributes** (group 0) are implemented for reading, in any set: a
   master reads one attribute or all of them, and an outstation answers from
   what the application configured plus the point counts and fragment sizes it
-  derives from its own database. What is not implemented: writing an attribute,
-  and the "list of attribute variations" request (variation 255), which is a
-  distinct encoding this implementation does not have and answers with
-  OBJECT_UNKNOWN rather than a guess.
+  derives from its own database. The "list of attribute variations" request
+  (variation 255) is answered with the variations the set holds, none marked
+  writable. What is not implemented: writing an attribute.
 
-  The **names** this library prints for standard-set variations are transcribed
-  from the standard's table and have not been checked against another vendor's
-  device. They are display only — nothing routes on a name, the wire carries
-  numbers, and an entry that is wrong mislabels a row without affecting an
-  octet. The numbers an outstation **answers with** are a different matter and
-  are listed in `outstation/attribute.go`.
+  Variation numbers, both those the outstation answers with and the names this
+  library prints, follow IEEE 1815-2012's set 0 (the table Wireshark's DNP3
+  dissector also uses): the point counts are 221, 224, 229, 233, 236 and 239,
+  the fragment sizes 240 and 241. The numbers an outstation answers with are
+  listed in `outstation/attribute.go`.
 - **File transfer** (group 70) is implemented for reading, writing, listing and
   deleting: `OPEN_FILE`, `CLOSE_FILE`, `DELETE_FILE`, `ABORT_FILE`,
   `GET_FILE_INFO`, and the `READ`/`WRITE` of group 70 variation 5 blocks.
