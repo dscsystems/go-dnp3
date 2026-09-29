@@ -509,11 +509,7 @@ func (s *Session) handle(w io.Writer, r stack.Received) error {
 	if err != nil {
 		s.bump(func(st *Stats) { st.MalformedRequests++ })
 		s.log.Warn("malformed request", "err", err)
-		// A fragment we cannot parse cannot be answered meaningfully: we do
-		// not know its sequence number's validity or what it asked for. The
-		// parameter-error indication rides on the next response instead.
-		s.iin = s.iin.Set(app.IINParameterError)
-		return nil
+		return s.rejectMalformed(w, r, err)
 	}
 
 	// Only a fragment carrying both FIR and FIN is a complete request. A
@@ -641,6 +637,71 @@ func (s *Session) handle(w io.Writer, r stack.Received) error {
 	}
 }
 
+// timeWriteData returns the octets of the first time object in a write,
+// skipping the object's index prefix when the qualifier carries one.
+//
+// ObjectHeader.Data includes per-object index prefixes, and both qualifiers
+// 0x17 and 0x28 are legal for a write: reading Data from its first octet
+// would take the index for the top of the timestamp and set a garbage clock.
+func timeWriteData(h app.ObjectHeader) ([]byte, bool) {
+	skip := h.Qualifier.IndexPrefix().Octets()
+	if len(h.Data) < skip+objects.Time48Size {
+		return nil, false
+	}
+	return h.Data[skip : skip+objects.Time48Size], true
+}
+
+// rejectMalformed answers a request whose object section could not be parsed.
+//
+// When the fragment header itself was readable there is a sequence number to
+// answer on and a master waiting, so it gets a null response carrying the
+// indication rather than silence: an object this outstation does not know is
+// OBJECT_UNKNOWN, a function it does not implement is NO_FUNC_CODE_SUPPORT
+// (checked first, since it says more than any object could), and anything else
+// is PARAMETER_ERROR. Where nothing can be answered — an unreadable header, a
+// fragment that is not a complete request, a request that takes no reply — the
+// indication rides on the next response instead.
+func (s *Session) rejectMalformed(w io.Writer, r stack.Received, perr error) error {
+	hdr, _, herr := app.ParseHeader(r.Fragment)
+	if herr != nil || hdr.IsResponse() {
+		s.iin = s.iin.Set(app.IINParameterError)
+		return nil
+	}
+
+	switch {
+	case !handlesFunc(hdr.Func):
+		s.bump(func(st *Stats) { st.UnknownFunction++ })
+		s.iin = s.iin.Set(app.IINNoFuncCodeSupport)
+	case errors.Is(perr, app.ErrUnknownObject):
+		s.iin = s.iin.Set(app.IINObjectUnknown)
+	default:
+		s.iin = s.iin.Set(app.IINParameterError)
+	}
+
+	if hdr.Func == app.FuncConfirm || hdr.Func.NoReply() || r.Broadcast ||
+		!hdr.Control.Fir || !hdr.Control.Fin {
+		return nil
+	}
+	return s.respond(w, r, hdr, nil)
+}
+
+// handlesFunc reports whether handle dispatches a function code to something
+// other than its "not supported" default. It mirrors the switch in handle.
+func handlesFunc(f app.FuncCode) bool {
+	switch f {
+	case app.FuncConfirm, app.FuncRead, app.FuncWrite, app.FuncDelayMeasure,
+		app.FuncRecordCurrentTime, app.FuncOpenFile, app.FuncCloseFile,
+		app.FuncDeleteFile, app.FuncGetFileInfo, app.FuncAbortFile,
+		app.FuncColdRestart, app.FuncWarmRestart,
+		app.FuncEnableUnsolicited, app.FuncDisableUnsolicited,
+		app.FuncAssignClass, app.FuncSelect, app.FuncOperate,
+		app.FuncDirectOperate, app.FuncDirectOperateNR,
+		app.FuncImmedFreeze, app.FuncImmedFreezeNR:
+		return true
+	}
+	return false
+}
+
 // onConfirm clears the wait on the fragment just confirmed.
 //
 // It does not touch the event buffer: a multi-fragment response may still
@@ -762,11 +823,12 @@ func (s *Session) onWrite(w io.Writer, r stack.Received, frag app.Fragment) erro
 				s.iin = s.iin.Set(app.IINParameterError)
 				continue
 			}
-			if len(h.Data) < objects.Time48Size {
+			data, ok := timeWriteData(h)
+			if !ok {
 				s.iin = s.iin.Set(app.IINParameterError)
 				continue
 			}
-			recorded := objects.ParseTime48(h.Data)
+			recorded := objects.ParseTime48(data)
 			elapsed := s.appl.Now().Sub(s.recordedTime)
 			if s.appl.WriteAbsoluteTime(recorded.Time.Add(elapsed)) {
 				s.synchronized = true
@@ -783,11 +845,12 @@ func (s *Session) onWrite(w io.Writer, r stack.Received, frag app.Fragment) erro
 				s.iin = s.iin.Set(app.IINNoFuncCodeSupport)
 				continue
 			}
-			if len(h.Data) < objects.Time48Size {
+			data, ok := timeWriteData(h)
+			if !ok {
 				s.iin = s.iin.Set(app.IINParameterError)
 				continue
 			}
-			ts := objects.ParseTime48(h.Data)
+			ts := objects.ParseTime48(data)
 			if s.appl.WriteAbsoluteTime(ts.Time) {
 				s.synchronized = true
 				s.iin = s.iin.Clear(app.IINNeedTime)

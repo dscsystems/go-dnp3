@@ -289,3 +289,72 @@ func TestTripAndCloseWireCodes(t *testing.T) {
 		}
 	}
 }
+
+// A one-octet index prefix holds only 0-255, so index 300 written into it
+// operated point 44. The prefix has to widen for the run.
+func TestWriteDeadbandWidensIndexPrefix(t *testing.T) {
+	frag := buildRequest(t, newWriteDeadbandTask(map[uint16]float32{3: 1, 300: 1.5}), 0)
+
+	if len(frag.Objects) != 1 {
+		t.Fatalf("%d objects, want 1", len(frag.Objects))
+	}
+	h := frag.Objects[0]
+	if got := h.Qualifier.IndexPrefix(); got != app.PrefixIndex2 {
+		t.Fatalf("index prefix = %v, want two-octet", got)
+	}
+	if h.Range.Count != 2 || len(h.Data) != 2*(2+4) {
+		t.Fatalf("count %d, %d data octets", h.Range.Count, len(h.Data))
+	}
+	if idx := uint16(h.Data[6]) | uint16(h.Data[7])<<8; idx != 300 {
+		t.Errorf("second index = %d, want 300", idx)
+	}
+}
+
+func TestWriteDeadbandKeepsNarrowPrefixWhenItFits(t *testing.T) {
+	frag := buildRequest(t, newWriteDeadbandTask(map[uint16]float32{3: 1, 255: 2}), 0)
+	if got := frag.Objects[0].Qualifier.IndexPrefix(); got != app.PrefixIndex1 {
+		t.Errorf("index prefix = %v, want one-octet", got)
+	}
+}
+
+func TestCommandIndexAbove255IsNotTruncated(t *testing.T) {
+	b := app.NewBuilder(0)
+	if err := b.SetHeader(app.Header{
+		Control: app.Control{Fir: true, Fin: true},
+		Func:    app.FuncDirectOperate,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := buildCommands(b, []Command{LatchOn(300)}); err != nil {
+		t.Fatal(err)
+	}
+	frag, err := app.ParseRequest(nil, b.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := frag.Objects[0]
+	if h.Qualifier.IndexPrefix() != app.PrefixIndex2 {
+		t.Fatalf("index prefix = %v, want two-octet", h.Qualifier.IndexPrefix())
+	}
+	if idx := uint16(h.Data[0]) | uint16(h.Data[1])<<8; idx != 300 {
+		t.Errorf("index on the wire = %d, want 300", idx)
+	}
+}
+
+// A periodic task is re-queued only after it runs, so dropping it when the
+// outstation restarts ended the poll for good.
+func TestSchedulerClearKeepsPeriodicTasks(t *testing.T) {
+	var s scheduler
+	now := time.Now()
+	s.push(&task{name: "oneshot", due: now})
+	s.push(&task{name: "poll", due: now.Add(time.Second), period: time.Second})
+
+	s.clear()
+
+	if s.len() != 1 {
+		t.Fatalf("%d tasks left, want the periodic one", s.len())
+	}
+	if got := s.pop(); got.name != "poll" {
+		t.Errorf("kept %q", got.name)
+	}
+}
