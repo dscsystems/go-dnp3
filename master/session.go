@@ -121,6 +121,10 @@ type Session struct {
 	unsolSeq    uint8
 	hasUnsolSeq bool
 
+	// peerSilent is set when the link layer gave up on a keep-alive probe with
+	// no application request in flight, and ends the connection.
+	peerSilent bool
+
 	// synchronized mirrors the outstation's clock state, taken from NEED_TIME.
 	synchronized bool
 
@@ -334,6 +338,10 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 			if s.checkLinkTimeout(conn) {
 				continue
 			}
+			if s.peerSilent {
+				s.peerSilent = false
+				return
+			}
 			s.checkTimeout()
 			s.checkKeepAlive(conn)
 		}
@@ -378,6 +386,12 @@ func (s *Session) checkLinkTimeout(w io.Writer) bool {
 	s.linkDeadline = time.Now().Add(s.cfg.LinkTimeout)
 	if failed {
 		s.log.Warn("link layer gave up on a frame")
+		if s.inflight == nil {
+			// A keep-alive probe went unanswered. Nothing is waiting on the
+			// link, so nothing else will notice the peer is gone: end the
+			// connection and let Run reconnect.
+			s.peerSilent = true
+		}
 		s.failInflight(dnp3.ErrTimeout)
 		return false
 	}
