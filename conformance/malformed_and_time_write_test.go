@@ -118,3 +118,13 @@ func TestUnparseableObjectSectionGetsAResponse(t *testing.T) {
 		})
 	}
 }
+
+// A READ of a variation the group does not have is not an empty database.
+func TestReadOfUnsupportedVariationSetsObjectUnknown(t *testing.T) {
+	h := newHarness(t, outstation.Config{Database: smallDB()}, nil)
+
+	resp := h.request(app.FuncRead, app.ReadRange(1, 99, 0, 1))
+	if !resp.Header.IIN.Has(app.IINObjectUnknown) {
+		t.Errorf("IIN = %v, want OBJECT_UNKNOWN", resp.Header.IIN)
+	}
+}

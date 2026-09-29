@@ -250,7 +250,7 @@ case err == nil:
 case errors.Is(err, dnp3.ErrTimeout):
 	// the outstation did not answer within ResponseTimeout
 case errors.Is(err, dnp3.ErrTaskFailed):
-	// retries exhausted
+	// dropped before it ran, e.g. the outstation restarted
 case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 	// we gave up, not the device
 }
@@ -409,7 +409,7 @@ func main() {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			v := readTheFieldSomehow()
+			v := 0.0 // replace with your own measurement
 			out.Update(func(db *outstation.Database) {
 				db.UpdateAnalog(0, dnp3.Analog{Value: v, Flags: dnp3.Online, Time: dnp3.Now(time.Now())})
 			})
@@ -421,10 +421,12 @@ func main() {
 ### The rules that matter
 
 **Update from `Session.Update`, not from `Database()` directly.** The database is
-not safe for concurrent use; `Update` runs your function on the session
-goroutine, which serialises it against the protocol. Touching `Database()`
-directly is fine *before* `Run` starts — that is where point configuration
-belongs — and a race afterwards.
+accessed under a lock, so a stray call will not corrupt it, but `Update` runs
+your function on the session goroutine, which serialises it against the
+protocol and keeps related changes together. Touching `Database()` directly is
+fine *before* `Run` starts — that is where point configuration belongs — but
+afterwards a change made outside `Update` can be reported as a torn set of
+events.
 
 **Batch related changes into one `Update`.** A breaker opening and its alarm
 asserting should be one call, so they become one consistent set of events rather

@@ -23,6 +23,8 @@ jobs:
           check-latest: true
       - run: go build ./...
       - run: go vet ./...
+      # The interop suite is behind a build tag, so nothing else compiles it.
+      - run: go vet -tags interop ./interop/
       - run: go test -race ./...
 
   lint:
@@ -36,9 +38,10 @@ jobs:
         run: |
           out=$(gofmt -s -l .)
           if [ -n "$out" ]; then echo "gofmt needed:"; echo "$out"; exit 1; fi
-      - uses: golangci/golangci-lint-action@v6
+      # .golangci.yml is a v2 config, which a v1 binary cannot parse.
+      - uses: golangci/golangci-lint-action@v8
         with:
-          version: v1.65.0
+          version: v2.13.2
 
   # The stack parses bytes from devices it does not control, so a short fuzz
   # run gates every change and a long one runs nightly.

@@ -19,7 +19,7 @@ Last updated for the state of the tree as of the transports-and-examples work.
 | --- | --- |
 | Implementation | go-dnp3 |
 | Roles | Master and outstation |
-| Target conformance | Level 2 complete, most of Level 3, parts of Level 4 |
+| Object coverage | Level 2 objects, most of Level 3, parts of Level 4. Not certified, and the subset-configuration requirement (disabling out-of-subset objects) is not met: higher-level objects are emitted by default |
 | DNP3 revision | IEEE Std 1815-2012 |
 
 ---
@@ -92,7 +92,10 @@ An unknown function code is answered with `IIN2.NO_FUNC_CODE_SUPPORT`.
 
 ### Internal indications
 
-All fourteen defined bits are produced and interpreted. Of note:
+Ten of the fourteen defined bits are produced and interpreted. `LOCAL_CONTROL`,
+`DEVICE_TROUBLE`, `ALREADY_EXECUTING` and `CONFIG_CORRUPT` are defined but no
+code path sets them; an application that needs one has no way to assert it.
+Of note:
 
 - `DEVICE_RESTART` is asserted on start and after a restart, and cleared only
   by a master writing g80v1 index 7.

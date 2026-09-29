@@ -26,7 +26,10 @@ type Config struct {
 
 	// ResponseTimeout is how long to wait for an outstation to answer.
 	ResponseTimeout time.Duration
-	// TaskRetryPeriod is how long to wait before retrying a failed task.
+	// TaskRetryPeriod is reserved. The master does not retry failed tasks at
+	// the application layer: a task that times out completes with
+	// [dnp3.ErrTimeout] and the caller decides whether to ask again. Periodic
+	// scans simply run again on their next period.
 	TaskRetryPeriod time.Duration
 
 	// IntegrityOnStartup runs a class 0+1+2+3 poll when the session starts and
@@ -558,6 +561,18 @@ func (s *Session) onFragment(w io.Writer, r stack.Received) {
 	frag, err := app.ParseFragment(nil, r.Fragment)
 	if err != nil {
 		s.log.Warn("malformed response", "err", err)
+		s.bump(func(st *Stats) { st.FragmentsDiscarded++ })
+
+		// A response to the request in flight that cannot be parsed is not a
+		// timeout, and counting it as one would hide the outstation's fault
+		// behind the counter that says it did not answer.
+		if t := s.inflight; t != nil {
+			if h, _, herr := app.ParseHeader(r.Fragment); herr == nil &&
+				h.IsResponse() && h.Control.Seq == t.seq {
+				s.inflight = nil
+				s.completeTask(t, fmt.Errorf("master: %s response: %w: %w", t.name, dnp3.ErrMalformed, err))
+			}
+		}
 		return
 	}
 	if !frag.Header.IsResponse() {

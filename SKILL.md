@@ -132,9 +132,11 @@ out.Update(func(db *outstation.Database) {
 These are the mistakes that compile and then misbehave.
 
 1. **Update the outstation database only through `Session.Update`** once `Run`
-   has started. `Database()` is not safe for concurrent use. Configuring points
-   via `Database()` *before* `Run` is fine and is where point configuration
-   belongs.
+   has started. The database's accessors are individually locked, so this is not
+   about memory safety: `Update` runs your function on the session goroutine, so
+   related changes land together and their events stay consistent. Configuring
+   points via `Database()` *before* `Run` is fine and is where point
+   configuration belongs.
 
 2. **Batch related changes into one `Update` call.** A breaker opening and its
    alarm asserting must be one call, or the master sees a torn read.
@@ -227,7 +229,7 @@ last *reported* value, not the last stored one.
 
 ```go
 errors.Is(err, dnp3.ErrTimeout)    // no answer within ResponseTimeout
-errors.Is(err, dnp3.ErrTaskFailed) // retries exhausted
+errors.Is(err, dnp3.ErrTaskFailed) // dropped before it ran, e.g. the outstation restarted
 errors.Is(err, dnp3.ErrBadConfig)  // bad arguments (empty class mask, start>stop, no commands)
 // also: dnp3.ErrMalformed, ErrClosed, ErrNotSupported, ErrNoConnection
 ```

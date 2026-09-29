@@ -168,8 +168,8 @@ dnp3-explorer  demo (in-process outstation)  ● connected      up 1:36  13.4/s 
  ↑↓ move · enter act · d inspect · / filter · < > r sort · b deadband · ? help
 ```
 
-Five screens: an overview of the session and the device's health, the point
-table, the sequence of events, the activity log, and a reference. Points can be
+Six screens: an overview of the session and the device's health, the point
+table, the sequence of events, the activity log, file transfer, and a reference. Points can be
 filtered on anything in the row, sorted by value or by quality — worst first,
 which is how you find the broken points in a device with a thousand good ones —
 and inspected one at a time, with the flags named, the trend drawn and the

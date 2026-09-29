@@ -11,7 +11,7 @@ to.
 import "github.com/dscsystems/go-dnp3"
 ```
 
-**Status: the API is not yet stable.** `dnp3.Version` is `0.1.0-dev`. Names and
+**Status: the API is not yet stable.** `dnp3.Version` is `0.5.3`. Names and
 signatures may change before 1.0.
 
 ## Packages
@@ -43,7 +43,7 @@ The root package holds the value types every other package speaks in. It has no
 sessions and no I/O.
 
 ```go
-const Version = "0.1.0-dev"
+const Version = "0.5.3"
 ```
 
 ## Measurements
@@ -545,7 +545,7 @@ var (
 if err := m.IntegrityPoll(ctx); err != nil {
     switch {
     case errors.Is(err, dnp3.ErrTimeout):     // the outstation did not answer
-    case errors.Is(err, dnp3.ErrTaskFailed):  // retries exhausted
+    case errors.Is(err, dnp3.ErrTaskFailed):  // dropped before it ran, e.g. the outstation restarted
     case errors.Is(err, context.Canceled):    // we gave up, not the device
     }
 }
@@ -861,7 +861,7 @@ type Config struct {
     RemoteAddr uint16 // the outstation's
 
     ResponseTimeout time.Duration // default 5s
-    TaskRetryPeriod time.Duration // default 5s
+    TaskRetryPeriod time.Duration // reserved; currently unused
 
     IntegrityOnStartup    bool      // class 0+1+2+3 poll at startup and on every reported restart
     DisableUnsolOnStartup bool      // send disable-unsolicited first, the standard's startup sequence

@@ -24,7 +24,9 @@ var (
 	// protocol allows.
 	ErrBadConfig = errors.New("dnp3: invalid configuration")
 
-	// ErrTaskFailed means a master task exhausted its retries.
+	// ErrTaskFailed means a master task was dropped before it ran, for example
+	// because the outstation restarted while it was queued. The master does not
+	// retry tasks at the application layer.
 	ErrTaskFailed = errors.New("dnp3: task failed")
 
 	// ErrFileTransfer means an outstation rejected a file operation. The

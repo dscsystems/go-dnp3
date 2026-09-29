@@ -773,6 +773,15 @@ func (s *Session) onRead(w io.Writer, r stack.Received, frag app.Fragment) error
 				s.iin = s.iin.Set(app.IINObjectUnknown)
 				continue
 			}
+			// A variation the group does not have would otherwise read as an
+			// empty database, and a master could not tell the two apart. An
+			// octet string's variation is its length, so it has no table row.
+			if h.Variation != 0 && pt != dnp3.TypeOctetString {
+				if _, known := objects.Lookup(staticGroupVar(pt, h.Variation)); !known {
+					s.iin = s.iin.Set(app.IINObjectUnknown)
+					continue
+				}
+			}
 			build := func(start, stop uint16) {
 				s.buildStaticRange(b, pt, h.Variation, start, stop)
 			}
