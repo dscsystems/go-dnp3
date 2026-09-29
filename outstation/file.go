@@ -316,6 +316,8 @@ type transfer struct {
 	block     uint32
 	blockSize uint16
 	size      uint32
+	// received counts the octets accepted into a file being written.
+	received uint64
 
 	// deadline is when an idle transfer is abandoned.
 	deadline time.Time
@@ -563,7 +565,20 @@ func (s *Session) onCloseFile(w io.Writer, r stack.Received, frag app.Fragment) 
 	}
 
 	name := s.file.name
-	if err := s.closeFile(); err != nil {
+
+	// Closing a write is the commit point, so it must not report success for
+	// a file that did not arrive whole: fewer octets than the master declared,
+	// or no block carrying the last-block flag, means it was cut short.
+	// The handle is released either way.
+	incomplete := (s.file.mode == dnp3.FileModeWrite || s.file.mode == dnp3.FileModeAppend) &&
+		(!s.file.done || s.file.received != uint64(s.file.size))
+	if incomplete {
+		s.log.Warn("file closed before the write was complete",
+			"name", name, "declared", s.file.size, "received", s.file.received,
+			"last_block_seen", s.file.done)
+	}
+
+	if err := s.closeFile(); err != nil || incomplete {
 		s.log.Warn("closing a transferred file failed", "name", name, "err", err)
 		// The master needs to know: a write whose close failed has not landed,
 		// whatever the individual blocks reported.
@@ -828,6 +843,7 @@ func (s *Session) onFileWrite(w io.Writer, r stack.Received, frag app.Fragment, 
 			break
 		}
 		t.block++
+		t.received += uint64(len(block.Data))
 		t.done = block.Last
 		s.bump(func(st *Stats) { st.FileBlocksReceived++ })
 	}

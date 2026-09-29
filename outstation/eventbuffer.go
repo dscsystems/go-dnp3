@@ -30,6 +30,10 @@ type Event struct {
 	// selected marks an event that has been put into a response but not yet
 	// confirmed by the master.
 	selected bool
+
+	// seq identifies the event within its buffer, so a caller that selected
+	// more than it could send can hand back exactly the surplus.
+	seq uint64
 }
 
 // EventBufferConfig sizes the buffer.
@@ -63,6 +67,8 @@ type EventBuffer struct {
 	// response was built — a loss the master has not yet been told about.
 	drops         uint64
 	dropsAtSelect uint64
+
+	nextSeq uint64
 }
 
 // NewEventBuffer returns an event buffer.
@@ -93,6 +99,8 @@ func (b *EventBuffer) Add(e Event) {
 		b.overflow = true
 		b.drops++
 	}
+	b.nextSeq++
+	e.seq = b.nextSeq
 	b.events = append(b.events, e)
 }
 
@@ -225,6 +233,34 @@ func (b *EventBuffer) Unselect() int {
 	n := 0
 	for i := range b.events {
 		if b.events[i].selected {
+			b.events[i].selected = false
+			n++
+		}
+	}
+	return n
+}
+
+// Release returns the given events, previously handed out by
+// [EventBuffer.Select], to the queue without touching any other selected event.
+// It is for a caller that selected more than fitted in the fragment it could
+// send: confirming those would delete events the master was never offered.
+func (b *EventBuffer) Release(events []Event) int {
+	if len(events) == 0 {
+		return 0
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	release := make(map[uint64]struct{}, len(events))
+	for _, e := range events {
+		release[e.seq] = struct{}{}
+	}
+	n := 0
+	for i := range b.events {
+		if !b.events[i].selected {
+			continue
+		}
+		if _, ok := release[b.events[i].seq]; ok {
 			b.events[i].selected = false
 			n++
 		}

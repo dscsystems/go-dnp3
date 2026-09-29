@@ -91,7 +91,7 @@ func (s *Session) WriteFile(ctx context.Context, name string, src io.Reader, siz
 		return fmt.Errorf("master: %w: nil source", dnp3.ErrBadConfig)
 	}
 
-	t := &transfer{name: name, requestID: s.nextRequestID(), src: src, size: size}
+	t := &transfer{name: name, requestID: s.nextRequestID(), src: src, size: size, write: true}
 
 	// Each block is read from src as its task is built, so a large file is
 	// never held in memory whole.
@@ -188,7 +188,12 @@ func (s *Session) runTransfer(ctx context.Context, t *transfer, first *task) err
 	if t.handle != 0 && !t.closed {
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.ResponseTimeout)
 		defer cancel()
-		if cerr := s.run(closeCtx, newFileCloseTask(t)); cerr != nil {
+		release := newFileCloseTask
+		if t.write {
+			// Closing would commit whatever part of the file arrived.
+			release = newFileAbortTask
+		}
+		if cerr := s.run(closeCtx, release(t)); cerr != nil {
 			s.log.Warn("could not close a failed transfer", "file", t.name, "err", cerr)
 		}
 	}
