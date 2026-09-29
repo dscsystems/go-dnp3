@@ -465,3 +465,19 @@ func TestFileTransferLeavesPollingWorking(t *testing.T) {
 		t.Fatalf("polling after a transfer: %v", err)
 	}
 }
+
+// Closing a write is the commit point, so a file shorter than the size the
+// master declared must not be reported as written. It used to return nil and
+// leave a truncated file behind.
+func TestFileWriteShorterThanDeclaredFails(t *testing.T) {
+	m, _ := serving(t, nil)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	data := strings.Repeat("x", 100)
+	err := m.WriteFile(ctx, "/short.bin", strings.NewReader(data), 1000)
+	if err == nil {
+		t.Fatal("a write that delivered 100 of 1000 declared octets reported success")
+	}
+}

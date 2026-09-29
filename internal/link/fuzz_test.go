@@ -206,7 +206,7 @@ func FuzzSecondary(f *testing.F) {
 				if _, err := Encode(nil, res.Reply.Header, res.Reply.Payload); err != nil {
 					t.Fatalf("secondary produced an unencodable reply: %v", err)
 				}
-			} else if frame.Header.Control.Prm &&
+			} else if frame.Header.Control.Prm && !res.Discarded &&
 				frame.Header.Control.Func != FuncUnconfirmedUserData {
 				t.Fatalf("no reply to primary function %v", frame.Header.Control.Func)
 			}

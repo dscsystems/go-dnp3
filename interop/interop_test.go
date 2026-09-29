@@ -87,18 +87,18 @@ type collector struct {
 	master.NopHandler
 
 	mu      sync.Mutex
-	binary  map[uint16]dnp3.Binary
-	analog  map[uint16]dnp3.Analog
-	counter map[uint16]dnp3.Counter
-	strings map[uint16]string
+	binary  map[uint32]dnp3.Binary
+	analog  map[uint32]dnp3.Analog
+	counter map[uint32]dnp3.Counter
+	strings map[uint32]string
 }
 
 func newCollector() *collector {
 	return &collector{
-		binary:  map[uint16]dnp3.Binary{},
-		analog:  map[uint16]dnp3.Analog{},
-		counter: map[uint16]dnp3.Counter{},
-		strings: map[uint16]string{},
+		binary:  map[uint32]dnp3.Binary{},
+		analog:  map[uint32]dnp3.Analog{},
+		counter: map[uint32]dnp3.Counter{},
+		strings: map[uint32]string{},
 	}
 }
 

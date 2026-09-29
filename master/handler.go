@@ -3,6 +3,7 @@
 package master
 
 import (
+	"sync/atomic"
 	"time"
 
 	"github.com/dscsystems/go-dnp3"
@@ -114,7 +115,7 @@ type ChannelHandler struct {
 	NopHandler
 
 	ch      chan Update
-	dropped uint64
+	dropped atomic.Uint64
 	info    ResponseInfo
 }
 
@@ -131,7 +132,7 @@ func (h *ChannelHandler) Updates() <-chan Update { return h.ch }
 
 // Dropped returns how many updates were discarded because the consumer was
 // not keeping up.
-func (h *ChannelHandler) Dropped() uint64 { return h.dropped }
+func (h *ChannelHandler) Dropped() uint64 { return h.dropped.Load() }
 
 func (h *ChannelHandler) BeginFragment(info ResponseInfo) { h.info = info }
 
@@ -140,7 +141,7 @@ func (h *ChannelHandler) send(u Update) {
 	select {
 	case h.ch <- u:
 	default:
-		h.dropped++
+		h.dropped.Add(1)
 	}
 }
 

@@ -220,6 +220,9 @@ func (s *Stack) OnTimeout(w io.Writer) (failed bool, err error) {
 		s.seg.Clear()
 		return true, nil
 	default:
+		// Nothing is in flight at the link layer, so there is nothing left to
+		// wait for. Leaving awaiting set would refuse every later send.
+		s.awaiting = false
 		return false, nil
 	}
 }

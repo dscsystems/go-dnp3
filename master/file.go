@@ -52,6 +52,10 @@ type transfer struct {
 	// and this is where that lands.
 	err error
 
+	// write marks a transfer that sends a file, which is abandoned with an
+	// abort rather than a close: closing is what commits a write.
+	write bool
+
 	// closed records that the close step has run, so a caller does not send a
 	// second one after a failure.
 	closed bool
@@ -311,6 +315,26 @@ func newFileCloseTask(t *transfer) *task {
 				t.fail(fmt.Errorf("master: closing %q: %w%s",
 					t.name, st.Status.Err(), statusText(st.Text)))
 			}
+		},
+		onDone: func(app.IIN) { t.closed = true },
+	}
+}
+
+// newFileAbortTask abandons a transfer without committing it.
+func newFileAbortTask(t *transfer) *task {
+	return &task{
+		name:     "file-abort",
+		funcCode: app.FuncAbortFile,
+		priority: priorityCommand,
+		build: func(b *app.Builder) error {
+			h, err := app.FreeFormat(70, 4, objects.AppendFileCommandStatus(nil, objects.FileCommandStatus{
+				Handle:    t.handle,
+				RequestID: t.requestID,
+			}))
+			if err != nil {
+				return err
+			}
+			return b.AddObject(h)
 		},
 		onDone: func(app.IIN) { t.closed = true },
 	}

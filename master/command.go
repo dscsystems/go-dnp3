@@ -184,17 +184,36 @@ func buildCommands(b *app.Builder, cmds []Command) error {
 		}
 		run := cmds[i:j]
 
+		// The prefix must be wide enough for every index in the run: a
+		// one-octet prefix holds only 0-255, so index 300 would silently
+		// operate point 44.
+		wide := false
+		for _, c := range run {
+			if c.Index > 0xFF {
+				wide = true
+			}
+		}
+
 		var data []byte
 		for _, c := range run {
-			data = append(data, byte(c.Index))
+			if wide {
+				data = append(data, byte(c.Index), byte(c.Index>>8))
+			} else {
+				data = append(data, byte(c.Index))
+			}
 			data = append(data, c.data...)
+		}
+
+		prefix, spec := app.PrefixIndex1, app.RangeCount8
+		if wide {
+			prefix, spec = app.PrefixIndex2, app.RangeCount16
 		}
 
 		if err := b.AddObject(app.ObjectHeader{
 			Group:     gv.Group,
 			Variation: gv.Variation,
-			Qualifier: app.MakeQualifier(app.PrefixIndex1, app.RangeCount8),
-			Range:     app.Range{Spec: app.RangeCount8, Count: uint32(len(run))},
+			Qualifier: app.MakeQualifier(prefix, spec),
+			Range:     app.Range{Spec: spec, Count: uint32(len(run))},
 			Data:      data,
 		}); err != nil {
 			return err

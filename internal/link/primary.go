@@ -192,7 +192,12 @@ func (p *Primary) OnFrame(f Frame) (Frame, Action) {
 	if f.Header.Control.Prm {
 		return Frame{}, ActionNone
 	}
-	p.dfc = f.Header.Control.Dfc()
+	// DFC is the peer's answer to something we sent. Taken from a frame we
+	// were not waiting on it would latch flow control on an idle link, where
+	// nothing ever clears it and every later Send is refused.
+	if p.state != priIdle {
+		p.dfc = f.Header.Control.Dfc()
+	}
 
 	switch p.state {
 

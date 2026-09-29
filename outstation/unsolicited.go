@@ -156,6 +156,29 @@ func (s *Session) pollUnsolicited(w io.Writer, now time.Time) error {
 	return s.sendUnsolicited(w, events, now, false)
 }
 
+// eventsThatFit returns how many of events, taken in order, fit in one
+// unsolicited fragment. A single event too large for the limit is still
+// reported alone.
+func (s *Session) eventsThatFit(events []Event) int {
+	ctx := objects.Context{Synchronized: s.synchronized}
+	fits := func(n int) bool {
+		b := newResponseBuilder(s.cfg.MaxTxFragment, ctx)
+		s.buildEvents(b, events[:n])
+		return len(b.done()) == 1
+	}
+
+	lo, hi := 1, len(events) // the answer is in [lo, hi]; one is always allowed
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if fits(mid) {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	return lo
+}
+
 // onUnsolicitedTimeout retries or gives up on an unconfirmed response.
 func (s *Session) onUnsolicitedTimeout(w io.Writer, now time.Time) error {
 	s.unsol.awaiting = false
@@ -203,17 +226,24 @@ func (s *Session) retryUnsolicited(w io.Writer, now time.Time) error {
 
 // sendUnsolicited transmits one unsolicited response.
 func (s *Session) sendUnsolicited(w io.Writer, events []Event, now time.Time, null bool) error {
+	// An unsolicited response is a single fragment. If the events do not fit,
+	// the rest stay queued for the next one rather than being split across a
+	// series the master would have to reassemble without having asked for it.
+	// They have to be handed back as well as left out: confirming the response
+	// removes every event that is still selected, including the ones that were
+	// never sent.
+	if !null {
+		fit := s.eventsThatFit(events)
+		s.db.events.Release(events[fit:])
+		events = events[:fit]
+	}
+
 	ctx := objects.Context{Synchronized: s.synchronized}
 	b := newResponseBuilder(s.cfg.MaxTxFragment, ctx)
 	if !null {
 		s.buildEvents(b, events)
 	}
-	bodies := b.done()
-
-	// An unsolicited response is a single fragment. If the events do not fit,
-	// the rest stay queued for the next one rather than being split across a
-	// series the master would have to reassemble without having asked for it.
-	body := bodies[0]
+	body := b.done()[0]
 
 	// Every transmission through here is a new one, carrying data the master
 	// has not been offered before, so it takes the next sequence number. A

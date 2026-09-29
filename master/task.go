@@ -266,17 +266,28 @@ func newWriteDeadbandTask(deadbands map[uint16]float32) *task {
 		funcCode: app.FuncWrite,
 		priority: priorityCommand,
 		build: func(b *app.Builder) error {
-			// One index byte and four value bytes per deadband.
-			data := make([]byte, 0, 5*len(indexes))
+			// The index prefix is widened when any index passes 255; a
+			// one-octet prefix would set the deadband of the wrong point.
+			// indexes is sorted, so the last one is the largest.
+			prefix, spec := app.PrefixIndex1, app.RangeCount8
+			if len(indexes) > 0 && indexes[len(indexes)-1] > 0xFF {
+				prefix, spec = app.PrefixIndex2, app.RangeCount16
+			}
+			data := make([]byte, 0, (prefix.Octets()+4)*len(indexes))
 			for _, i := range indexes {
 				bits := math.Float32bits(deadbands[i])
-				data = append(data, byte(i),
+				if prefix == app.PrefixIndex2 {
+					data = append(data, byte(i), byte(i>>8))
+				} else {
+					data = append(data, byte(i))
+				}
+				data = append(data,
 					byte(bits), byte(bits>>8), byte(bits>>16), byte(bits>>24))
 			}
 			return b.AddObject(app.ObjectHeader{
 				Group: 34, Variation: 3, // single precision
-				Qualifier: app.MakeQualifier(app.PrefixIndex1, app.RangeCount8),
-				Range:     app.Range{Spec: app.RangeCount8, Count: uint32(len(indexes))},
+				Qualifier: app.MakeQualifier(prefix, spec),
+				Range:     app.Range{Spec: spec, Count: uint32(len(indexes))},
 				Data:      data,
 			})
 		},
@@ -321,15 +332,27 @@ func (s *scheduler) peek() (*task, bool) {
 
 func (s *scheduler) len() int { return s.q.Len() }
 
-// clear drops every pending task, failing anything a caller is waiting on.
+// clear drops every pending one-shot task, failing anything a caller is
+// waiting on.
 //
 // This runs when the outstation reports a restart: the queued work was aimed
-// at a device state that no longer exists.
+// at a device state that no longer exists. Periodic tasks are kept, because a
+// periodic task is only re-queued after it runs and would otherwise be lost
+// for good; they poll the restarted device as they always did.
 func (s *scheduler) clear() {
+	kept := s.q[:0]
 	for _, t := range s.q {
+		if t.period > 0 {
+			kept = append(kept, t)
+			continue
+		}
 		t.finish(dnp3.ErrTaskFailed)
 	}
-	s.q = s.q[:0]
+	for i := len(kept); i < len(s.q); i++ {
+		s.q[i] = nil
+	}
+	s.q = kept
+	heap.Init(&s.q)
 }
 
 type taskQueue []*task

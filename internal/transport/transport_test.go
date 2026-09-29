@@ -307,6 +307,18 @@ func TestReassemblerRestartOnUnexpectedFIR(t *testing.T) {
 	}
 }
 
+// An abandoned partial fragment counts even when its opening segment carried no
+// payload octets.
+func TestReassemblerCountsAbandonedEmptyOpening(t *testing.T) {
+	r := NewReassembler(0)
+	r.Accept([]byte{0x40}) // FIR, seq 0, no payload — abandoned
+
+	res := r.Accept([]byte{0xC5, 0xBB}) // FIR|FIN — a fresh fragment
+	if res.Discarded != DiscardUnexpectedFIR {
+		t.Errorf("reason = %v, want %v", res.Discarded, DiscardUnexpectedFIR)
+	}
+}
+
 func TestReassemblerSequenceWrap(t *testing.T) {
 	r := NewReassembler(0)
 	r.Accept([]byte{0x40 | 62, 0x01})   // FIR, seq 62

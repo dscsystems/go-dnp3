@@ -322,7 +322,7 @@ func (r *Reassembler) Accept(segment []byte) Result {
 		// unrecoverable, but the new one is perfectly good, so drop the old,
 		// report it, and carry on rather than dropping both.
 		reported := DiscardNone
-		if r.assembly && len(r.buf) > 0 {
+		if r.assembly {
 			reported = DiscardUnexpectedFIR
 			r.stats.SegmentsDiscarded++
 			r.stats.Discards[DiscardUnexpectedFIR]++

@@ -40,6 +40,7 @@ cover: ## produce coverage.html
 .PHONY: vet
 vet:
 	$(GO) vet $(PKGS)
+	$(GO) vet -tags interop ./interop/
 
 .PHONY: fmt
 fmt:

@@ -35,3 +35,20 @@ func TestPrimaryHonoursDFC(t *testing.T) {
 			"user data must wait until DFC clears")
 	}
 }
+
+// DFC answers something we sent. A stray secondary frame on an idle link used
+// to latch it, and nothing on an idle link ever cleared it again.
+func TestPrimaryIgnoresDFCFromAnIdleLink(t *testing.T) {
+	p := &Primary{LocalAddr: 1, RemoteAddr: 10, UseConfirms: true, MaxRetries: 3}
+
+	stray := secondaryFrame(FuncAck, 10, 1)
+	stray.Header.Control.Fcv = true // DFC
+	p.OnFrame(stray)
+
+	if p.DataFlowControl() {
+		t.Fatal("DFC from a frame nothing was waiting for latched flow control")
+	}
+	if _, _, err := p.Send([]byte{0xC0}); err != nil {
+		t.Errorf("send refused after a stray frame: %v", err)
+	}
+}
