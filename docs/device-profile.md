@@ -64,19 +64,20 @@ Default maximum receive fragment: 2048 octets, configurable.
 | --- | --- | --- | --- |
 | 0 | CONFIRM | Sends | Receives |
 | 1 | READ | Yes | Yes |
-| 2 | WRITE | Yes | Yes (g50v1 time, g80v1 indications, g34 deadbands) |
+| 2 | WRITE | Yes | Yes (g50v1 and g50v3 time, g80v1 indications, g34 deadbands) |
 | 3 | SELECT | Yes | Yes |
 | 4 | OPERATE | Yes | Yes |
 | 5 | DIRECT_OPERATE | Yes | Yes |
 | 6 | DIRECT_OPERATE_NR | Yes | Yes |
-| 7/8 | IMMED_FREEZE(_NR) | — | Yes |
-| 9–12 | FREEZE_CLEAR, FREEZE_AT_TIME | — | **No** |
+| 7/8 | IMMED_FREEZE(_NR) | Yes | Yes |
+| 9/10 | FREEZE_CLEAR(_NR) | Yes | Yes |
+| 11/12 | FREEZE_AT_TIME(_NR) | Yes | Yes; a time already past with no interval is refused with `PARAMETER_ERROR` |
 | 13 | COLD_RESTART | Yes | Yes |
 | 14 | WARM_RESTART | Yes | Yes |
 | 20/21 | ENABLE/DISABLE_UNSOLICITED | Yes | Yes |
 | 22 | ASSIGN_CLASS | — | Yes |
 | 23 | DELAY_MEASURE | Yes | Yes |
-| 24 | RECORD_CURRENT_TIME | — | Yes |
+| 24 | RECORD_CURRENT_TIME | Yes (`SyncTimeRecorded`) | Yes |
 | 25 | OPEN_FILE | Yes | Yes |
 | 26 | CLOSE_FILE | Yes | Yes |
 | 27 | DELETE_FILE | Yes | Yes |
@@ -92,9 +93,12 @@ An unknown function code is answered with `IIN2.NO_FUNC_CODE_SUPPORT`.
 
 ### Internal indications
 
-Ten of the fourteen defined bits are produced and interpreted. `LOCAL_CONTROL`,
-`DEVICE_TROUBLE`, `ALREADY_EXECUTING` and `CONFIG_CORRUPT` are defined but no
-code path sets them; an application that needs one has no way to assert it.
+All fourteen defined bits are produced. `LOCAL_CONTROL`, `DEVICE_TROUBLE` and
+`CONFIG_CORRUPT` depend on the device rather than the protocol, so the
+application asserts them with `Session.SetIndication` (or `Config.Indications`
+from the start); `ALREADY_EXECUTING` is set when a restart is requested while
+the previous one is still under way and when the same `FREEZE_AT_TIME` is
+requested twice.
 Of note:
 
 - `DEVICE_RESTART` is asserted on start and after a restart, and cleared only
@@ -125,11 +129,11 @@ Sizes and field layouts for all of these are generated from
 | 10 | 1, 2 | Yes | Yes | Binary output status |
 | 11 | 1, 2 | Yes | Yes | Binary output events |
 | 12 | 1, 2, 3 | Yes | Yes | CROB; v2 and v3 decode but the outstation treats them as v1 |
-| 13 | 1, 2 | Sizes only | — | Binary output command events |
+| 13 | 1, 2 | Yes | Yes | Binary output command events; raised when a control is operated on a point with a `CommandEventClass` |
 | 20–23 | see spec | Yes | Yes | Counters and frozen counters |
 | 30–33 | see spec | Yes | Yes | Analog inputs, frozen, and their events |
 | 34 | 1, 2, 3 | Yes | Yes | Analog deadbands, writable by a master |
-| 40–43 | see spec | Yes | Yes | Analog outputs, commands and events |
+| 40–43 | see spec | Yes | Yes | Analog outputs, commands and events; g43 command events are raised like g13, in the width of the command unless the point names one |
 | 50 | 1, 2, 3, 4 | Yes | Yes | Time and date |
 | 51 | 1, 2 | Yes | Yes | Common time of occurrence |
 | 52 | 1, 2 | Yes | Yes | Time delay |
@@ -161,7 +165,8 @@ misparsing the rest of the fragment, but no codec turns them into values.
 | Unsolicited reporting | Yes, with a null response first, hold time and retries |
 | Select-before-operate | Yes, with a configurable timeout |
 | Select matching | Raw object octets must match exactly |
-| Multi-fragment responses | Yes |
+| Multi-fragment responses | Yes; the first fragment carries the request's sequence number and each later one increments it |
+| Multi-fragment requests | No, see the known gaps |
 | Broadcast requests | Executed, not answered; `IIN1.BROADCAST` on the next response |
 | Clock | Set by a master; the outstation reports `NEED_TIME` until then |
 | Clock procedures accepted | Direct write (g50v1) and the recorded-time procedure (RECORD_CURRENT_TIME then a g50v3 write) |
@@ -221,6 +226,14 @@ container built from source (`make interop-build && make interop`):
 
 Listed rather than left to be discovered:
 
+- **Multi-fragment requests** are not reassembled. A request must arrive as one
+  fragment with both FIR and FIN set; anything else is discarded, and the
+  next response carries `PARAMETER_ERROR`. This bounds the size of a control,
+  write or file-block request to `MaxRxFragment` (default 2048 octets), and a
+  master that splits a larger request across fragments cannot be served.
+  Refusing is deliberate: acting on half a control request is worse than not
+  acting on it.
+
 - **Self-address** (0xFFFC) is not implemented, so a master cannot address an
   outstation whose configured address it does not know.
 - **Device attributes** (group 0) are implemented for reading, in any set: a
@@ -255,10 +268,6 @@ Listed rather than left to be discovered:
   one that exists.
 - **Datasets** (groups 85–87) are not implemented.
 - **Secure Authentication v5** is out of scope by design; use TLS.
-- **`FREEZE_AT_TIME`** is not implemented, and the framing layer's rule for
-  whether a function code carries object data is wrong for it — its leading
-  group 50 object carries data while the counter headers after it do not.
-  Resolving that needs per-object semantics rather than a per-fragment rule.
 - The **TCP server** serves one master at a time.
 - **Analog output status points are not driven by analog output commands** in
   the library: a command reaches the `CommandHandler`, and it is the

@@ -12,7 +12,7 @@ import (
 func unicastFrom(t *testing.T, src uint16, fn link.Function, payload []byte) []byte {
 	t.Helper()
 	raw, err := link.Encode(nil, link.Header{
-		Control: link.Control{Prm: true, Func: fn},
+		Control: link.Control{Dir: true, Prm: true, Func: fn},
 		Dest:    10, Src: src,
 		Length: uint8(link.MinLength + len(payload)),
 	}, payload)

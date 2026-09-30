@@ -453,3 +453,19 @@ func AnalogFitsIn16(v float64) bool {
 func AnalogFitsIn32(v float64) bool {
 	return v >= math.MinInt32 && v <= math.MaxInt32 && v == math.Trunc(v)
 }
+
+// CommandEvent records a control that was operated on an output point, as
+// carried by groups 13 (binary) and 43 (analog).
+type CommandEvent struct {
+	// Status is the outcome the outstation reported for the command.
+	Status CommandStatus
+	// Analog reports which of State and Value is meaningful.
+	Analog bool
+	// State is the state a binary output was commanded to.
+	State bool
+	// Value is the value an analog output was commanded to.
+	Value float64
+	// Time is when the command was operated, for the variations that carry
+	// one; its Quality is [TimestampInvalid] otherwise.
+	Time Timestamp
+}

@@ -50,7 +50,14 @@ func ParseFragment(sizer ObjectSizer, buf []byte) (Fragment, error) {
 	carriesData := h.Func.CarriesObjectData()
 
 	for off := n; off < len(buf); {
-		oh, used, err := ParseObjectHeader(sizer, buf[off:], off, carriesData)
+		objectCarriesData := carriesData
+		if h.Func == FuncFreezeAtTime || h.Func == FuncFreezeAtTimeNR {
+			// Mixed: the leading group 50 object carries the time and the
+			// interval, and the counter headers after it only name what to
+			// freeze. The group is the first octet of the header.
+			objectCarriesData = buf[off] == 50
+		}
+		oh, used, err := ParseObjectHeader(sizer, buf[off:], off, objectCarriesData)
 		if err != nil {
 			return frag, fmt.Errorf("object header at offset %d: %w", off, err)
 		}

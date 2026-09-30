@@ -192,6 +192,12 @@ func (p *Primary) OnFrame(f Frame) (Frame, Action) {
 	if f.Header.Control.Prm {
 		return Frame{}, ActionNone
 	}
+	// A secondary function carries no user data. A frame that does is
+	// malformed, and acting on it would take a reply for something it is not.
+	if len(f.Payload) > 0 {
+		return Frame{}, ActionNone
+	}
+
 	// DFC is the peer's answer to something we sent. Taken from a frame we
 	// were not waiting on it would latch flow control on an idle link, where
 	// nothing ever clears it and every later Send is refused.

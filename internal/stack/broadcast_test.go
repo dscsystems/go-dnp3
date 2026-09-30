@@ -15,7 +15,7 @@ func outstationStack() *Stack {
 func bcastFrame(t *testing.T, fn link.Function, fcb, fcv bool, payload []byte) []byte {
 	t.Helper()
 	raw, err := link.Encode(nil, link.Header{
-		Control: link.Control{Prm: true, Func: fn, Fcb: fcb, Fcv: fcv},
+		Control: link.Control{Dir: true, Prm: true, Func: fn, Fcb: fcb, Fcv: fcv},
 		Dest:    link.BroadcastNoConfirm, Src: 1,
 		Length: uint8(link.MinLength + len(payload)),
 	}, payload)
@@ -112,7 +112,7 @@ func TestBroadcastDoesNotDisturbTheFrameCountBit(t *testing.T) {
 	unicast := func(t *testing.T, fn link.Function, fcb, fcv bool, payload []byte) []byte {
 		t.Helper()
 		raw, err := link.Encode(nil, link.Header{
-			Control: link.Control{Prm: true, Func: fn, Fcb: fcb, Fcv: fcv},
+			Control: link.Control{Dir: true, Prm: true, Func: fn, Fcb: fcb, Fcv: fcv},
 			Dest:    10, Src: 1, Length: uint8(link.MinLength + len(payload)),
 		}, payload)
 		if err != nil {

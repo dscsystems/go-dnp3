@@ -54,6 +54,21 @@ func validControl(c Control) bool {
 	}
 }
 
+// validLength reports whether a primary frame's user data agrees with its
+// function: the two user-data functions must carry some, and every other
+// function carries none. A frame that disagrees is malformed, and answering it
+// would acknowledge data — or its absence — the peer did not mean to send.
+func validLength(c Control, payload []byte) bool {
+	switch c.Func {
+	case FuncConfirmedUserData, FuncUnconfirmedUserData:
+		return len(payload) > 0
+	case FuncResetLinkStates, FuncTestLinkStates, FuncRequestLinkStatus:
+		return len(payload) == 0
+	default:
+		return true
+	}
+}
+
 // Reset returns the secondary to its unreset state. A session calls this when
 // the underlying connection is re-established, because link state does not
 // survive a socket.
@@ -79,7 +94,7 @@ func (s *Secondary) OnFrame(f Frame) SecResult {
 	// without a reply: answering it would confirm a frame we are refusing to
 	// act on, and the peer's own timeout is what should tell it something is
 	// wrong.
-	if !validControl(f.Header.Control) {
+	if !validControl(f.Header.Control) || !validLength(f.Header.Control, f.Payload) {
 		return SecResult{Discarded: true}
 	}
 

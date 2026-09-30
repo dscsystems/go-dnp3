@@ -65,6 +65,9 @@ type task struct {
 	// fragment of a solicited response carries the request's own sequence
 	// number, so the sequence number alone cannot distinguish them.
 	started bool
+	// respSeq is the sequence number of the last fragment accepted, from
+	// which the next in the series is expected to follow.
+	respSeq uint8
 
 	// done receives the outcome, for callers waiting on a one-shot task.
 	done chan error
@@ -209,15 +212,24 @@ func newRestartTask(mode dnp3.RestartMode) *task {
 }
 
 // newWriteTimeTask sets the outstation's clock.
-func newWriteTimeTask(t time.Time) *task {
+func newWriteTimeTask(t time.Time) *task { return newWriteTimeObjectTask("write-time", 1, t) }
+
+// newWriteRecordedTimeTask writes what the master's clock read when it sent
+// RECORD_CURRENT_TIME, as group 50 variation 3: the second half of the LAN
+// procedure. The outstation adds the time it has held the request since.
+func newWriteRecordedTimeTask(t time.Time) *task {
+	return newWriteTimeObjectTask("write-recorded-time", 3, t)
+}
+
+func newWriteTimeObjectTask(name string, variation uint8, t time.Time) *task {
 	ms := dnp3.TimeToDNP3(t)
 	return &task{
-		name:     "write-time",
+		name:     name,
 		funcCode: app.FuncWrite,
 		priority: priorityStartup,
 		build: func(b *app.Builder) error {
 			return b.AddObject(app.ObjectHeader{
-				Group: 50, Variation: 1,
+				Group: 50, Variation: variation,
 				Qualifier: app.MakeQualifier(app.PrefixNone, app.RangeCount8),
 				Range:     app.Range{Spec: app.RangeCount8, Count: 1},
 				Data: []byte{
@@ -387,4 +399,46 @@ func (q *taskQueue) Pop() any {
 	old[n-1] = nil
 	*q = old[:n-1]
 	return t
+}
+
+// newFreezeTask asks the outstation to freeze every counter now, clearing the
+// running counters afterwards when clear is set.
+func newFreezeTask(clear bool) *task {
+	fc := app.FuncImmedFreeze
+	name := "freeze"
+	if clear {
+		fc, name = app.FuncFreezeClear, "freeze-clear"
+	}
+	return &task{
+		name:     name,
+		funcCode: fc,
+		priority: priorityCommand,
+		build: func(b *app.Builder) error {
+			return b.AddObject(app.ReadAllObjects(20, 0))
+		},
+	}
+}
+
+// newFreezeAtTimeTask asks the outstation to freeze every counter at a time,
+// and again every interval when that is non-zero.
+func newFreezeAtTimeTask(at time.Time, interval time.Duration) *task {
+	data := objects.AppendTime48(nil, dnp3.Now(at))
+	ms := uint32(interval / time.Millisecond)
+	data = append(data, byte(ms), byte(ms>>8), byte(ms>>16), byte(ms>>24))
+	return &task{
+		name:     "freeze-at-time",
+		funcCode: app.FuncFreezeAtTime,
+		priority: priorityCommand,
+		build: func(b *app.Builder) error {
+			if err := b.AddObject(app.ObjectHeader{
+				Group: 50, Variation: 2,
+				Qualifier: app.MakeQualifier(app.PrefixNone, app.RangeCount8),
+				Range:     app.Range{Spec: app.RangeCount8, Count: 1},
+				Data:      data,
+			}); err != nil {
+				return err
+			}
+			return b.AddObject(app.ReadAllObjects(20, 0))
+		},
+	}
 }

@@ -24,6 +24,10 @@ var (
 	// protocol allows.
 	ErrBadConfig = errors.New("dnp3: invalid configuration")
 
+	// ErrRejected means the outstation answered a request but set an
+	// indication saying it refused it: PARAMETER_ERROR or OBJECT_UNKNOWN.
+	ErrRejected = errors.New("dnp3: request rejected by peer")
+
 	// ErrTaskFailed means a master task was dropped before it ran, for example
 	// because the outstation restarted while it was queued. The master does not
 	// retry tasks at the application layer.

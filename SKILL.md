@@ -348,11 +348,12 @@ unimplemented rather than writing a call that will not compile.
 
 - **No `Session.Close()`, `Stop()` or `Shutdown()`** on either role. Cancel the
   context passed to `Run`.
-- **No master-side freeze, `ASSIGN_CLASS` or `RECORD_CURRENT_TIME`.** The
-  outstation answers those function codes; the master API does not send them.
+- **No master-side `ASSIGN_CLASS`.** The outstation answers it; the master API
+  does not send it. Freezes (`FreezeCounters`, `FreezeAtTime`) and the
+  RECORD_CURRENT_TIME procedure (`SyncTimeRecorded`) do exist.
   (`Database.FreezeCounters()` and `Database.AssignClass()` are outstation-local
   calls, not protocol requests.)
-- **No datasets** (groups 85–87), **no `FREEZE_AT_TIME`**, **no Secure
+- **No datasets** (groups 85–87), **no Secure
   Authentication v5** (out of scope — use TLS), **no self-address** (0xFFFC).
 - **Device attributes are implemented** (group 0) for reading, including the
   variation 255 "list of attributes" request. No writing.

@@ -90,6 +90,11 @@ const (
 	TypeBinaryOutputStatus
 	TypeAnalogOutputStatus
 	TypeOctetString
+	// TypeBinaryCommandEvent and TypeAnalogCommandEvent are event-only: they
+	// record a control that was operated (groups 13 and 43) and have no static
+	// value.
+	TypeBinaryCommandEvent
+	TypeAnalogCommandEvent
 )
 
 var pointTypeNames = map[PointType]string{
@@ -102,6 +107,9 @@ var pointTypeNames = map[PointType]string{
 	TypeBinaryOutputStatus: "BinaryOutputStatus",
 	TypeAnalogOutputStatus: "AnalogOutputStatus",
 	TypeOctetString:        "OctetString",
+
+	TypeBinaryCommandEvent: "BinaryCommandEvent",
+	TypeAnalogCommandEvent: "AnalogCommandEvent",
 }
 
 func (p PointType) String() string {

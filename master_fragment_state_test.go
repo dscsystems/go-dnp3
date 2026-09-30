@@ -62,6 +62,45 @@ func response(ctrl app.Control, body []byte) []byte {
 // confirm was lost, so it repeated it — is therefore delivered to the
 // application a second time, and the same measurement is counted twice.
 func TestMasterDoesNotRedeliverARepeatedFragment(t *testing.T) {
+	runSeries(t, func(send func(app.FuncCode, app.Control, []byte), seq uint8) {
+		first := app.Control{Fir: true, Fin: false, Seq: seq}
+		send(app.FuncResponse, first, binaryBody())
+		send(app.FuncResponse, first, binaryBody()) // the very same fragment again
+		send(app.FuncResponse, app.Control{Fir: false, Fin: true, Seq: (seq + 1) % app.SeqModulus}, nil)
+	}, 1)
+}
+
+// The continuation of a series carries the next sequence number, and a
+// continuation repeated because its confirm was lost carries the same one
+// again. The repeat must not be delivered twice.
+func TestMasterDoesNotRedeliverARepeatedContinuation(t *testing.T) {
+	runSeries(t, func(send func(app.FuncCode, app.Control, []byte), seq uint8) {
+		send(app.FuncResponse, app.Control{Fir: true, Fin: false, Seq: seq}, nil)
+		next := app.Control{Fir: false, Fin: false, Seq: (seq + 1) % app.SeqModulus}
+		send(app.FuncResponse, next, binaryBody())
+		send(app.FuncResponse, next, binaryBody())
+		send(app.FuncResponse, app.Control{Fir: false, Fin: true, Seq: (seq + 2) % app.SeqModulus}, nil)
+	}, 1)
+}
+
+// A response function the master does not implement, or one whose UNS bit
+// contradicts its function code, is discarded without effect.
+func TestMasterIgnoresInvalidResponses(t *testing.T) {
+	runSeries(t, func(send func(app.FuncCode, app.Control, []byte), seq uint8) {
+		// AUTH_RESPONSE: secure authentication is not implemented.
+		send(app.FuncAuthResponse, app.Control{Fir: true, Fin: true, Seq: seq}, binaryBody())
+		// A solicited RESPONSE claiming to be unsolicited.
+		send(app.FuncResponse, app.Control{Fir: true, Fin: true, Uns: true, Seq: seq}, binaryBody())
+		// An UNSOLICITED_RESPONSE without the UNS bit.
+		send(app.FuncUnsolicitedResponse, app.Control{Fir: true, Fin: true, Seq: seq}, binaryBody())
+		// The genuine answer.
+		send(app.FuncResponse, app.Control{Fir: true, Fin: true, Seq: seq}, nil)
+	}, 0)
+}
+
+// runSeries polls a scripted outstation that answers with the series answer
+// builds, and checks how many binary values reach the handler.
+func runSeries(t *testing.T, answer func(send func(app.FuncCode, app.Control, []byte), seq uint8), want int) {
 	mch, och := channel.Pipe()
 
 	h := &binaryCounter{}
@@ -115,12 +154,10 @@ func TestMasterDoesNotRedeliverARepeatedFragment(t *testing.T) {
 						return
 					}
 
-					first := app.Control{Fir: true, Fin: false, Seq: seq}
-					_ = st.SendTo(conn, r.Source, response(first, binaryBody()))
-					// The very same fragment again.
-					_ = st.SendTo(conn, r.Source, response(first, binaryBody()))
-					_ = st.SendTo(conn, r.Source,
-						response(app.Control{Fir: false, Fin: true, Seq: seq}, nil))
+					answer(func(fn app.FuncCode, c app.Control, body []byte) {
+						frag := append(app.AppendHeader(nil, app.Header{Control: c, Func: fn}), body...)
+						_ = st.SendTo(conn, r.Source, frag)
+					}, seq)
 				})
 			}
 			if err != nil {
@@ -147,10 +184,9 @@ func TestMasterDoesNotRedeliverARepeatedFragment(t *testing.T) {
 		t.Fatalf("integrity poll: %v", err)
 	}
 
-	if got := h.count(); got != 1 {
-		t.Errorf("the master delivered %d binary values, want 1: the repeated fragment was "+
-			"delivered again rather than recognised as one already received, so a single "+
-			"measurement reaches the application twice", got)
+	if got := h.count(); got != want {
+		t.Errorf("the master delivered %d binary values, want %d: a repeated fragment was "+
+			"delivered again rather than recognised as one already received", got, want)
 	}
 }
 

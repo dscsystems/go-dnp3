@@ -27,6 +27,14 @@ type Event struct {
 	AnalogOutput  dnp3.AnalogOutputStatus
 	OctetString   dnp3.OctetString
 
+	// CommandStatus, CommandState and CommandValue describe a command event
+	// (TypeBinaryCommandEvent, TypeAnalogCommandEvent): the outcome the
+	// outstation reported, the state a binary output was commanded to, and the
+	// value an analog output was commanded to.
+	CommandStatus dnp3.CommandStatus
+	CommandState  bool
+	CommandValue  float64
+
 	// selected marks an event that has been put into a response but not yet
 	// confirmed by the master.
 	selected bool

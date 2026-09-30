@@ -29,6 +29,11 @@ func (s *Session) dispatch(h app.ObjectHeader, ctx objects.Context) {
 		return
 	}
 
+	if h.Group == 13 || h.Group == 43 {
+		s.dispatchCommandEvents(h, HeaderInfo{GV: gv, Kind: objects.KindCommandEvent})
+		return
+	}
+
 	d, ok := objects.Lookup(gv)
 	if !ok || d.Measurement == dnp3.TypeUnknown {
 		return
@@ -118,6 +123,33 @@ func decodeRun[T any](
 		off += size
 	}
 	return out
+}
+
+// dispatchCommandEvents delivers group 13 and 43 objects to a handler that
+// asks for them. They record controls that were operated, so a handler that
+// does not implement [CommandEventHandler] simply never sees them.
+func (s *Session) dispatchCommandEvents(h app.ObjectHeader, info HeaderInfo) {
+	ch, ok := s.handler.(CommandEventHandler)
+	if !ok {
+		return
+	}
+	size, ok := objects.CommandEventSize(h.Group, h.Variation)
+	if !ok {
+		return
+	}
+	prefixLen := 0
+	if p := h.Qualifier.IndexPrefix(); p.IsIndex() {
+		prefixLen = p.Octets()
+	}
+
+	vals := decodeRun(h, size, prefixLen, objects.Context{},
+		func(b []byte, _ objects.Context) dnp3.CommandEvent {
+			e, _ := objects.ParseCommandEvent(h.Group, h.Variation, b)
+			return e
+		})
+	if len(vals) > 0 {
+		ch.HandleCommandEvent(info, vals)
+	}
 }
 
 // dispatchPacked handles the bit-packed variations, whose unit of encoding is

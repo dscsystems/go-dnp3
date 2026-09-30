@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dscsystems/go-dnp3"
@@ -62,6 +63,12 @@ type Config struct {
 	// LinkTimeout is how long to wait for a link-layer acknowledgement before
 	// retransmitting. It matters only when UseLinkConfirms is set.
 	LinkTimeout time.Duration
+
+	// Indications are the device-controlled internal indications asserted from
+	// the start, for a device that already knows its configuration is bad or a
+	// point is in local control when it comes up. They can be changed while
+	// running with [Session.SetIndication].
+	Indications Indication
 
 	// Log receives protocol and session events. Nil discards them.
 	Log *slog.Logger
@@ -120,6 +127,46 @@ func (NopApplication) ColdRestart() time.Duration       { return 0 }
 func (NopApplication) WarmRestart() time.Duration       { return 0 }
 func (NopApplication) SupportsWriteTime() bool          { return true }
 
+// Indication is a device-controlled internal indication: one the library
+// cannot know for itself, because it depends on the device rather than on the
+// protocol. Set them with [Session.SetIndication].
+type Indication uint16
+
+// Device-controlled indications.
+const (
+	// IndicationLocalControl reports that one or more points are in local
+	// control and will not accept commands from the master.
+	IndicationLocalControl = Indication(app.IINLocalControl)
+	// IndicationDeviceTrouble reports a device-specific fault. What it means
+	// is the device's to define, and the master's to look up.
+	IndicationDeviceTrouble = Indication(app.IINDeviceTrouble)
+	// IndicationConfigCorrupt reports that the device's configuration is not
+	// valid and its answers cannot be relied on.
+	IndicationConfigCorrupt = Indication(app.IINConfigCorrupt)
+
+	settableIndications = IndicationLocalControl | IndicationDeviceTrouble | IndicationConfigCorrupt
+)
+
+// SetIndication asserts or clears device-controlled indications in every
+// response from now on. It is safe to call from any goroutine.
+//
+// Only [IndicationLocalControl], [IndicationDeviceTrouble] and
+// [IndicationConfigCorrupt] can be set; anything else is ignored, since the
+// rest describe the protocol and are the library's to assert.
+func (s *Session) SetIndication(ind Indication, on bool) {
+	ind &= settableIndications
+	for {
+		old := s.indications.Load()
+		next := old &^ uint32(ind)
+		if on {
+			next = old | uint32(ind)
+		}
+		if s.indications.CompareAndSwap(old, next) {
+			return
+		}
+	}
+}
+
 // Session is an outstation.
 //
 // All protocol state lives in the session goroutine started by [Session.Run].
@@ -154,12 +201,10 @@ type Session struct {
 
 	// pendingBodies are the fragments still to send for a response that spans
 	// more than one, and pendingIndex is the next to go out. Only one is ever
-	// truly in flight at a time, on purpose: every fragment in the response
-	// shares the request's own sequence number, the only field a confirm is
-	// matched against, so a confirm for the first fragment cannot be told
-	// apart from one for a later one unless the outstation never has more
-	// than one outstanding. pendingDest and pendingSeq are constant across the
-	// response; pendingHasEvents says whether it carries events at all, which
+	// truly in flight at a time, on purpose: the master paces the series with
+	// its confirms. pendingDest and pendingSeq, the request's sequence number
+	// and the first fragment's, are constant across the response; each later
+	// fragment adds its index to it. pendingHasEvents says whether it carries events at all, which
 	// decides whether the last fragment needs a confirmation of its own.
 	pendingBodies    [][]byte
 	pendingIndex     int
@@ -172,6 +217,19 @@ type Session struct {
 	// response, reusing the sequence number precisely so the outstation can
 	// recognise the repeat; answering it from here rather than running it
 	// again is what keeps one operator action from operating a point twice.
+	// freezes are the FREEZE_AT_TIME schedules waiting for their moment.
+	freezes []freezeSchedule
+
+	// indications are the bits the application controls: LOCAL_CONTROL,
+	// DEVICE_TROUBLE and CONFIG_CORRUPT. Atomic because they are set from the
+	// application's goroutines and read on the session's.
+	indications atomic.Uint32
+
+	// restartUntil is when the last restart the application announced is
+	// expected to finish, so a second request for it while it is still under
+	// way is answered ALREADY_EXECUTING instead of being carried out twice.
+	restartUntil time.Time
+
 	lastReqValid   bool
 	lastReqSource  uint16
 	lastReqSeq     uint8
@@ -246,6 +304,8 @@ type Stats struct {
 	FileErrors         uint64
 	FileTimeouts       uint64
 	FilesAborted       uint64
+	// ScheduledFreezes counts FREEZE_AT_TIME freezes that have been performed.
+	ScheduledFreezes uint64
 }
 
 // New returns an outstation session.
@@ -263,7 +323,7 @@ func New(cfg Config, appl Application, cmds CommandHandler) *Session {
 	}
 
 	events := NewEventBuffer(cfg.Events)
-	return &Session{
+	s := &Session{
 		attributes: buildAttributes(cfg),
 		cfg:        cfg,
 		appl:       appl,
@@ -276,6 +336,8 @@ func New(cfg Config, appl Application, cmds CommandHandler) *Session {
 		iin:     app.IINDeviceRestart,
 		updates: make(chan func(*Database), 64),
 	}
+	s.indications.Store(uint32(cfg.Indications & settableIndications))
+	return s
 }
 
 // Restart makes the outstation report a restart to its master.
@@ -321,6 +383,18 @@ func (s *Session) Update(fn func(*Database)) {
 		// wedged. Apply directly rather than dropping the update: the
 		// database takes its own lock.
 		fn(s.db)
+	}
+}
+
+// drainUpdates applies every update already queued, without waiting for more.
+func (s *Session) drainUpdates() {
+	for {
+		select {
+		case fn := <-s.updates:
+			fn(s.db)
+		default:
+			return
+		}
 	}
 }
 
@@ -413,6 +487,12 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 			fn(s.db)
 
 		case data := <-rx:
+			// Updates the application submitted before this request arrived
+			// belong in its answer. Select picks among ready cases at random,
+			// so without this a request could overtake an update queued
+			// ahead of it and be answered with the state from before.
+			s.drainUpdates()
+
 			var handleErr error
 			if err := s.stack.Receive(conn, data, func(r stack.Received) {
 				if handleErr == nil {
@@ -437,6 +517,7 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 			s.checkConfirmTimeout()
 			s.checkSelectTimeout(now)
 			s.checkFileTimeout(now)
+			s.runFreezes(now)
 			if err := s.pollUnsolicited(conn, now); err != nil {
 				s.log.Warn("unsolicited transmission failed", "err", err)
 				return
@@ -527,6 +608,35 @@ func (s *Session) handle(w io.Writer, r stack.Received) error {
 		// answer, so the indication rides on the next response instead.
 		s.iin = s.iin.Set(app.IINParameterError)
 		return nil
+	}
+
+	// Two things a well-formed message never does, whatever it is asking for.
+	// A CONFIRM is a bare header: objects after it are not an acknowledgement
+	// of anything. And CON and UNS belong to responses — a request asks the
+	// outstation for nothing by setting them, so one that does is discarded
+	// unanswered rather than acted on as though it meant something else.
+	if frag.Header.Func == app.FuncConfirm && len(frag.Objects) > 0 {
+		s.bump(func(st *Stats) { st.MalformedRequests++ })
+		s.log.Warn("discarding a confirm that carries objects", "seq", frag.Header.Control.Seq)
+		return nil
+	}
+	if frag.Header.Func != app.FuncConfirm && (frag.Header.Control.Con || frag.Header.Control.Uns) {
+		s.bump(func(st *Stats) { st.MalformedRequests++ })
+		s.log.Warn("discarding a request with CON or UNS set",
+			"func", frag.Header.Func, "con", frag.Header.Control.Con, "uns", frag.Header.Control.Uns)
+		return nil
+	}
+
+	// A prefix and a range that do not go together — an index prefix on a
+	// start-stop range, say — are not a qualifier the standard defines, and
+	// which points they name is anyone's guess.
+	for _, h := range frag.Objects {
+		if !h.Qualifier.Consistent() {
+			s.bump(func(st *Stats) { st.MalformedRequests++ })
+			s.log.Warn("request carries an inconsistent qualifier",
+				"group", h.Group, "variation", h.Variation, "qualifier", h.Qualifier)
+			return s.rejectMalformed(w, r, fmt.Errorf("%w: %s", app.ErrBadQualifier, h.Qualifier))
+		}
 	}
 
 	// A confirm is an acknowledgement of our own response, not a request: it
@@ -620,8 +730,17 @@ func (s *Session) handle(w io.Writer, r stack.Received) error {
 		app.FuncDirectOperate, app.FuncDirectOperateNR:
 		return s.onCommand(w, r, frag)
 
-	case app.FuncImmedFreeze, app.FuncImmedFreezeNR:
-		s.onFreeze(frag)
+	case app.FuncImmedFreeze, app.FuncImmedFreezeNR,
+		app.FuncFreezeClear, app.FuncFreezeClearNR:
+		clear := frag.Header.Func == app.FuncFreezeClear || frag.Header.Func == app.FuncFreezeClearNR
+		s.onFreeze(frag, clear)
+		if frag.Header.Func.NoReply() || r.Broadcast {
+			return nil
+		}
+		return s.respond(w, r, frag.Header, nil)
+
+	case app.FuncFreezeAtTime, app.FuncFreezeAtTimeNR:
+		s.onFreezeAtTime(frag)
 		if frag.Header.Func.NoReply() || r.Broadcast {
 			return nil
 		}
@@ -696,7 +815,9 @@ func handlesFunc(f app.FuncCode) bool {
 		app.FuncEnableUnsolicited, app.FuncDisableUnsolicited,
 		app.FuncAssignClass, app.FuncSelect, app.FuncOperate,
 		app.FuncDirectOperate, app.FuncDirectOperateNR,
-		app.FuncImmedFreeze, app.FuncImmedFreezeNR:
+		app.FuncImmedFreeze, app.FuncImmedFreezeNR,
+		app.FuncFreezeClear, app.FuncFreezeClearNR,
+		app.FuncFreezeAtTime, app.FuncFreezeAtTimeNR:
 		return true
 	}
 	return false
@@ -982,14 +1103,25 @@ func (s *Session) onRecordCurrentTime(w io.Writer, r stack.Received, frag app.Fr
 // be unavailable.
 func (s *Session) onRestart(w io.Writer, r stack.Received, frag app.Fragment) error {
 	var d time.Duration
-	if frag.Header.Func == app.FuncColdRestart {
-		d = s.appl.ColdRestart()
-		s.db.events.Reset()
+	if now := s.appl.Now(); now.Before(s.restartUntil) {
+		// A restart already under way. Doing it again would restart what has
+		// not finished restarting, so the request is understood but not
+		// repeated, and the delay reported is what is left of the first.
+		d = s.restartUntil.Sub(now)
+		s.iin = s.iin.Set(app.IINAlreadyExecuting)
 	} else {
-		d = s.appl.WarmRestart()
+		if frag.Header.Func == app.FuncColdRestart {
+			d = s.appl.ColdRestart()
+			s.db.events.Reset()
+		} else {
+			d = s.appl.WarmRestart()
+		}
+		if d > 0 {
+			s.restartUntil = s.appl.Now().Add(d)
+		}
+		s.iin = s.iin.Set(app.IINDeviceRestart)
+		s.synchronized = false
 	}
-	s.iin = s.iin.Set(app.IINDeviceRestart)
-	s.synchronized = false
 
 	ms := d.Milliseconds()
 	if ms > 0xFFFF {
@@ -1069,7 +1201,7 @@ func (s *Session) onAssignClass(w io.Writer, r stack.Received, frag app.Fragment
 // A request with no objects freezes every counter. One naming counters by
 // group 20 header freezes only those: freezing the lot regardless overwrites
 // frozen values the master never asked to change.
-func (s *Session) onFreeze(frag app.Fragment) {
+func (s *Session) onFreeze(frag app.Fragment, clear bool) {
 	// Every counter frozen by one request shares the one moment of the freeze,
 	// taken from the application's clock and only as trustworthy as that
 	// clock: synchronized once the master has set it, unsynchronized until.
@@ -1078,6 +1210,9 @@ func (s *Session) onFreeze(frag app.Fragment) {
 		at = dnp3.Now(at.Time)
 	}
 	freeze := func(start, stop uint16) { s.db.freezeCountersRange(start, stop, at) }
+	if clear {
+		freeze = func(start, stop uint16) { s.db.freezeClearCountersRange(start, stop, at) }
+	}
 
 	if len(frag.Objects) == 0 {
 		freeze(0, 0xFFFF)
@@ -1226,7 +1361,10 @@ func (s *Session) advanceResponse(w io.Writer) error {
 		Fir: i == 0,
 		Fin: last,
 		Con: needConfirm,
-		Seq: s.pendingSeq,
+		// The first fragment answers the request under its sequence number and
+		// each later one increments it, so a confirm names exactly the
+		// fragment it acknowledges.
+		Seq: (s.pendingSeq + uint8(i)) % app.SeqModulus,
 	}
 
 	frag := app.AppendHeader(nil, app.Header{
@@ -1283,7 +1421,7 @@ func (s *Session) finishResponse() error {
 // currentIIN assembles the indications to report, folding in the event state
 // that changes between responses.
 func (s *Session) currentIIN() app.IIN {
-	iin := s.iin
+	iin := s.iin | app.IIN(s.indications.Load())
 
 	classes := s.db.events.Classes()
 	if classes&dnp3.Class1 != 0 {
