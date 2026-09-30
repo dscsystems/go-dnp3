@@ -202,6 +202,10 @@ func simulate(ctx context.Context, sess *outstation.Session, sim *Simulator,
 	// about them nobody can recover by waiting.
 	sim.Apply(sess, time.Now())
 
+	if inject.DeviceTrouble {
+		sess.SetIndication(outstation.IndicationDeviceTrouble, true)
+	}
+
 	tick := time.NewTicker(time.Duration(tickSeconds * float64(time.Second)))
 	defer tick.Stop()
 

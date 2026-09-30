@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dscsystems/go-dnp3"
@@ -62,6 +63,12 @@ type Config struct {
 	// LinkTimeout is how long to wait for a link-layer acknowledgement before
 	// retransmitting. It matters only when UseLinkConfirms is set.
 	LinkTimeout time.Duration
+
+	// Indications are the device-controlled internal indications asserted from
+	// the start, for a device that already knows its configuration is bad or a
+	// point is in local control when it comes up. They can be changed while
+	// running with [Session.SetIndication].
+	Indications Indication
 
 	// Log receives protocol and session events. Nil discards them.
 	Log *slog.Logger
@@ -120,6 +127,46 @@ func (NopApplication) ColdRestart() time.Duration       { return 0 }
 func (NopApplication) WarmRestart() time.Duration       { return 0 }
 func (NopApplication) SupportsWriteTime() bool          { return true }
 
+// Indication is a device-controlled internal indication: one the library
+// cannot know for itself, because it depends on the device rather than on the
+// protocol. Set them with [Session.SetIndication].
+type Indication uint16
+
+// Device-controlled indications.
+const (
+	// IndicationLocalControl reports that one or more points are in local
+	// control and will not accept commands from the master.
+	IndicationLocalControl = Indication(app.IINLocalControl)
+	// IndicationDeviceTrouble reports a device-specific fault. What it means
+	// is the device's to define, and the master's to look up.
+	IndicationDeviceTrouble = Indication(app.IINDeviceTrouble)
+	// IndicationConfigCorrupt reports that the device's configuration is not
+	// valid and its answers cannot be relied on.
+	IndicationConfigCorrupt = Indication(app.IINConfigCorrupt)
+
+	settableIndications = IndicationLocalControl | IndicationDeviceTrouble | IndicationConfigCorrupt
+)
+
+// SetIndication asserts or clears device-controlled indications in every
+// response from now on. It is safe to call from any goroutine.
+//
+// Only [IndicationLocalControl], [IndicationDeviceTrouble] and
+// [IndicationConfigCorrupt] can be set; anything else is ignored, since the
+// rest describe the protocol and are the library's to assert.
+func (s *Session) SetIndication(ind Indication, on bool) {
+	ind &= settableIndications
+	for {
+		old := s.indications.Load()
+		next := old &^ uint32(ind)
+		if on {
+			next = old | uint32(ind)
+		}
+		if s.indications.CompareAndSwap(old, next) {
+			return
+		}
+	}
+}
+
 // Session is an outstation.
 //
 // All protocol state lives in the session goroutine started by [Session.Run].
@@ -172,6 +219,16 @@ type Session struct {
 	// again is what keeps one operator action from operating a point twice.
 	// freezes are the FREEZE_AT_TIME schedules waiting for their moment.
 	freezes []freezeSchedule
+
+	// indications are the bits the application controls: LOCAL_CONTROL,
+	// DEVICE_TROUBLE and CONFIG_CORRUPT. Atomic because they are set from the
+	// application's goroutines and read on the session's.
+	indications atomic.Uint32
+
+	// restartUntil is when the last restart the application announced is
+	// expected to finish, so a second request for it while it is still under
+	// way is answered ALREADY_EXECUTING instead of being carried out twice.
+	restartUntil time.Time
 
 	lastReqValid   bool
 	lastReqSource  uint16
@@ -266,7 +323,7 @@ func New(cfg Config, appl Application, cmds CommandHandler) *Session {
 	}
 
 	events := NewEventBuffer(cfg.Events)
-	return &Session{
+	s := &Session{
 		attributes: buildAttributes(cfg),
 		cfg:        cfg,
 		appl:       appl,
@@ -279,6 +336,8 @@ func New(cfg Config, appl Application, cmds CommandHandler) *Session {
 		iin:     app.IINDeviceRestart,
 		updates: make(chan func(*Database), 64),
 	}
+	s.indications.Store(uint32(cfg.Indications & settableIndications))
+	return s
 }
 
 // Restart makes the outstation report a restart to its master.
@@ -1044,14 +1103,25 @@ func (s *Session) onRecordCurrentTime(w io.Writer, r stack.Received, frag app.Fr
 // be unavailable.
 func (s *Session) onRestart(w io.Writer, r stack.Received, frag app.Fragment) error {
 	var d time.Duration
-	if frag.Header.Func == app.FuncColdRestart {
-		d = s.appl.ColdRestart()
-		s.db.events.Reset()
+	if now := s.appl.Now(); now.Before(s.restartUntil) {
+		// A restart already under way. Doing it again would restart what has
+		// not finished restarting, so the request is understood but not
+		// repeated, and the delay reported is what is left of the first.
+		d = s.restartUntil.Sub(now)
+		s.iin = s.iin.Set(app.IINAlreadyExecuting)
 	} else {
-		d = s.appl.WarmRestart()
+		if frag.Header.Func == app.FuncColdRestart {
+			d = s.appl.ColdRestart()
+			s.db.events.Reset()
+		} else {
+			d = s.appl.WarmRestart()
+		}
+		if d > 0 {
+			s.restartUntil = s.appl.Now().Add(d)
+		}
+		s.iin = s.iin.Set(app.IINDeviceRestart)
+		s.synchronized = false
 	}
-	s.iin = s.iin.Set(app.IINDeviceRestart)
-	s.synchronized = false
 
 	ms := d.Milliseconds()
 	if ms > 0xFFFF {
@@ -1351,7 +1421,7 @@ func (s *Session) finishResponse() error {
 // currentIIN assembles the indications to report, folding in the event state
 // that changes between responses.
 func (s *Session) currentIIN() app.IIN {
-	iin := s.iin
+	iin := s.iin | app.IIN(s.indications.Load())
 
 	classes := s.db.events.Classes()
 	if classes&dnp3.Class1 != 0 {

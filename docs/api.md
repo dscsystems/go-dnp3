@@ -1071,6 +1071,9 @@ answer wins.
 ```go
 func (s *Session) SyncTime(ctx context.Context) error
 func (s *Session) SyncTimeWithDelay(ctx context.Context) error
+func (s *Session) SyncTimeRecorded(ctx context.Context) error
+func (s *Session) FreezeCounters(ctx context.Context, clear bool) error
+func (s *Session) FreezeAtTime(ctx context.Context, at time.Time, interval time.Duration) error
 func (s *Session) WriteTime(ctx context.Context, t time.Time) error
 func (s *Session) WriteDeadband(ctx context.Context, deadbands map[uint16]float32) error
 func (s *Session) EnableUnsolicited(ctx context.Context, mask dnp3.Class) error
@@ -1088,6 +1091,17 @@ round trip less the outstation's reported processing delay, halved). Without the
 correction the outstation's clock lands late by that amount, which over a 1200
 baud link is easily tens of milliseconds and puts every event it stamps into the
 past.
+
+`SyncTimeRecorded` is the LAN recorded-time procedure: RECORD_CURRENT_TIME, then
+a group 50 variation 3 write of the time the master's clock read when it sent
+the first request. The outstation adds how long it has held the request, so the
+transit delay is measured rather than assumed.
+
+`FreezeCounters` freezes every counter now (FREEZE_CLEAR when `clear` is true,
+which also zeroes the running counters). `FreezeAtTime` freezes them at a time
+and again every `interval` when that is non-zero. A refusal comes back as
+`dnp3.ErrRejected`, or `dnp3.ErrNotSupported` for `NO_FUNC_CODE_SUPPORT`; a time
+already past with no interval is refused.
 
 `WriteDeadband` takes at most 255 entries — the limit of the one-octet count —
 and rejects an empty map. A deadband is how a master tells an outstation how much
@@ -1125,6 +1139,13 @@ open and close it.
 the session's polling, so anything expensive belongs behind a queue;
 [`ChannelHandler`](#channelhandler) is that queue. Embed `NopHandler` and
 implement only the methods you care about.
+
+A handler that also implements `CommandEventHandler` — `HandleCommandEvent(info
+HeaderInfo, values []dnp3.Indexed[dnp3.CommandEvent])` — receives the group 13
+and 43 command events an outstation reports when a control was operated. It is
+a separate interface so existing handlers keep compiling. On the outstation
+side, give an output point a `CommandEventClass` (`Database.Configure`) to
+record them; the default is none.
 
 `HandleOctetString` receives groups 110 and 111: the point names, firmware
 versions and serial numbers a device reports as text rather than as
@@ -1225,8 +1246,14 @@ func (s *Session) Update(fn func(*Database))
 func (s *Session) Database() *Database
 func (s *Session) Events() *EventBuffer
 func (s *Session) Restart()
+func (s *Session) SetIndication(ind Indication, on bool)
 func (s *Session) Stats() Stats
 ```
+
+`SetIndication` asserts or clears `IndicationLocalControl`,
+`IndicationDeviceTrouble` and `IndicationConfigCorrupt` in every response, from
+any goroutine. They describe the device, not the protocol, so the library cannot
+know them; `Config.Indications` sets them from the start.
 
 A nil `Application` uses `NopApplication`. **A nil `CommandHandler` uses
 `RejectingCommandHandler`, which refuses every control** — an outstation whose

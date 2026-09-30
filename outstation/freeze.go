@@ -1,6 +1,7 @@
 package outstation
 
 import (
+	"slices"
 	"time"
 
 	"github.com/dscsystems/go-dnp3"
@@ -86,6 +87,15 @@ func (s *Session) onFreezeAtTime(frag app.Fragment) {
 		}
 		missed := now.Sub(first)/interval + 1
 		next = first.Add(missed * interval)
+	}
+
+	// The same freeze asked for twice is one freeze: the request is
+	// understood, and the operation is already waiting to run.
+	for _, f := range s.freezes {
+		if f.next.Equal(next) && f.interval == interval && slices.Equal(f.ranges, ranges) {
+			s.iin = s.iin.Set(app.IINAlreadyExecuting)
+			return
+		}
 	}
 
 	if len(s.freezes) >= maxFreezeSchedules {

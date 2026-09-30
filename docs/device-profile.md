@@ -93,9 +93,12 @@ An unknown function code is answered with `IIN2.NO_FUNC_CODE_SUPPORT`.
 
 ### Internal indications
 
-Ten of the fourteen defined bits are produced and interpreted. `LOCAL_CONTROL`,
-`DEVICE_TROUBLE`, `ALREADY_EXECUTING` and `CONFIG_CORRUPT` are defined but no
-code path sets them; an application that needs one has no way to assert it.
+All fourteen defined bits are produced. `LOCAL_CONTROL`, `DEVICE_TROUBLE` and
+`CONFIG_CORRUPT` depend on the device rather than the protocol, so the
+application asserts them with `Session.SetIndication` (or `Config.Indications`
+from the start); `ALREADY_EXECUTING` is set when a restart is requested while
+the previous one is still under way and when the same `FREEZE_AT_TIME` is
+requested twice.
 Of note:
 
 - `DEVICE_RESTART` is asserted on start and after a restart, and cleared only
