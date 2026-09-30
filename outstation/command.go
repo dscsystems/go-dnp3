@@ -273,6 +273,9 @@ func (s *Session) executeCommands(
 				status = dnp3.CommandNotSupported
 			case status.OK():
 				status = s.runCommand(h.Group, h.Variation, index, raw, selecting, opType)
+				if !selecting {
+					s.recordCommandEvent(h.Group, h.Variation, index, raw, status)
+				}
 			}
 			outcomes = append(outcomes, commandOutcome{index: wide, status: status})
 
@@ -315,6 +318,32 @@ func (s *Session) runCommand(
 		return s.cmds.OperateAnalog(index, v, opType)
 	}
 	return dnp3.CommandNotSupported
+}
+
+// recordCommandEvent records an operated control as a group 13 or 43 event.
+//
+// Only a control that reached the handler is recorded: a SELECT reserves
+// nothing and moves nothing, and one refused before the handler saw it — a
+// missing selection, an index no point has — never happened as far as the
+// device is concerned. What the handler answered is recorded whatever it was,
+// since a refused operate is as much part of the record as an accepted one.
+func (s *Session) recordCommandEvent(group, variation uint8, index uint16, raw []byte, status dnp3.CommandStatus) {
+	now := s.appl.Now()
+	switch group {
+	case 12:
+		if variation != 1 {
+			return
+		}
+		c := objects.ParseCROB(raw)
+		state := c.Code.IsClose()
+		if !c.Code.IsClose() && !c.Code.IsTrip() {
+			state = c.Code.OpType() == dnp3.ControlLatchOn || c.Code.OpType() == dnp3.ControlPulseOn
+		}
+		s.db.RaiseBinaryCommandEvent(index, state, status, now)
+	case 41:
+		v := parseAnalogOutput(variation, raw)
+		s.db.RaiseAnalogCommandEvent(index, v.Value, variation, status, now)
+	}
 }
 
 // parseAnalogOutput decodes any of the four group 41 variations into a

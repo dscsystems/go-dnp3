@@ -26,6 +26,16 @@ type PointConfig struct {
 	// Deadband is how far an analog or counter must move before it generates
 	// an event. It is ignored for binary types, which event on any change.
 	Deadband float64
+
+	// CommandEventClass is the class of the command events (groups 13 and 43)
+	// recorded when a control is operated on this output point. It applies to
+	// binary and analog output status points only, and [dnp3.ClassNone], the
+	// default, records none.
+	CommandEventClass dnp3.Class
+	// CommandEventVariation is the group 13 or 43 variation those events are
+	// reported in. Zero mirrors the command: the variation with a time whose
+	// value has the width of the command's own.
+	CommandEventVariation uint8
 }
 
 // DatabaseConfig sizes the database and sets the defaults every point starts
@@ -427,6 +437,71 @@ func (db *Database) raise(cfg PointConfig, e Event) {
 	}
 	e.Class = cfg.Class
 	db.events.Add(e)
+}
+
+// RaiseBinaryCommandEvent records that a control was operated on a binary
+// output, as a group 13 event, if the point has a command event class.
+//
+// state is the state the output was commanded to and status the outcome the
+// outstation reported for the command.
+func (db *Database) RaiseBinaryCommandEvent(index uint16, state bool, status dnp3.CommandStatus, at time.Time) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if int(index) >= len(db.binaryOut) {
+		return
+	}
+	cfg := db.binaryOut[index].cfg
+	if cfg.CommandEventClass == dnp3.ClassNone || db.events == nil {
+		return
+	}
+	variation := cfg.CommandEventVariation
+	if variation != 1 && variation != 2 {
+		variation = 2
+	}
+	db.events.Add(Event{
+		Type: dnp3.TypeBinaryCommandEvent, Index: index, Class: cfg.CommandEventClass,
+		Variation: variation, Time: dnp3.Now(at),
+		CommandStatus: status, CommandState: state,
+	})
+}
+
+// RaiseAnalogCommandEvent records that a control was operated on an analog
+// output, as a group 43 event, if the point has a command event class.
+//
+// commandVariation is the group 41 variation the command arrived in, which
+// decides the event's width when the point does not name one.
+func (db *Database) RaiseAnalogCommandEvent(index uint16, value float64, commandVariation uint8, status dnp3.CommandStatus, at time.Time) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if int(index) >= len(db.analogOut) {
+		return
+	}
+	cfg := db.analogOut[index].cfg
+	if cfg.CommandEventClass == dnp3.ClassNone || db.events == nil {
+		return
+	}
+	variation := cfg.CommandEventVariation
+	if variation < 1 || variation > 8 {
+		// Mirror the command, with a time: g41v1 (int32) -> g43v3, g41v2
+		// (int16) -> g43v4, g41v3 (float) -> g43v7, g41v4 (double) -> g43v8.
+		switch commandVariation {
+		case 2:
+			variation = 4
+		case 3:
+			variation = 7
+		case 4:
+			variation = 8
+		default:
+			variation = 3
+		}
+	}
+	db.events.Add(Event{
+		Type: dnp3.TypeAnalogCommandEvent, Index: index, Class: cfg.CommandEventClass,
+		Variation: variation, Time: dnp3.Now(at),
+		CommandStatus: status, CommandValue: value,
+	})
 }
 
 // UpdateOctetString sets an octet string point.

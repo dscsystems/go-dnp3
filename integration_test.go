@@ -27,6 +27,7 @@ type collector struct {
 	counter   map[uint32]dnp3.Counter
 	binaryOut map[uint32]dnp3.BinaryOutputStatus
 
+	cmdEvents []dnp3.Indexed[dnp3.CommandEvent]
 	events    int
 	fragments int
 	lastIIN   any
@@ -561,5 +562,51 @@ func TestEventBufferOverflowIsReported(t *testing.T) {
 
 	if !contains(iinString(m.LastIIN()), "EVENT_BUFFER_OVERFLOW") {
 		t.Errorf("the overflow was not reported to the master; IIN = %s", iinString(m.LastIIN()))
+	}
+}
+
+// HandleCommandEvent records command events, making the collector a
+// master.CommandEventHandler.
+func (c *collector) HandleCommandEvent(_ master.HeaderInfo, vs []dnp3.Indexed[dnp3.CommandEvent]) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cmdEvents = append(c.cmdEvents, vs...)
+}
+
+func (c *collector) commandEvents() []dnp3.Indexed[dnp3.CommandEvent] {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]dnp3.Indexed[dnp3.CommandEvent](nil), c.cmdEvents...)
+}
+
+// A control operated on the outstation reaches the master as a command event,
+// whatever the handler answered.
+func TestCommandEventsReachTheMaster(t *testing.T) {
+	m, out, coll := pair(t, outstation.DatabaseConfig{
+		Binary: 1, BinaryOutputStatus: 2, DefaultClass: dnp3.ClassNone,
+	}, master.Config{})
+
+	out.Update(func(db *outstation.Database) {
+		db.Configure(dnp3.TypeBinaryOutputStatus, 1, outstation.PointConfig{
+			Class: dnp3.ClassNone, CommandEventClass: dnp3.Class1})
+	})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	// The default handler refuses everything, and the refusal is recorded too.
+	if _, err := m.DirectOperate(ctx, master.LatchOn(1)); err == nil {
+		t.Fatal("the default handler accepted a control")
+	}
+	if err := m.ScanClasses(ctx, dnp3.Class123); err != nil {
+		t.Fatalf("class poll: %v", err)
+	}
+
+	evs := coll.commandEvents()
+	if len(evs) != 1 {
+		t.Fatalf("master saw %d command events, want 1: %+v", len(evs), evs)
+	}
+	if e := evs[0]; e.Index != 1 || !e.Value.State || e.Value.Status != dnp3.CommandNotSupported {
+		t.Errorf("command event = %+v, want index 1, latched on, NOT_SUPPORTED", e)
 	}
 }

@@ -444,6 +444,10 @@ func eventGroup(pt dnp3.PointType) uint8 {
 		return 42
 	case dnp3.TypeOctetString:
 		return 111
+	case dnp3.TypeBinaryCommandEvent:
+		return 13
+	case dnp3.TypeAnalogCommandEvent:
+		return 43
 	}
 	return 0
 }
@@ -573,6 +577,11 @@ func (s *Session) encodeEvent(dst []byte, gv objects.GroupVar, e Event, ctx obje
 		}
 	case dnp3.TypeOctetString:
 		return appendOctetString(dst, e.OctetString, int(gv.Variation))
+	case dnp3.TypeBinaryCommandEvent, dnp3.TypeAnalogCommandEvent:
+		return objects.AppendCommandEvent(dst, gv.Group, gv.Variation, dnp3.CommandEvent{
+			Status: e.CommandStatus, Analog: e.Type == dnp3.TypeAnalogCommandEvent,
+			State: e.CommandState, Value: e.CommandValue, Time: e.Time,
+		})
 	}
 	return dst
 }

@@ -66,6 +66,14 @@ type Handler interface {
 	HandleOctetString(info HeaderInfo, values []dnp3.Indexed[dnp3.OctetString])
 }
 
+// CommandEventHandler is implemented by a [Handler] that also wants command
+// events: the group 13 and 43 objects an outstation reports when a control was
+// operated. It is a separate interface so that adding it did not break
+// existing handlers; a handler that does not implement it never sees them.
+type CommandEventHandler interface {
+	HandleCommandEvent(info HeaderInfo, values []dnp3.Indexed[dnp3.CommandEvent])
+}
+
 // NopHandler discards everything. Embed it to implement only the methods you
 // care about.
 type NopHandler struct{}
@@ -102,6 +110,8 @@ type Update struct {
 	BinaryOutput  dnp3.BinaryOutputStatus
 	AnalogOutput  dnp3.AnalogOutputStatus
 	OctetString   dnp3.OctetString
+	// CommandEvent is set for the two command event types.
+	CommandEvent dnp3.CommandEvent
 }
 
 // ChannelHandler fans measurements into a Go channel.
@@ -190,5 +200,16 @@ func (h *ChannelHandler) HandleAnalogOutputStatus(info HeaderInfo, values []dnp3
 func (h *ChannelHandler) HandleOctetString(info HeaderInfo, values []dnp3.Indexed[dnp3.OctetString]) {
 	for _, v := range values {
 		h.send(Update{Info: info, Type: dnp3.TypeOctetString, Index: v.Index, OctetString: v.Value})
+	}
+}
+
+// HandleCommandEvent implements [CommandEventHandler].
+func (h *ChannelHandler) HandleCommandEvent(info HeaderInfo, values []dnp3.Indexed[dnp3.CommandEvent]) {
+	for _, v := range values {
+		t := dnp3.TypeBinaryCommandEvent
+		if v.Value.Analog {
+			t = dnp3.TypeAnalogCommandEvent
+		}
+		h.send(Update{Info: info, Type: t, Index: v.Index, CommandEvent: v.Value})
 	}
 }
