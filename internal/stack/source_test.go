@@ -64,3 +64,27 @@ func TestReceiveIgnoresRepliesFromUnexpectedSource(t *testing.T) {
 			"the in-flight send; the source address of a link-layer reply is not validated")
 	}
 }
+
+// A frame whose DIR bit matches our own role did not come from the other end
+// of the link, so it is not acted on: an outstation ignores a primary frame
+// that claims to be from an outstation.
+func TestFrameFromTheSameRoleIsIgnored(t *testing.T) {
+	st := outstationStack()
+
+	raw, err := link.Encode(nil, link.Header{
+		Control: link.Control{Dir: false, Prm: true, Func: link.FuncResetLinkStates},
+		Dest:    10, Src: 1,
+		Length: link.MinLength,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := st.Receive(&out, raw, func(Received) {}); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Error("a frame with the wrong direction bit was answered")
+	}
+}

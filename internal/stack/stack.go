@@ -282,6 +282,15 @@ func (s *Stack) drain(w io.Writer, fn func(Received)) error {
 			continue
 		}
 
+		// DIR is 1 on everything a master transmits and 0 on everything an
+		// outstation transmits, so a frame whose direction matches our own
+		// role did not come from the other end of this link. Acting on it
+		// would let a master process another master's primary frame, or an
+		// outstation an outstation's.
+		if f.Header.Control.Dir == s.cfg.IsMaster {
+			continue
+		}
+
 		// The destination says the frame is ours to look at; the source says
 		// whether it can have come from anywhere at all. An address no
 		// station may hold cannot be a sender, and a reply goes back to

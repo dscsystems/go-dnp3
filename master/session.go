@@ -580,6 +580,23 @@ func (s *Session) onFragment(w io.Writer, r stack.Received) {
 		return
 	}
 
+	// Only two response codes mean anything to this master, and the UNS bit
+	// has to agree with which one it is. AUTH_RESPONSE belongs to secure
+	// authentication, which is not implemented; a solicited response claiming
+	// to be unsolicited, or the reverse, would otherwise complete an in-flight
+	// task or deliver data through the wrong path. None of it is allowed to
+	// touch session state, indications included.
+	uns := frag.Header.Control.Uns
+	switch {
+	case frag.Header.Func == app.FuncResponse && !uns:
+	case frag.Header.Func == app.FuncUnsolicitedResponse && uns:
+	default:
+		s.bump(func(st *Stats) { st.FragmentsDiscarded++ })
+		s.log.Debug("discarding an invalid response",
+			"func", frag.Header.Func, "uns", uns, "seq", frag.Header.Control.Seq)
+		return
+	}
+
 	s.observeIIN(frag.Header.IIN)
 
 	if frag.Header.Func == app.FuncUnsolicitedResponse {
@@ -623,33 +640,51 @@ func (s *Session) onSolicited(w io.Writer, frag app.Fragment) {
 		s.log.Debug("response with nothing in flight", "seq", frag.Header.Control.Seq)
 		return
 	}
-	if frag.Header.Control.Seq != t.seq {
+	seq := frag.Header.Control.Seq
+
+	// The first fragment of a response carries the request's sequence number
+	// and each later one increments it, so a continuation is recognised by
+	// position in the series rather than by matching the request alone. A
+	// fragment carrying the number of the one before it is the outstation
+	// repeating that fragment because it never saw the confirm.
+	var stale, repeat bool
+	switch {
+	case !t.started:
+		// Nothing has been accepted yet: only a FIR fragment answering this
+		// request can begin the series. One without FIR continues a series
+		// that never began, and delivering it would report part of a response
+		// as the whole of one.
+		stale = seq != t.seq
+		repeat = !frag.Header.Control.Fir
+	case frag.Header.Control.Fir:
+		// A FIR arriving once the series has started is the first fragment
+		// repeated; delivering it would report the same measurements twice.
+		stale = seq != t.seq
+		repeat = true
+	default:
+		next := (t.respSeq + 1) % app.SeqModulus
+		stale = seq != next && seq != t.respSeq
+		repeat = seq == t.respSeq
+	}
+
+	if stale {
 		// A response for a request we have already given up on. Acting on it
 		// would attribute stale data to the current poll.
 		s.log.Debug("response sequence mismatch",
-			"got", frag.Header.Control.Seq, "want", t.seq)
+			"got", seq, "want", t.seq, "started", t.started)
 		return
 	}
 
-	// A fragment is only delivered if it belongs where the series actually
-	// is: the first one must carry FIR and every later one must not. A FIR
-	// fragment arriving once the series has started is the outstation
-	// repeating a fragment whose confirm it never saw, and a fragment without
-	// FIR arriving before any has started continues a series that never
-	// began. Delivering the first would report the same measurements twice;
-	// delivering the second would report part of a response as the whole of
-	// one.
-	if frag.Header.Control.Fir == t.started {
+	if repeat {
 		s.bump(func(st *Stats) { st.FragmentsDiscarded++ })
 		s.log.Debug("discarding a response fragment that does not continue the series",
-			"fir", frag.Header.Control.Fir, "started", t.started,
-			"seq", frag.Header.Control.Seq)
+			"fir", frag.Header.Control.Fir, "started", t.started, "seq", seq)
 
 		// The confirm still goes out. A repeat is sent precisely because the
 		// outstation did not see the confirm the first time, and withholding
 		// it now would only have the outstation repeat itself again.
 		if frag.Header.Control.Con {
-			s.sendConfirm(w, frag.Header.Control.Seq, false)
+			s.sendConfirm(w, seq, false)
 		}
 		// The task is deliberately not completed, whatever this fragment's
 		// FIN says: nothing valid has been received for it, so letting it
@@ -659,6 +694,7 @@ func (s *Session) onSolicited(w io.Writer, frag app.Fragment) {
 		return
 	}
 	t.started = true
+	t.respSeq = seq
 
 	s.deliver(frag, false)
 	if t.onFragment != nil {

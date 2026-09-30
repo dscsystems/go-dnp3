@@ -65,6 +65,9 @@ type task struct {
 	// fragment of a solicited response carries the request's own sequence
 	// number, so the sequence number alone cannot distinguish them.
 	started bool
+	// respSeq is the sequence number of the last fragment accepted, from
+	// which the next in the series is expected to follow.
+	respSeq uint8
 
 	// done receives the outcome, for callers waiting on a one-shot task.
 	done chan error

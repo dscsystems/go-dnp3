@@ -154,12 +154,10 @@ type Session struct {
 
 	// pendingBodies are the fragments still to send for a response that spans
 	// more than one, and pendingIndex is the next to go out. Only one is ever
-	// truly in flight at a time, on purpose: every fragment in the response
-	// shares the request's own sequence number, the only field a confirm is
-	// matched against, so a confirm for the first fragment cannot be told
-	// apart from one for a later one unless the outstation never has more
-	// than one outstanding. pendingDest and pendingSeq are constant across the
-	// response; pendingHasEvents says whether it carries events at all, which
+	// truly in flight at a time, on purpose: the master paces the series with
+	// its confirms. pendingDest and pendingSeq, the request's sequence number
+	// and the first fragment's, are constant across the response; each later
+	// fragment adds its index to it. pendingHasEvents says whether it carries events at all, which
 	// decides whether the last fragment needs a confirmation of its own.
 	pendingBodies    [][]byte
 	pendingIndex     int
@@ -1226,7 +1224,10 @@ func (s *Session) advanceResponse(w io.Writer) error {
 		Fir: i == 0,
 		Fin: last,
 		Con: needConfirm,
-		Seq: s.pendingSeq,
+		// The first fragment answers the request under its sequence number and
+		// each later one increments it, so a confirm names exactly the
+		// fragment it acknowledges.
+		Seq: (s.pendingSeq + uint8(i)) % app.SeqModulus,
 	}
 
 	frag := app.AppendHeader(nil, app.Header{

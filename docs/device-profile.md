@@ -161,7 +161,8 @@ misparsing the rest of the fragment, but no codec turns them into values.
 | Unsolicited reporting | Yes, with a null response first, hold time and retries |
 | Select-before-operate | Yes, with a configurable timeout |
 | Select matching | Raw object octets must match exactly |
-| Multi-fragment responses | Yes |
+| Multi-fragment responses | Yes; the first fragment carries the request's sequence number and each later one increments it |
+| Multi-fragment requests | No, see the known gaps |
 | Broadcast requests | Executed, not answered; `IIN1.BROADCAST` on the next response |
 | Clock | Set by a master; the outstation reports `NEED_TIME` until then |
 | Clock procedures accepted | Direct write (g50v1) and the recorded-time procedure (RECORD_CURRENT_TIME then a g50v3 write) |
@@ -220,6 +221,14 @@ container built from source (`make interop-build && make interop`):
 ## Known gaps
 
 Listed rather than left to be discovered:
+
+- **Multi-fragment requests** are not reassembled. A request must arrive as one
+  fragment with both FIR and FIN set; anything else is discarded, and the
+  next response carries `PARAMETER_ERROR`. This bounds the size of a control,
+  write or file-block request to `MaxRxFragment` (default 2048 octets), and a
+  master that splits a larger request across fragments cannot be served.
+  Refusing is deliberate: acting on half a control request is worse than not
+  acting on it.
 
 - **Self-address** (0xFFFC) is not implemented, so a master cannot address an
   outstation whose configured address it does not know.
