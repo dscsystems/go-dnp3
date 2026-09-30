@@ -1901,9 +1901,11 @@ type Context struct {
     Synchronized bool      // the outstation's clock was synchronised
     CTO          time.Time // common time of occurrence from the most recent g51 object
     HasCTO       bool
+    CTOSynchronized bool // the clock that took the CTO was synchronised (g51v1, not g51v2)
 }
 
 func (c Context) WithCTO(t time.Time) Context
+func (c Context) WithGroup51(t time.Time, variation uint8) Context
 func (c Context) RelativeTime(offsetMillis uint16) dnp3.Timestamp
 func (c Context) RelativeOffset(t dnp3.Timestamp) uint16
 func (c Context) TimeQuality() dnp3.TimestampQuality

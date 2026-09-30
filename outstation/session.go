@@ -870,9 +870,39 @@ func (s *Session) onRead(w io.Writer, r stack.Received, frag app.Fragment) error
 					s.buildStaticRange(b, pt, 0, 0, 0xFFFF)
 				}
 			case 2, 3, 4: // event classes 1, 2 and 3
+				// A class read names how many events it wants when its range
+				// is a count; without one it wants every event in the class.
+				limit, ok := eventReadLimit(h)
+				if !ok {
+					s.iin = s.iin.Set(app.IINParameterError)
+					continue
+				}
 				mask := dnp3.Class1 << (h.Variation - 2)
-				selected = append(selected, s.db.events.Select(mask, 512)...)
+				selected = append(selected, s.db.events.Select(mask, limit)...)
 			}
+
+		case isEventGroup(h.Group):
+			// A read of an event group asks for the buffered events of that
+			// kind, in the variation named — not the static values of the
+			// group's namesake, which is what falling into the static path
+			// below would have answered.
+			pt, _ := eventTypeForGroup(h.Group)
+			if h.Variation != 0 && !eventVariationKnown(pt, h.Variation) {
+				s.iin = s.iin.Set(app.IINObjectUnknown)
+				continue
+			}
+			limit, ok := eventReadLimit(h)
+			if !ok {
+				s.iin = s.iin.Set(app.IINParameterError)
+				continue
+			}
+			evs := s.db.events.SelectType(pt, limit)
+			if h.Variation != 0 && pt != dnp3.TypeOctetString {
+				for k := range evs {
+					evs[k].Variation = h.Variation
+				}
+			}
+			selected = append(selected, evs...)
 
 		case h.Group == 50 && h.Variation == 3:
 			// The second half of the LAN time-sync procedure: hand back the
@@ -1467,4 +1497,39 @@ func pointTypeForGroup(group uint8) (dnp3.PointType, bool) {
 		return dnp3.TypeAnalogOutputStatus, true
 	}
 	return dnp3.TypeUnknown, false
+}
+
+// isEventGroup reports whether a group is one of the event groups.
+func isEventGroup(group uint8) bool {
+	_, ok := eventTypeForGroup(group)
+	return ok
+}
+
+// eventVariationKnown reports whether a variation of an event group exists.
+// An octet string event's variation is its length, so it has no table row and
+// only the "any" variation is a request that means anything.
+func eventVariationKnown(pt dnp3.PointType, variation uint8) bool {
+	if pt == dnp3.TypeOctetString {
+		return false
+	}
+	_, ok := objects.Lookup(objects.GV(eventGroup(pt), variation))
+	return ok
+}
+
+// eventReadLimit says how many events an event read asks for: the count when
+// the range is one, every event when it is "all objects". Any other range —
+// a start-stop, or an index prefix — means nothing for events, which have no
+// stable index to range over, and is not a limit at all.
+func eventReadLimit(h app.ObjectHeader) (int, bool) {
+	if h.Qualifier.IndexPrefix() != app.PrefixNone {
+		return 0, false
+	}
+	switch {
+	case h.Range.Spec == app.RangeAllObjects:
+		return math.MaxInt32, true
+	case h.Range.Spec == app.RangeCount8 || h.Range.Spec == app.RangeCount16 ||
+		h.Range.Spec == app.RangeCount32:
+		return int(h.Range.Count), true
+	}
+	return 0, false
 }

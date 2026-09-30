@@ -658,3 +658,53 @@ func TestMasterTimeSyncAndFreezeProcedures(t *testing.T) {
 		t.Error("a freeze in the past with no interval was accepted")
 	}
 }
+
+// Relative-time events reach the master with the time they were stamped and the
+// quality of the clock that stamped them: unsynchronized until the master sets
+// the outstation's clock, synchronized after.
+func TestRelativeTimeEventsReachTheMasterWithTheirQuality(t *testing.T) {
+	m, out, coll := pair(t, outstation.DatabaseConfig{Binary: 2, DefaultClass: dnp3.Class1}, master.Config{})
+	out.Update(func(db *outstation.Database) {
+		for i := range 2 {
+			db.Configure(dnp3.TypeBinary, uint16(i), outstation.PointConfig{
+				Class: dnp3.Class1, EventVariation: 3}) // relative time
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	// Baseline: drain whatever the startup produced.
+	if err := m.ScanClasses(ctx, dnp3.Class123); err != nil {
+		t.Fatalf("baseline poll: %v", err)
+	}
+
+	stamp := time.Now().Add(-time.Minute).Truncate(time.Millisecond)
+	report := func(index uint16, at time.Time) dnp3.Binary {
+		out.Update(func(db *outstation.Database) {
+			db.UpdateBinary(index, dnp3.Binary{Value: true, Flags: dnp3.Online, Time: dnp3.Now(at)})
+		})
+		waitFor(t, 2*time.Second, func() bool { return out.Events().Count(dnp3.Class1) > 0 })
+		if err := m.ScanClasses(ctx, dnp3.Class123); err != nil {
+			t.Fatalf("poll: %v", err)
+		}
+		b, _, _ := coll.snapshot()
+		return b[uint32(index)]
+	}
+
+	got := report(0, stamp)
+	if d := got.Time.Time.Sub(stamp).Abs(); d > time.Millisecond {
+		t.Errorf("event time = %v, want %v", got.Time.Time, stamp)
+	}
+	if got.Time.Quality != dnp3.TimestampUnsynchronized {
+		t.Errorf("quality = %v before the clock was set, want unsynchronized", got.Time.Quality)
+	}
+
+	if err := m.SyncTime(ctx); err != nil {
+		t.Fatalf("sync time: %v", err)
+	}
+	got = report(1, stamp.Add(time.Second))
+	if got.Time.Quality != dnp3.TimestampSynchronized {
+		t.Errorf("quality = %v after the clock was set, want synchronized", got.Time.Quality)
+	}
+}
