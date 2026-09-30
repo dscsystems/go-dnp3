@@ -26,7 +26,7 @@ linters:
     staticcheck:
       checks:
         - all
-    misspell:
+    misspell: {}
       # No locale. The prose here is British and the protocol vocabulary is
       # not: IEEE 1815 spells it "Time Synchronized" and lipgloss spells it
       # "Color", so neither locale can be enforced without demanding a rename

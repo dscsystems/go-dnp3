@@ -55,6 +55,7 @@ fmt-check:
 lint: ## golangci-lint, if installed
 	@command -v golangci-lint >/dev/null 2>&1 \
 		|| { echo "golangci-lint not installed; skipping"; exit 0; }
+	golangci-lint config verify
 	golangci-lint run
 
 # Parsers face bytes from devices we do not control over links that corrupt
