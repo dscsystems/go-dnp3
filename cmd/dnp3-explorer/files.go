@@ -439,12 +439,16 @@ func (m *Model) saveFile(remote, local string) tea.Cmd {
 		if err != nil {
 			return commandResultMsg{text: "save " + remote + ": " + err.Error()}
 		}
-		defer f.Close()
 
 		ctx, cancel := context.WithTimeout(conn.ctx, transferTimeout)
 		defer cancel()
 
 		n, err := sess.ReadFile(ctx, remote, f)
+		// A file that failed to close may not have been written out whole, so
+		// a close error is a failed save even when every block arrived.
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
 		if err != nil {
 			// The partial file is left where it is and named, because deleting
 			// what did arrive would throw away the evidence of how far the
