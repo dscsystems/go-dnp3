@@ -145,11 +145,11 @@ func (f FuncCode) NoReply() bool {
 // The same holds for the freeze, unsolicited-enable and assign-class requests,
 // whose headers name points rather than carrying them.
 //
-// Known limitation: FREEZE_AT_TIME is genuinely mixed — its leading group 50
-// variation 2 object carries a time and interval, while the counter headers
-// after it are specifications. It is treated as carrying data here, which is
-// right for the first header and wrong for the rest. Resolving that needs
-// per-object semantics rather than a per-fragment rule.
+// FREEZE_AT_TIME is genuinely mixed: its leading group 50 variation 2 object
+// carries a time and interval, while the counter headers after it are
+// specifications. It is therefore decided per object rather than per fragment —
+// see [ParseFragment] — and this reports true for it, which is right for the
+// group 50 object.
 func (f FuncCode) CarriesObjectData() bool {
 	switch f {
 	case FuncRead,

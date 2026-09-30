@@ -610,3 +610,51 @@ func TestCommandEventsReachTheMaster(t *testing.T) {
 		t.Errorf("command event = %+v, want index 1, latched on, NOT_SUPPORTED", e)
 	}
 }
+
+// The master's LAN clock procedure, FREEZE_CLEAR and FREEZE_AT_TIME work end
+// to end against this outstation.
+func TestMasterTimeSyncAndFreezeProcedures(t *testing.T) {
+	m, out, _ := pair(t, outstation.DatabaseConfig{
+		Counter: 2, FrozenCounter: 2, DefaultClass: dnp3.ClassNone,
+	}, master.Config{})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	if err := m.SyncTimeRecorded(ctx); err != nil {
+		t.Fatalf("recorded-time sync: %v", err)
+	}
+
+	out.Update(func(db *outstation.Database) {
+		db.UpdateCounter(0, dnp3.Counter{Value: 7, Flags: dnp3.Online})
+	})
+	waitFor(t, 2*time.Second, func() bool {
+		c, _, _ := out.Database().Counter(0)
+		return c.Value == 7
+	})
+
+	if err := m.FreezeCounters(ctx, true); err != nil {
+		t.Fatalf("freeze-clear: %v", err)
+	}
+	if f, _, _ := out.Database().FrozenCounter(0); f.Value != 7 {
+		t.Errorf("frozen counter = %d, want 7", f.Value)
+	}
+	if c, _, _ := out.Database().Counter(0); c.Value != 0 {
+		t.Errorf("counter = %d after freeze-clear, want 0", c.Value)
+	}
+
+	out.Update(func(db *outstation.Database) {
+		db.UpdateCounter(1, dnp3.Counter{Value: 9, Flags: dnp3.Online})
+	})
+	if err := m.FreezeAtTime(ctx, time.Now().Add(150*time.Millisecond), 0); err != nil {
+		t.Fatalf("freeze at time: %v", err)
+	}
+	waitFor(t, 2*time.Second, func() bool {
+		f, _, _ := out.Database().FrozenCounter(1)
+		return f.Value == 9
+	})
+
+	if err := m.FreezeAtTime(ctx, time.Now().Add(-time.Hour), 0); err == nil {
+		t.Error("a freeze in the past with no interval was accepted")
+	}
+}

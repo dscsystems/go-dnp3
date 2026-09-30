@@ -96,7 +96,7 @@ func TestUnparseableObjectSectionGetsAResponse(t *testing.T) {
 			Range:     app.Range{Spec: app.RangeCount8, Count: 1},
 			Data:      []byte{1, 2},
 		}, app.IINObjectUnknown},
-		{"freeze at time, which is not implemented", app.FuncFreezeAtTime, app.ObjectHeader{
+		{"initialize data, which is not implemented", app.FuncInitializeData, app.ObjectHeader{
 			Group: 99, Variation: 7,
 			Qualifier: app.MakeQualifier(app.PrefixNone, app.RangeCount8),
 			Range:     app.Range{Spec: app.RangeCount8, Count: 1},

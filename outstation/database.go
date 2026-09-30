@@ -299,6 +299,11 @@ func (db *Database) UpdateCounter(index uint16, v dnp3.Counter) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
+	db.setCounter(index, v)
+}
+
+// setCounter stores a counter value and raises an event if it moved enough.
+func (db *Database) setCounter(index uint16, v dnp3.Counter) {
 	i := int(index)
 	if i >= len(db.counter) {
 		return
@@ -622,6 +627,17 @@ func (db *Database) FreezeCounters() {
 // value in place, as this once did, left event-driven masters to discover it
 // only by reading the frozen counters outright.
 func (db *Database) freezeCountersRange(start, stop uint16, at dnp3.Timestamp) {
+	db.freezeRange(start, stop, at, false)
+}
+
+// freezeClearCountersRange is freezeCountersRange for FREEZE_CLEAR: each
+// counter is reset to zero once its value has been frozen, so the frozen value
+// holds what accumulated up to the freeze and the running counter starts over.
+func (db *Database) freezeClearCountersRange(start, stop uint16, at dnp3.Timestamp) {
+	db.freezeRange(start, stop, at, true)
+}
+
+func (db *Database) freezeRange(start, stop uint16, at dnp3.Timestamp, clear bool) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -629,6 +645,9 @@ func (db *Database) freezeCountersRange(start, stop uint16, at dnp3.Timestamp) {
 	for i := int(start); i <= int(stop) && i < n; i++ {
 		c := db.counter[i].value
 		db.setFrozen(i, dnp3.FrozenCounter{Value: c.Value, Flags: c.Flags, Time: at})
+		if clear {
+			db.setCounter(uint16(i), dnp3.Counter{Value: 0, Flags: c.Flags, Time: at})
+		}
 	}
 }
 

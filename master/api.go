@@ -3,6 +3,7 @@ package master
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/dscsystems/go-dnp3"
@@ -144,6 +145,76 @@ func (s *Session) SyncTimeWithDelay(ctx context.Context) error {
 
 	sentAt = time.Now()
 	return s.run(ctx, measure)
+}
+
+// SyncTimeRecorded sets the outstation's clock using the LAN procedure.
+//
+// The master sends RECORD_CURRENT_TIME, noting its own clock as the request
+// goes out, then writes that time as group 50 variation 3. The outstation
+// notes when the first request arrived and adds however long it has held it,
+// so the transit delay is measured rather than assumed — without the master
+// having to know what it was. The two requests are chained so nothing is
+// scheduled between them.
+func (s *Session) SyncTimeRecorded(ctx context.Context) error {
+	var recorded time.Time
+	record := &task{
+		name:     "record-current-time",
+		funcCode: app.FuncRecordCurrentTime,
+		priority: priorityStartup,
+		build: func(*app.Builder) error {
+			recorded = time.Now()
+			return nil
+		},
+	}
+	var rejected error
+	record.next = func() *task {
+		write := newWriteRecordedTimeTask(recorded)
+		write.onDone = func(iin app.IIN) { rejected = rejection("recorded time write", iin) }
+		return write
+	}
+	if err := s.run(ctx, record); err != nil {
+		return err
+	}
+	return rejected
+}
+
+// rejection turns the request-error indications on a response into an error,
+// or returns nil if it carries none.
+func rejection(what string, iin app.IIN) error {
+	switch {
+	case iin.Has(app.IINNoFuncCodeSupport):
+		return fmt.Errorf("master: %s: %w", what, dnp3.ErrNotSupported)
+	case iin.Has(app.IINParameterError), iin.Has(app.IINObjectUnknown):
+		return fmt.Errorf("master: %s: %w (IIN %v)", what, dnp3.ErrRejected, iin)
+	}
+	return nil
+}
+
+// runChecked runs a task and reports an outstation's refusal as an error.
+func (s *Session) runChecked(ctx context.Context, what string, t *task) error {
+	var rejected error
+	t.onDone = func(iin app.IIN) { rejected = rejection(what, iin) }
+	if err := s.run(ctx, t); err != nil {
+		return err
+	}
+	return rejected
+}
+
+// FreezeCounters asks the outstation to freeze every counter now, and to clear
+// the running counters afterwards when clear is true. Read the frozen counters
+// (group 21) to collect the result.
+func (s *Session) FreezeCounters(ctx context.Context, clear bool) error {
+	return s.runChecked(ctx, "freeze", newFreezeTask(clear))
+}
+
+// FreezeAtTime asks the outstation to freeze every counter at a time, and
+// again every interval when that is non-zero. A time already past with no
+// interval is refused by the outstation with PARAMETER_ERROR.
+func (s *Session) FreezeAtTime(ctx context.Context, at time.Time, interval time.Duration) error {
+	if interval < 0 || interval/time.Millisecond > math.MaxUint32 {
+		return fmt.Errorf("master: %w: freeze interval %v", dnp3.ErrBadConfig, interval)
+	}
+	return s.runChecked(ctx, "freeze at time", newFreezeAtTimeTask(at, interval))
 }
 
 // WriteDeadband sets the analog deadbands of one or more points.

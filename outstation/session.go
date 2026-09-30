@@ -170,6 +170,9 @@ type Session struct {
 	// response, reusing the sequence number precisely so the outstation can
 	// recognise the repeat; answering it from here rather than running it
 	// again is what keeps one operator action from operating a point twice.
+	// freezes are the FREEZE_AT_TIME schedules waiting for their moment.
+	freezes []freezeSchedule
+
 	lastReqValid   bool
 	lastReqSource  uint16
 	lastReqSeq     uint8
@@ -244,6 +247,8 @@ type Stats struct {
 	FileErrors         uint64
 	FileTimeouts       uint64
 	FilesAborted       uint64
+	// ScheduledFreezes counts FREEZE_AT_TIME freezes that have been performed.
+	ScheduledFreezes uint64
 }
 
 // New returns an outstation session.
@@ -453,6 +458,7 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 			s.checkConfirmTimeout()
 			s.checkSelectTimeout(now)
 			s.checkFileTimeout(now)
+			s.runFreezes(now)
 			if err := s.pollUnsolicited(conn, now); err != nil {
 				s.log.Warn("unsolicited transmission failed", "err", err)
 				return
@@ -636,8 +642,17 @@ func (s *Session) handle(w io.Writer, r stack.Received) error {
 		app.FuncDirectOperate, app.FuncDirectOperateNR:
 		return s.onCommand(w, r, frag)
 
-	case app.FuncImmedFreeze, app.FuncImmedFreezeNR:
-		s.onFreeze(frag)
+	case app.FuncImmedFreeze, app.FuncImmedFreezeNR,
+		app.FuncFreezeClear, app.FuncFreezeClearNR:
+		clear := frag.Header.Func == app.FuncFreezeClear || frag.Header.Func == app.FuncFreezeClearNR
+		s.onFreeze(frag, clear)
+		if frag.Header.Func.NoReply() || r.Broadcast {
+			return nil
+		}
+		return s.respond(w, r, frag.Header, nil)
+
+	case app.FuncFreezeAtTime, app.FuncFreezeAtTimeNR:
+		s.onFreezeAtTime(frag)
 		if frag.Header.Func.NoReply() || r.Broadcast {
 			return nil
 		}
@@ -712,7 +727,9 @@ func handlesFunc(f app.FuncCode) bool {
 		app.FuncEnableUnsolicited, app.FuncDisableUnsolicited,
 		app.FuncAssignClass, app.FuncSelect, app.FuncOperate,
 		app.FuncDirectOperate, app.FuncDirectOperateNR,
-		app.FuncImmedFreeze, app.FuncImmedFreezeNR:
+		app.FuncImmedFreeze, app.FuncImmedFreezeNR,
+		app.FuncFreezeClear, app.FuncFreezeClearNR,
+		app.FuncFreezeAtTime, app.FuncFreezeAtTimeNR:
 		return true
 	}
 	return false
@@ -1085,7 +1102,7 @@ func (s *Session) onAssignClass(w io.Writer, r stack.Received, frag app.Fragment
 // A request with no objects freezes every counter. One naming counters by
 // group 20 header freezes only those: freezing the lot regardless overwrites
 // frozen values the master never asked to change.
-func (s *Session) onFreeze(frag app.Fragment) {
+func (s *Session) onFreeze(frag app.Fragment, clear bool) {
 	// Every counter frozen by one request shares the one moment of the freeze,
 	// taken from the application's clock and only as trustworthy as that
 	// clock: synchronized once the master has set it, unsynchronized until.
@@ -1094,6 +1111,9 @@ func (s *Session) onFreeze(frag app.Fragment) {
 		at = dnp3.Now(at.Time)
 	}
 	freeze := func(start, stop uint16) { s.db.freezeCountersRange(start, stop, at) }
+	if clear {
+		freeze = func(start, stop uint16) { s.db.freezeClearCountersRange(start, stop, at) }
+	}
 
 	if len(frag.Objects) == 0 {
 		freeze(0, 0xFFFF)
