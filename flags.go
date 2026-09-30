@@ -95,9 +95,17 @@ const (
 	// value.
 	TypeBinaryCommandEvent
 	TypeAnalogCommandEvent
+	TypeFrozenAnalog
+	TypeVirtualTerminal
+	TypeSecurityStatistic
+	TypeDataset
 )
 
 var pointTypeNames = map[PointType]string{
+	TypeSecurityStatistic:  "SecurityStatistic",
+	TypeDataset:            "Dataset",
+	TypeFrozenAnalog:       "FrozenAnalog",
+	TypeVirtualTerminal:    "VirtualTerminal",
 	TypeUnknown:            "Unknown",
 	TypeBinary:             "Binary",
 	TypeDoubleBitBinary:    "DoubleBitBinary",
@@ -155,7 +163,7 @@ func upperBitNames(t PointType) []namedBit {
 		return []namedBit{{ChatterFilter, "CHATTER_FILTER"}, {0x40, "BIT6"}, {StateBit, "STATE"}}
 	case TypeCounter, TypeFrozenCounter:
 		return []namedBit{{Rollover, "ROLLOVER"}, {Discontinuity, "DISCONTINUITY"}, {0x80, "BIT7"}}
-	case TypeAnalog, TypeAnalogOutputStatus:
+	case TypeAnalog, TypeFrozenAnalog, TypeAnalogOutputStatus:
 		return []namedBit{{OverRange, "OVER_RANGE"}, {ReferenceErr, "REFERENCE_ERR"}, {0x80, "BIT7"}}
 	default:
 		return []namedBit{{0x20, "BIT5"}, {0x40, "BIT6"}, {0x80, "BIT7"}}

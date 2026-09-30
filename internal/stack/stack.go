@@ -30,6 +30,8 @@ type Config struct {
 	RemoteAddr uint16
 	// IsMaster sets the direction bit and selects which side answers what.
 	IsMaster bool
+	// SelfAddress accepts the discovery destination for outstations only.
+	SelfAddress bool
 	// UseConfirms enables link-layer confirmation. Over TCP this is normally
 	// off, since the transport already guarantees ordered delivery; over
 	// serial it is normally on.
@@ -385,7 +387,7 @@ func (s *Stack) deliver(f link.Frame, payload []byte, fn func(Received)) {
 
 // addressedToUs reports whether a frame is ours to process.
 func (s *Stack) addressedToUs(dest uint16) bool {
-	return dest == s.cfg.LocalAddr || link.IsBroadcast(dest)
+	return dest == s.cfg.LocalAddr || link.IsBroadcast(dest) || (s.cfg.SelfAddress && !s.cfg.IsMaster && dest == link.SelfAddress)
 }
 
 // write encodes a frame into buf and sends it.

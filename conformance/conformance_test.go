@@ -280,7 +280,7 @@ func TestUnknownFunctionCode(t *testing.T) {
 func TestUnknownObjectGroup(t *testing.T) {
 	h := newHarness(t, outstation.Config{Database: smallDB()}, nil)
 
-	resp := h.request(app.FuncRead, app.ReadRange(88, 1, 0, 1))
+	resp := h.request(app.FuncRead, app.ReadRange(84, 1, 0, 1))
 	if !resp.Header.IIN.Has(app.IINObjectUnknown) {
 		t.Errorf("IIN = %v, want OBJECT_UNKNOWN", resp.Header.IIN)
 	}

@@ -25,6 +25,7 @@ const (
 // queued once produces a fresh request with a current sequence number every
 // time it runs.
 type task struct {
+	failure  error
 	name     string
 	funcCode app.FuncCode
 	priority int

@@ -51,6 +51,9 @@ type Config struct {
 	// device that answers honestly can send; set it lower for one that
 	// accepts a block size it cannot actually fill.
 	FileBlockSize uint16
+	// FileCredentials enables authentication before each open/delete chain.
+	FileCredentials      *FileCredentials
+	SecureAuthentication *SecureAuthenticationConfig
 
 	// UseLinkConfirms enables link-layer confirmation, normally off over TCP.
 	UseLinkConfirms bool
@@ -155,6 +158,7 @@ type Session struct {
 	// set until the sequence's own first step clears it: without the guard,
 	// every response arriving mid-sequence starts another one.
 	startupActive bool
+	security      masterSecurity
 }
 
 // New returns a master session. Pass a nil Handler for [NopHandler].
@@ -229,6 +233,9 @@ func (s *Session) Run(ctx context.Context, ch channel.Channel) error {
 		s.stack.Reset()
 		s.setConnected(true)
 		s.lastRx = time.Now()
+		clear(s.security.control)
+		clear(s.security.monitor)
+		s.security = masterSecurity{}
 		s.startupSequence()
 
 		s.serve(ctx, conn)
@@ -466,7 +473,17 @@ func (s *Session) runDueTask(w io.Writer) {
 // Chained tasks come through here too, which is what keeps a select and its
 // operate on consecutive sequence numbers.
 func (s *Session) sendTask(w io.Writer, t *task) {
-	s.seq = (s.seq + 1) % app.SeqModulus
+	t.failure = nil
+	if s.cfg.SecureAuthentication != nil && t.funcCode != app.FuncAuthRequest && !s.securityReady() {
+		s.sendTask(w, s.newSessionKeysTask(t))
+		return
+	}
+	// Authentication exchanges do not consume the application's sequence
+	// space. A key refresh between SELECT and OPERATE must preserve the
+	// consecutive sequence numbers required by the control reservation.
+	if t.funcCode != app.FuncAuthRequest {
+		s.seq = (s.seq + 1) % app.SeqModulus
+	}
 
 	b := app.NewBuilder(s.cfg.MaxTxFragment)
 	if err := b.SetHeader(app.Header{
@@ -481,6 +498,9 @@ func (s *Session) sendTask(w io.Writer, t *task) {
 		return
 	}
 
+	if s.cfg.SecureAuthentication != nil && t.funcCode != app.FuncAuthRequest {
+		s.security.lastRequest = append([]byte(nil), b.Bytes()...)
+	}
 	if err := s.stack.Send(w, b.Bytes()); err != nil {
 		s.log.Warn("send failed", "task", t.name, "err", err)
 		s.completeTask(t, err)
@@ -495,7 +515,7 @@ func (s *Session) sendTask(w io.Writer, t *task) {
 	s.bump(func(st *Stats) { st.TasksRun++ })
 	s.log.Debug("task sent", "task", t.name, "seq", s.seq)
 
-	if t.noResponse {
+	if t.noResponse && s.cfg.SecureAuthentication == nil {
 		// Nothing will come back, so there is nothing to wait for.
 		s.inflight = nil
 		s.completeTask(t, nil)
@@ -580,9 +600,13 @@ func (s *Session) onFragment(w io.Writer, r stack.Received) {
 		return
 	}
 
+	if frag.Header.Func == app.FuncAuthResponse && s.cfg.SecureAuthentication != nil {
+		s.onAuthenticationResponse(w, r, frag)
+		return
+	}
 	// Only two response codes mean anything to this master, and the UNS bit
-	// has to agree with which one it is. AUTH_RESPONSE belongs to secure
-	// authentication, which is not implemented; a solicited response claiming
+	// has to agree with which one it is. AUTH_RESPONSE is handled above when
+	// authentication is enabled; a solicited response claiming
 	// to be unsolicited, or the reverse, would otherwise complete an in-flight
 	// task or deliver data through the wrong path. None of it is allowed to
 	// touch session state, indications included.
@@ -717,6 +741,10 @@ func (s *Session) onSolicited(w io.Writer, frag app.Fragment) {
 		t.onDone(frag.Header.IIN)
 	}
 
+	if t.failure != nil {
+		s.completeTask(t, t.failure)
+		return
+	}
 	// A chained task runs immediately rather than going back to the
 	// scheduler, so nothing can be interleaved between the two.
 	if t.next != nil {

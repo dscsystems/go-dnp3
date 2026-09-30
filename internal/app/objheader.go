@@ -145,6 +145,26 @@ func objectDataLen(sizer ObjectSizer, h ObjectHeader, buf []byte, carriesData bo
 	if h.Group == 0 {
 		return walkAttributes(h.Range.Count, buf)
 	}
+	if h.Group == 91 && h.Variation == 1 {
+		if prefix != PrefixNone {
+			return 0, ErrBadQualifier
+		}
+		off := 0
+		for range h.Count() {
+			if len(buf)-off < 5 {
+				return 0, ErrTruncated
+			}
+			count := int(buf[off+4])
+			off += 5
+			for range count {
+				if off >= len(buf) || buf[off] == 0 || int(buf[off])+1 > len(buf)-off {
+					return 0, ErrTruncated
+				}
+				off += 1 + int(buf[off])
+			}
+		}
+		return off, nil
+	}
 
 	bits, ok := sizer.SizeBits(h.Group, h.Variation)
 	if !ok {

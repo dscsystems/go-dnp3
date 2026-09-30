@@ -605,7 +605,11 @@ anyone who can reach the port issue them. IEC 62351-3 requires both ends to
 present certificates, and these constructors refuse to build a configuration
 that does not. `MinVersion` defaults to TLS 1.2, the floor IEC 62351 sets.
 
-Secure Authentication v5 is out of scope for this library. Use TLS.
+TLS provides transport confidentiality and certificate authentication. DNP3
+Secure Authentication is configured separately using `SecureAuthentication`
+on both session configurations. The implemented symmetric subset uses locally
+provisioned update keys and challenge/reply; see the
+[device profile](device-profile.md#known-gaps) for its limits.
 
 ---
 
@@ -1334,10 +1338,12 @@ Something is touching `Database()` from outside the session goroutine after
   check that what you rely on is actually implemented.
 - A `TCPServer` outstation serves **one master at a time**. If two SCADA systems
   poll the device, that is a session per connection and it is not implemented.
-- Self-address (0xFFFC) is not supported. Broadcast is received and executed but
-  never answered, as the standard requires.
+- Self-address (0xFFFC) discovery is opt-in with outstation `Config.SelfAddress`.
+  Broadcast is received and executed but never answered; authentication-enabled
+  outstations refuse unauthenticated critical broadcasts.
 - Use TLS with mutual authentication for anything that leaves a locked cabinet.
-  Secure Authentication v5 is out of scope.
+  TLS and DNP3 Secure Authentication are separate features; the latter currently
+  implements symmetric key exchange and critical-request challenge/reply.
 - Size the event buffer for the worst burst, and alarm on the overflow
   indication.
 - Keep polling even with unsolicited reporting enabled.

@@ -43,6 +43,7 @@ func buildAttributes(cfg Config) attributeStore {
 		store[attributeKey{a.Set, a.Variation}] = a
 	}
 	for _, a := range cfg.Attributes {
+		a.Octets = append([]byte(nil), a.Octets...)
 		store[attributeKey{a.Set, a.Variation}] = a
 	}
 	return store
@@ -140,14 +141,14 @@ func (s *Session) onAttributeRead(w io.Writer, r stack.Received, frag app.Fragme
 	attrs := s.attributesFor(set, h.Variation)
 	if h.Variation == dnp3.AttrList {
 		// Which attributes exist, rather than what they say: one list of the
-		// set's variations, none of them writable because nothing here accepts
-		// a write. A set with nothing in it has no list to give.
+		// set's variations with their configured writable properties.
+		// A set with nothing in it has no list to give.
 		all := s.attributesFor(set, dnp3.AttrAll)
 		attrs = nil
 		if len(all) > 0 {
 			items := make([]dnp3.AttributeListItem, len(all))
 			for i, a := range all {
-				items[i] = dnp3.AttributeListItem{Variation: a.Variation}
+				items[i] = dnp3.AttributeListItem{Variation: a.Variation, Writable: s.attributeWritable(a.Set, a.Variation)}
 			}
 			list := objects.ListAttribute(items)
 			list.Set = set

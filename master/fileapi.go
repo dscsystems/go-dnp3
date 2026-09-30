@@ -147,7 +147,11 @@ func (s *Session) DeleteFile(ctx context.Context, name string) error {
 		return fmt.Errorf("master: %w: empty file name", dnp3.ErrBadConfig)
 	}
 	t := &transfer{name: name, requestID: s.nextRequestID()}
-	if err := s.run(ctx, newFileDeleteTask(t)); err != nil {
+	first := newFileDeleteTask(t)
+	if s.cfg.FileCredentials != nil {
+		first = newFileAuthTask(t, *s.cfg.FileCredentials, first)
+	}
+	if err := s.run(ctx, first); err != nil {
 		return err
 	}
 	return t.err
@@ -173,6 +177,9 @@ func (s *Session) FileInfo(ctx context.Context, name string) (dnp3.FileInfo, err
 
 // runTransfer runs a chained transfer and makes sure the file is closed.
 func (s *Session) runTransfer(ctx context.Context, t *transfer, first *task) error {
+	if s.cfg.FileCredentials != nil {
+		first = newFileAuthTask(t, *s.cfg.FileCredentials, first)
+	}
 	err := s.run(ctx, first)
 	if err == nil {
 		err = t.err

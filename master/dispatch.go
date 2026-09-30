@@ -18,14 +18,30 @@ func (s *Session) dispatch(h app.ObjectHeader, ctx objects.Context) {
 	if len(h.Data) == 0 {
 		return
 	}
+	if h.Group >= 85 && h.Group <= 88 {
+		if handler, ok := s.handler.(DatasetHandler); ok {
+			kind := objects.KindStatic
+			if h.Group == 88 {
+				kind = objects.KindEvent
+			}
+			if h.Group == 86 && h.Variation == 2 {
+				handler.HandleDataset(HeaderInfo{GV: gv, Kind: kind}, append([]byte(nil), h.Data...))
+			} else if values, err := app.FreeFormatObjects(h); err == nil {
+				for _, value := range values {
+					handler.HandleDataset(HeaderInfo{GV: gv, Kind: kind}, append([]byte(nil), value...))
+				}
+			}
+		}
+		return
+	}
 
 	// Octet strings are checked before the registry lookup, not after: their
 	// length lives in the variation number, so there is no descriptor row for
 	// g110v5 to find. Looking them up first would silently drop every string a
 	// device reports.
-	if h.Group == groupOctetString || h.Group == groupOctetStringEvent {
+	if h.Group == groupOctetString || h.Group == groupOctetStringEvent || h.Group == 112 || h.Group == 113 {
 		kind := objects.KindString
-		s.dispatchOctetStrings(h, HeaderInfo{GV: gv, Kind: kind}, h.Group == groupOctetStringEvent)
+		s.dispatchOctetStrings(h, HeaderInfo{GV: gv, Kind: kind}, h.Group == groupOctetStringEvent || h.Group == 113)
 		return
 	}
 
@@ -76,7 +92,11 @@ func (s *Session) dispatch(h app.ObjectHeader, ctx objects.Context) {
 	case dnp3.TypeAnalog:
 		c, _ := objects.AnalogCodec(gv)
 		vals := decodeRun(h, size, prefixLen, ctx, c.Parse)
-		s.handler.HandleAnalog(info, vals)
+		if handler, ok := s.handler.(FrozenAnalogHandler); ok && (h.Group == 31 || h.Group == 33) {
+			handler.HandleFrozenAnalog(info, vals)
+		} else {
+			s.handler.HandleAnalog(info, vals)
+		}
 	case dnp3.TypeBinaryOutputStatus:
 		c, _ := objects.BinaryOutputCodec(gv)
 		vals := decodeRun(h, size, prefixLen, ctx, c.Parse)

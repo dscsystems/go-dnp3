@@ -9,6 +9,31 @@ import (
 	"github.com/dscsystems/go-dnp3/objects"
 )
 
+// WriteAttribute writes one existing attribute. The outstation must advertise
+// the attribute as writable and the value must retain its configured type.
+func (s *Session) WriteAttribute(ctx context.Context, a dnp3.Attribute) error {
+	data, err := objects.AppendAttribute(nil, a)
+	if err != nil {
+		return err
+	}
+	var failure error
+	t := &task{name: "write-attribute", funcCode: app.FuncWrite, priority: priorityCommand,
+		build: func(b *app.Builder) error {
+			return b.AddObject(app.ObjectHeader{Group: 0, Variation: a.Variation,
+				Qualifier: app.MakeQualifier(app.PrefixNone, app.RangeStartStop8), Range: app.Range{Spec: app.RangeStartStop8, Start: uint32(a.Set), Stop: uint32(a.Set), Count: 1}, Data: data})
+		},
+		onDone: func(iin app.IIN) {
+			if iin.HasAny(app.RequestErrorMask) {
+				failure = fmt.Errorf("master: writing attribute: %s", iin)
+			}
+		},
+	}
+	if err := s.run(ctx, t); err != nil {
+		return err
+	}
+	return failure
+}
+
 // Device attributes answer the first question anyone has about an unfamiliar
 // device: what is it? Vendor, model, firmware, serial number, and how many
 // points of each kind it has — read out of the device rather than off a

@@ -56,6 +56,25 @@ type Config struct {
 	// entry here overrides a derived one.
 	Attributes []dnp3.Attribute
 
+	// WritableAttributes lists attributes that accept same-type writes.
+	WritableAttributes []AttributeID
+	// AttributeWrite may reject or persist an attribute before it is stored.
+	AttributeWrite func(dnp3.Attribute) bool
+	// SelfAddress enables destination 0xFFFC discovery.
+	SelfAddress bool
+	// Management implements application and configuration operations.
+	Management ManagementHandler
+	// ActivateConfig applies named configuration files and reports g91v1 results.
+	ActivateConfig func([]string) objects.ActivationResult
+	// SecureAuthentication enables DNP3 symmetric authentication independently of TLS.
+	SecureAuthentication *SecureAuthenticationConfig
+	// TerminalWrite consumes master virtual-terminal output. Nil refuses writes.
+	TerminalWrite func(uint16, []byte) bool
+	// Datasets supplies prototype, descriptor and present-value objects.
+	Datasets []DatasetObject
+	// DatasetWrite validates and applies prototype-dependent dataset writes.
+	DatasetWrite func(group, variation uint8, object []byte) bool
+
 	// UseLinkConfirms enables link-layer confirmation, normally off over TCP.
 	UseLinkConfirms bool
 	// LinkRetries is how many times a confirmed frame is retransmitted.
@@ -255,7 +274,7 @@ type Session struct {
 	linkDeadline time.Time
 
 	// attributes is what this device answers a group 0 read with, assembled
-	// once at construction because neither half of it changes.
+	// at construction and updated by validated attribute writes.
 	attributes attributeStore
 
 	// file is the transfer in flight, and handleSeq issues the handles. A
@@ -263,6 +282,8 @@ type Session struct {
 	// is told it is invalid rather than being given somebody else's file.
 	file      *transfer
 	handleSeq uint32
+	fileAuth  fileAuthorization
+	security  securityState
 
 	// recordedTime is when the last RECORD_CURRENT_TIME request arrived, which
 	// a master reads back as group 50 variation 3 to work out the transit
@@ -336,6 +357,12 @@ func New(cfg Config, appl Application, cmds CommandHandler) *Session {
 		iin:     app.IINDeviceRestart,
 		updates: make(chan func(*Database), 64),
 	}
+	for _, v := range cfg.Datasets {
+		if err := s.db.UpdateDataset(v, dnp3.ClassNone); err != nil {
+			s.iin = s.iin.Set(app.IINConfigCorrupt)
+		}
+	}
+	s.resetSecurity()
 	s.indications.Store(uint32(cfg.Indications & settableIndications))
 	return s
 }
@@ -407,6 +434,7 @@ func (s *Session) Run(ctx context.Context, ch channel.Channel) error {
 		UseConfirms:   s.cfg.UseLinkConfirms,
 		MaxRetries:    s.cfg.LinkRetries,
 		MaxRxFragment: s.cfg.MaxRxFragment,
+		SelfAddress:   s.cfg.SelfAddress,
 	})
 
 	// Cancelling the context is how Run is asked to stop, and a closed channel
@@ -447,12 +475,17 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 	go readInto(ctx, conn, rx, readErr)
 
 	s.connected = true
+	// Cached application replies belong to this connection, including file
+	// authentication keys and requests with device side effects.
+	s.lastReqValid = false
 	s.unsol.reset()
 	defer func() {
 		s.connected = false
 		// A transfer belongs to the connection it started on: the master that
 		// opened it cannot come back to the same handle, and holding the file
 		// open would deny the next one.
+		s.resetSecurity()
+		s.fileAuth = fileAuthorization{}
 		if err := s.closeFile(); err != nil {
 			s.log.Warn("closing a transfer on disconnect failed", "err", err)
 		}
@@ -518,6 +551,7 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 			s.checkSelectTimeout(now)
 			s.checkFileTimeout(now)
 			s.runFreezes(now)
+			s.expireSecurity()
 			if err := s.pollUnsolicited(conn, now); err != nil {
 				s.log.Warn("unsolicited transmission failed", "err", err)
 				return
@@ -584,8 +618,16 @@ func (s *Session) checkConfirmTimeout() {
 
 // handle dispatches one request fragment.
 func (s *Session) handle(w io.Writer, r stack.Received) error {
+	return s.handleAuthenticated(w, r, false)
+}
+
+func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticated bool) error {
 	s.bump(func(st *Stats) { st.RequestsReceived++ })
 
+	if s.cfg.SecureAuthentication != nil {
+		s.countSecurity(6)
+		s.expireSecurity()
+	}
 	frag, err := app.ParseFragment(nil, r.Fragment)
 	if err != nil {
 		s.bump(func(st *Stats) { st.MalformedRequests++ })
@@ -639,6 +681,12 @@ func (s *Session) handle(w io.Writer, r stack.Received) error {
 		}
 	}
 
+	if frag.Header.Func == app.FuncAuthRequest || frag.Header.Func == app.FuncAuthRequestNoAck {
+		return s.onAuthentication(w, r, frag)
+	}
+	if !authenticated && s.cfg.SecureAuthentication != nil && (criticalFunction(frag.Header.Func) || hasAuthenticationObject(frag)) {
+		return s.challengeRequest(w, r, frag)
+	}
 	// A confirm is an acknowledgement of our own response, not a request: it
 	// has its own sequence space and nothing to replay, so it is dispatched
 	// without going near the repeat-detection below.
@@ -702,6 +750,10 @@ func (s *Session) handle(w io.Writer, r stack.Received) error {
 	case app.FuncRecordCurrentTime:
 		return s.onRecordCurrentTime(w, r, frag)
 
+	case app.FuncAuthenticateFile:
+		return s.onAuthenticateFile(w, r, frag)
+	case app.FuncInitializeData, app.FuncInitializeAppl, app.FuncStartAppl, app.FuncStopAppl, app.FuncSaveConfig, app.FuncActivateConfig:
+		return s.onManagement(w, r, frag)
 	case app.FuncOpenFile:
 		return s.onOpenFile(w, r, frag)
 
@@ -811,6 +863,7 @@ func (s *Session) rejectMalformed(w io.Writer, r stack.Received, perr error) err
 func handlesFunc(f app.FuncCode) bool {
 	switch f {
 	case app.FuncConfirm, app.FuncRead, app.FuncWrite, app.FuncDelayMeasure,
+		app.FuncAuthRequest, app.FuncAuthRequestNoAck, app.FuncAuthenticateFile, app.FuncInitializeData, app.FuncInitializeAppl, app.FuncStartAppl, app.FuncStopAppl, app.FuncSaveConfig, app.FuncActivateConfig,
 		app.FuncRecordCurrentTime, app.FuncOpenFile, app.FuncCloseFile,
 		app.FuncDeleteFile, app.FuncGetFileInfo, app.FuncAbortFile,
 		app.FuncColdRestart, app.FuncWarmRestart,
@@ -871,6 +924,7 @@ func (s *Session) onRead(w io.Writer, r stack.Received, frag app.Fragment) error
 				for _, pt := range staticTypes {
 					s.buildStaticRange(b, pt, 0, 0, 0xFFFF)
 				}
+				s.readDatasets(b, app.ReadAllObjects(87, 1))
 			case 2, 3, 4: // event classes 1, 2 and 3
 				// A class read names how many events it wants when its range
 				// is a count; without one it wants every event in the class.
@@ -906,6 +960,18 @@ func (s *Session) onRead(w io.Writer, r stack.Received, frag app.Fragment) error
 			}
 			selected = append(selected, evs...)
 
+		case h.Group == 50 && h.Variation == 1:
+			s.readCurrentTime(b, h)
+		case h.Group == 80 && h.Variation == 1:
+			s.readIIN(b, h)
+		case h.Group == 50 && h.Variation == 4:
+			s.readTimeIntervals(b, h)
+		case h.Group >= 85 && h.Group <= 87:
+			s.readDatasets(b, h)
+		case h.Group == 121:
+			s.readSecurityStatistics(b, h)
+		case h.Group == 112:
+			s.readTerminals(b, h)
 		case h.Group == 50 && h.Variation == 3:
 			// The second half of the LAN time-sync procedure: hand back the
 			// time the RECORD_CURRENT_TIME request arrived.
@@ -961,6 +1027,14 @@ func (s *Session) onWrite(w io.Writer, r stack.Received, frag app.Fragment) erro
 
 	for _, h := range frag.Objects {
 		switch {
+		case h.Group >= 85 && h.Group <= 87:
+			s.writeDatasets(h)
+		case h.Group == 0:
+			s.writeAttribute(h)
+		case h.Group == 50 && h.Variation == 4:
+			s.writeTimeIntervals(h)
+		case h.Group == 112:
+			s.writeTerminals(h)
 		case h.Group == 80 && h.Variation == 1:
 			// A master clears DEVICE_RESTART by writing zero to index 7.
 			// This is the handshake that ends the restart sequence.
@@ -1248,9 +1322,16 @@ func (s *Session) onFreeze(frag app.Fragment, clear bool) {
 
 	if len(frag.Objects) == 0 {
 		freeze(0, 0xFFFF)
+		s.db.freezeAnalogsRange(0, 0xFFFF, at, clear)
 		return
 	}
 	for _, h := range frag.Objects {
+		if h.Group == 30 {
+			if !forEachPointRun(h, func(start, stop uint16) { s.db.freezeAnalogsRange(start, stop, at, clear) }) {
+				s.iin = s.iin.Set(app.IINParameterError)
+			}
+			continue
+		}
 		if h.Group != 20 {
 			s.iin = s.iin.Set(app.IINObjectUnknown)
 			continue
@@ -1493,6 +1574,12 @@ func pointTypeForGroup(group uint8) (dnp3.PointType, bool) {
 		return dnp3.TypeCounter, true
 	case 21, 23:
 		return dnp3.TypeFrozenCounter, true
+	case 31, 33:
+		return dnp3.TypeFrozenAnalog, true
+	case 87, 88:
+		return dnp3.TypeDataset, true
+	case 112, 113:
+		return dnp3.TypeVirtualTerminal, true
 	case 30, 32:
 		return dnp3.TypeAnalog, true
 	case 40, 42:
@@ -1511,7 +1598,10 @@ func isEventGroup(group uint8) bool {
 // An octet string event's variation is its length, so it has no table row and
 // only the "any" variation is a request that means anything.
 func eventVariationKnown(pt dnp3.PointType, variation uint8) bool {
-	if pt == dnp3.TypeOctetString {
+	if pt == dnp3.TypeDataset {
+		return variation == 1
+	}
+	if pt == dnp3.TypeOctetString || pt == dnp3.TypeVirtualTerminal {
 		return false
 	}
 	_, ok := objects.Lookup(objects.GV(eventGroup(pt), variation))

@@ -46,6 +46,9 @@ type FileConfig struct {
 	// does, with NO_FUNC_CODE_SUPPORT.
 	Handler FileHandler
 
+	// Authenticate requires a credential exchange before OPEN_FILE or DELETE_FILE.
+	Authenticate FileAuthenticator
+
 	// MaxBlockSize caps the block size, whatever the master asks for. Zero
 	// uses [DefaultFileBlockSize].
 	MaxBlockSize uint16
@@ -408,6 +411,10 @@ func (s *Session) onOpenFile(w io.Writer, r stack.Received, frag app.Fragment) e
 		return s.respond(w, r, frag.Header, nil)
 	}
 	reply := objects.FileCommandStatus{RequestID: cmd.RequestID}
+	if !s.fileAuthorized(r.Source, cmd.Key) {
+		reply.Status = dnp3.FilePermissionDenied
+		return s.commandStatus(w, r, frag.Header, reply)
+	}
 
 	if s.file != nil {
 		// One transfer at a time. Answering with the handle of the transfer
@@ -603,6 +610,10 @@ func (s *Session) onDeleteFile(w io.Writer, r stack.Received, frag app.Fragment)
 	}
 
 	reply := objects.FileCommandStatus{RequestID: cmd.RequestID}
+	if !s.fileAuthorized(r.Source, cmd.Key) {
+		reply.Status = dnp3.FilePermissionDenied
+		return s.commandStatus(w, r, frag.Header, reply)
+	}
 	if s.file != nil && s.file.name == cmd.Name {
 		// Deleting the file being transferred would leave the transfer writing
 		// to something with no name.
