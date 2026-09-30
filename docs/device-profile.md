@@ -108,6 +108,15 @@ Of note:
 - `NEED_TIME` is asserted until a master writes the clock, and it downgrades
   the quality of every timestamp the outstation reports.
 
+### Event reads
+
+A read of an event group (g2, g4, g11, g13, g22, g23, g32, g42, g43, g111) returns the
+buffered events of that kind, whatever class they are in, in the variation named
+(variation 0 keeps each point's configured one). A count qualifier limits how many; the
+rest stay queued. A class read (g60 v2 to v4) takes a count the same way, and every event
+in the class without one. An event read with a start-stop range or an index prefix is
+refused with `PARAMETER_ERROR`, and an unknown variation with `OBJECT_UNKNOWN`.
+
 ### Fragment sizes
 
 Transmit and receive fragment limits are configurable; both default to 2048
@@ -123,12 +132,12 @@ Sizes and field layouts for all of these are generated from
 | Group | Variations | Parse | Write | Notes |
 | --- | --- | --- | --- | --- |
 | 1 | 1, 2 | Yes | Yes | Binary input, packed and with flags |
-| 2 | 1, 2, 3 | Yes | Yes | Events; v3 relative time resolved against a g51 CTO |
+| 2 | 1, 2, 3 | Yes | Yes | Events; v3 relative time is sent with a g51 CTO (v1 synchronised, v2 not) in every fragment that needs one, renewed past 65.535 s |
 | 3 | 1, 2 | Yes | Yes | Double-bit binary input |
 | 4 | 1, 2, 3 | Yes | Yes | Double-bit events |
 | 10 | 1, 2 | Yes | Yes | Binary output status |
 | 11 | 1, 2 | Yes | Yes | Binary output events |
-| 12 | 1, 2, 3 | Yes | Yes | CROB; v2 and v3 decode but the outstation treats them as v1 |
+| 12 | 1, 2, 3 | Yes | v1 only | CROB. The pattern control block (v2) and its mask (v3) decode, but the outstation refuses both without calling a handler: their semantics (a set of points named by a mask) are not a CROB's |
 | 13 | 1, 2 | Yes | Yes | Binary output command events; raised when a control is operated on a point with a `CommandEventClass` |
 | 20–23 | see spec | Yes | Yes | Counters and frozen counters |
 | 30–33 | see spec | Yes | Yes | Analog inputs, frozen, and their events |

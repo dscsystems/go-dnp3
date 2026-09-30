@@ -105,3 +105,40 @@ func TestPumpPausesForDFCAndResumesAfterItClears(t *testing.T) {
 		t.Error("the fragment is fully sent and acknowledged; the stack should be idle")
 	}
 }
+
+// batchWriter records how a stack groups what it writes into messages.
+type batchWriter struct {
+	messages [][]byte
+	open     bool
+}
+
+func (b *batchWriter) BeginMessage() { b.open = true; b.messages = append(b.messages, nil) }
+func (b *batchWriter) EndMessage() error {
+	b.open = false
+	return nil
+}
+func (b *batchWriter) Write(p []byte) (int, error) {
+	if !b.open {
+		b.messages = append(b.messages, nil)
+	}
+	last := len(b.messages) - 1
+	b.messages[last] = append(b.messages[last], p...)
+	return len(p), nil
+}
+
+// Every frame of a fragment goes out in one message to a transport that has
+// them, however many frames it takes.
+func TestFragmentFramesShareOneMessage(t *testing.T) {
+	st := New(Config{LocalAddr: 1, RemoteAddr: 10, IsMaster: true})
+	var w batchWriter
+
+	if err := st.Send(&w, make([]byte, 600)); err != nil { // three frames
+		t.Fatal(err)
+	}
+	if len(w.messages) != 1 {
+		t.Fatalf("%d messages, want 1", len(w.messages))
+	}
+	if got := len(w.messages[0]); got < 3*link.HeaderSize {
+		t.Errorf("the message holds %d octets, want at least three frames", got)
+	}
+}

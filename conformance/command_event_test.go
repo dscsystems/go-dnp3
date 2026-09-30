@@ -97,3 +97,34 @@ func TestSelectAndUnconfiguredPointsRaiseNoCommandEvents(t *testing.T) {
 		t.Errorf("a point without a command event class raised %d events", got)
 	}
 }
+
+// A pattern control block is not a CROB. Neither g12v2 nor its g12v3 mask may
+// reach the handler, whichever function carries them.
+func TestPatternControlsAreRefusedWithoutReachingTheHandler(t *testing.T) {
+	for _, variation := range []uint8{2, 3} {
+		for _, fc := range []app.FuncCode{app.FuncDirectOperate, app.FuncSelect} {
+			rec := &recordingHandler{}
+			h := newHarness(t, outstation.Config{Database: smallDB()}, rec)
+
+			data := append([]byte{1}, make([]byte, 11)...) // an index and a block
+			data[1] = byte(dnp3.ControlLatchOn)
+			data[2] = 1
+			resp := h.request(fc, app.ObjectHeader{
+				Group: 12, Variation: variation,
+				Qualifier: app.MakeQualifier(app.PrefixIndex1, app.RangeCount8),
+				Range:     app.Range{Spec: app.RangeCount8, Count: 1},
+				Data:      data,
+			})
+
+			// The packed mask is refused while the fragment is parsed, the
+			// block while the command is executed; both are refusals.
+			if !resp.Header.IIN.Has(app.IINObjectUnknown) && !resp.Header.IIN.Has(app.IINParameterError) {
+				t.Errorf("g12v%d %v: IIN = %v, want the request refused", variation, fc, resp.Header.IIN)
+			}
+			if rec.selects != 0 || rec.operates != 0 {
+				t.Errorf("g12v%d %v reached the handler (%d selects, %d operates)",
+					variation, fc, rec.selects, rec.operates)
+			}
+		}
+	}
+}

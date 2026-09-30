@@ -168,6 +168,16 @@ func (b *EventBuffer) ClearOverflow() {
 //
 // The events stay in the buffer. They are removed only by [EventBuffer.Confirm].
 func (b *EventBuffer) Select(mask dnp3.Class, limit int) []Event {
+	return b.selectWhere(limit, func(e *Event) bool { return e.Class&mask != 0 })
+}
+
+// SelectType is [EventBuffer.Select] for a read of one kind of event — every
+// binary input event, say — which takes them whatever class they are in.
+func (b *EventBuffer) SelectType(pt dnp3.PointType, limit int) []Event {
+	return b.selectWhere(limit, func(e *Event) bool { return e.Type == pt })
+}
+
+func (b *EventBuffer) selectWhere(limit int, match func(*Event) bool) []Event {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -182,7 +192,7 @@ func (b *EventBuffer) Select(mask dnp3.Class, limit int) []Event {
 			break
 		}
 		e := &b.events[i]
-		if e.selected || e.Class&mask == 0 {
+		if e.selected || !match(e) {
 			continue
 		}
 		e.selected = true

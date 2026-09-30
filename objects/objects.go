@@ -137,6 +137,10 @@ type Context struct {
 	// object in this fragment, and HasCTO says whether one was seen.
 	CTO    time.Time
 	HasCTO bool
+	// CTOSynchronized is whether the clock that took the CTO was synchronised,
+	// which group 51 carries in its variation: 1 synchronised, 2 not. Relative
+	// times inherit it, and absolute times in the same fragment do not.
+	CTOSynchronized bool
 }
 
 // TimeQuality returns the quality to stamp on an absolute timestamp.
@@ -157,9 +161,13 @@ func (c Context) RelativeTime(offsetMillis uint16) dnp3.Timestamp {
 	if !c.HasCTO {
 		return dnp3.NoTime()
 	}
+	q := dnp3.TimestampUnsynchronized
+	if c.CTOSynchronized {
+		q = dnp3.TimestampSynchronized
+	}
 	return dnp3.Timestamp{
 		Time:    c.CTO.Add(time.Duration(offsetMillis) * time.Millisecond),
-		Quality: c.TimeQuality(),
+		Quality: q,
 	}
 }
 
@@ -187,9 +195,22 @@ func (c Context) RelativeOffset(t dnp3.Timestamp) uint16 {
 
 // WithCTO returns a copy of the context with its common time of occurrence
 // set, as a parser does on encountering a group 51 object.
+//
+// The base is taken to be as synchronised as the context is. A parser that has
+// read the group 51 object knows better, and uses [Context.WithGroup51].
 func (c Context) WithCTO(t time.Time) Context {
 	c.CTO = t
 	c.HasCTO = true
+	c.CTOSynchronized = c.Synchronized
+	return c
+}
+
+// WithGroup51 returns a copy of the context with its common time of occurrence
+// taken from a group 51 object of the given variation: 1 is a base taken from a
+// synchronised clock, 2 from one that was not.
+func (c Context) WithGroup51(t time.Time, variation uint8) Context {
+	c = c.WithCTO(t)
+	c.CTOSynchronized = variation == 1
 	return c
 }
 

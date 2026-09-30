@@ -2,6 +2,7 @@ package outstation
 
 import (
 	"encoding/binary"
+	"time"
 
 	"github.com/dscsystems/go-dnp3"
 	"github.com/dscsystems/go-dnp3/internal/app"
@@ -452,6 +453,34 @@ func eventGroup(pt dnp3.PointType) uint8 {
 	return 0
 }
 
+// eventTypeForGroup maps an event group to the kind of event it reports, and
+// says whether it is one.
+func eventTypeForGroup(group uint8) (dnp3.PointType, bool) {
+	switch group {
+	case 2:
+		return dnp3.TypeBinary, true
+	case 4:
+		return dnp3.TypeDoubleBitBinary, true
+	case 11:
+		return dnp3.TypeBinaryOutputStatus, true
+	case 13:
+		return dnp3.TypeBinaryCommandEvent, true
+	case 22:
+		return dnp3.TypeCounter, true
+	case 23:
+		return dnp3.TypeFrozenCounter, true
+	case 32:
+		return dnp3.TypeAnalog, true
+	case 42:
+		return dnp3.TypeAnalogOutputStatus, true
+	case 43:
+		return dnp3.TypeAnalogCommandEvent, true
+	case 111:
+		return dnp3.TypeOctetString, true
+	}
+	return dnp3.TypeUnknown, false
+}
+
 // buildEvents appends event objects for the selected events.
 //
 // Events carry per-object index prefixes because the points that changed are
@@ -465,6 +494,7 @@ func (s *Session) buildEvents(b *responseBuilder, events []Event) {
 		// 111 has no descriptor row for a length to find. Consulting the
 		// registry first would silently drop every string event.
 		var size int
+		relative := false
 		if events[i].Type == dnp3.TypeOctetString {
 			size = int(gv.Variation)
 		} else {
@@ -479,6 +509,7 @@ func (s *Session) buildEvents(b *responseBuilder, events []Event) {
 				i++
 				continue
 			}
+			relative = d.RelativeTime
 		}
 		if size == 0 {
 			i++
@@ -510,17 +541,40 @@ func (s *Session) buildEvents(b *responseBuilder, events []Event) {
 		perObject := prefixLen + size
 		headerOverhead := app.ObjectHeaderSize + spec.Octets()
 
+		// A relative-time event is an offset from a common time of occurrence,
+		// and the offset means nothing without the group 51 object it is
+		// measured from — in the same fragment, since a master resolves each
+		// fragment on its own. So the base travels with every header of
+		// relative events, and the room for it is reserved with the header's so
+		// the two can never be split across a fragment boundary.
+		ctoSize := 0
+		if relative {
+			ctoSize = s.ctoHeader(time.Time{}).Size()
+		}
+
 		for i < j {
-			avail := b.room() - headerOverhead
+			avail := b.room() - ctoSize - headerOverhead
 			if avail < perObject {
 				b.flush()
-				avail = b.room() - headerOverhead
+				avail = b.room() - ctoSize - headerOverhead
 				if avail < perObject {
 					return
 				}
 			}
 
 			runLen := min(avail/perObject, j-i, maxCount)
+			ctx := b.ctx
+			if relative {
+				// The base is the first event's time, so its own offset is
+				// zero, and the run stops at the first event too far past it
+				// for sixteen bits of milliseconds (or before it, which an
+				// unsigned offset cannot say). That event starts a new base.
+				base := s.eventBase(events[i])
+				runLen = min(runLen, eventsWithinWindow(events[i:i+runLen], base))
+				ctx = ctx.WithCTO(base)
+				b.add(s.ctoHeader(base))
+			}
+
 			data := make([]byte, 0, runLen*perObject)
 			for k := range runLen {
 				e := events[i+k]
@@ -529,7 +583,7 @@ func (s *Session) buildEvents(b *responseBuilder, events []Event) {
 				} else {
 					data = binary.LittleEndian.AppendUint16(data, e.Index)
 				}
-				data = s.encodeEvent(data, gv, e, b.ctx)
+				data = s.encodeEvent(data, gv, e, ctx)
 			}
 
 			b.add(app.ObjectHeader{
@@ -584,4 +638,48 @@ func (s *Session) encodeEvent(dst []byte, gv objects.GroupVar, e Event, ctx obje
 		})
 	}
 	return dst
+}
+
+// ctoHeader builds the group 51 object that carries a common time of
+// occurrence: variation 1 when the outstation's clock is synchronised and 2
+// when it is not, which is how a master learns how far to trust the relative
+// times that follow.
+func (s *Session) ctoHeader(base time.Time) app.ObjectHeader {
+	variation := uint8(2)
+	if s.synchronized {
+		variation = 1
+	}
+	return app.ObjectHeader{
+		Group: 51, Variation: variation,
+		Qualifier: app.MakeQualifier(app.PrefixNone, app.RangeCount8),
+		Range:     app.Range{Spec: app.RangeCount8, Count: 1},
+		Data:      objects.AppendTime48(nil, dnp3.Timestamp{Time: base}),
+	}
+}
+
+// eventBase picks the common time of occurrence for a run of relative-time
+// events starting at e: the event's own time, to the millisecond the encoding
+// can carry. An event that carries no time has nothing to anchor to, so the
+// current time is used rather than the epoch.
+func (s *Session) eventBase(e Event) time.Time {
+	if !e.Time.IsValid() {
+		return s.appl.Now().Truncate(time.Millisecond)
+	}
+	return e.Time.Time.Truncate(time.Millisecond)
+}
+
+// eventsWithinWindow returns how many of events, from the front, can be
+// expressed as a sixteen-bit millisecond offset from base. An event with no
+// time is expressed as the base itself. It is always at least one: the run's
+// first event is its own base.
+func eventsWithinWindow(events []Event, base time.Time) int {
+	for n, e := range events {
+		if !e.Time.IsValid() {
+			continue
+		}
+		if d := e.Time.Time.Sub(base).Milliseconds(); d < 0 || d > 0xFFFF {
+			return max(n, 1)
+		}
+	}
+	return len(events)
 }

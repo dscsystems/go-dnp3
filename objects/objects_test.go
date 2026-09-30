@@ -476,3 +476,29 @@ func TestKindString(t *testing.T) {
 		}
 	}
 }
+
+// The quality of a relative time comes from the group 51 variation that gave
+// its base, not from what the session currently believes, and does not leak
+// into absolute times decoded with the same context.
+func TestRelativeTimeQualityFollowsTheCTOVariation(t *testing.T) {
+	base := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+
+	// The session thinks the outstation is synchronised, but the base was
+	// taken from a clock that was not.
+	ctx := Context{Synchronized: true}.WithGroup51(base, 2)
+	if q := ctx.RelativeTime(500).Quality; q != dnp3.TimestampUnsynchronized {
+		t.Errorf("relative time after g51v2 has quality %v, want unsynchronized", q)
+	}
+	if q := ctx.TimeQuality(); q != dnp3.TimestampSynchronized {
+		t.Errorf("absolute times took the CTO's quality: %v", q)
+	}
+
+	// And the other way round.
+	ctx = Context{Synchronized: false}.WithGroup51(base, 1)
+	if q := ctx.RelativeTime(500).Quality; q != dnp3.TimestampSynchronized {
+		t.Errorf("relative time after g51v1 has quality %v, want synchronized", q)
+	}
+	if got := ctx.RelativeTime(500).Time; !got.Equal(base.Add(500 * time.Millisecond)) {
+		t.Errorf("relative time = %v", got)
+	}
+}
