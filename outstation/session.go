@@ -322,6 +322,18 @@ func (s *Session) Update(fn func(*Database)) {
 	}
 }
 
+// drainUpdates applies every update already queued, without waiting for more.
+func (s *Session) drainUpdates() {
+	for {
+		select {
+		case fn := <-s.updates:
+			fn(s.db)
+		default:
+			return
+		}
+	}
+}
+
 // Run connects and serves until the context is cancelled.
 func (s *Session) Run(ctx context.Context, ch channel.Channel) error {
 	s.stack = stack.New(stack.Config{
@@ -411,6 +423,12 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 			fn(s.db)
 
 		case data := <-rx:
+			// Updates the application submitted before this request arrived
+			// belong in its answer. Select picks among ready cases at random,
+			// so without this a request could overtake an update queued
+			// ahead of it and be answered with the state from before.
+			s.drainUpdates()
+
 			var handleErr error
 			if err := s.stack.Receive(conn, data, func(r stack.Received) {
 				if handleErr == nil {
