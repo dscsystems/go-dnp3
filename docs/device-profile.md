@@ -128,7 +128,7 @@ Sizes and field layouts for all of these are generated from
 | 4 | 1, 2, 3 | Yes | Yes | Double-bit events |
 | 10 | 1, 2 | Yes | Yes | Binary output status |
 | 11 | 1, 2 | Yes | Yes | Binary output events |
-| 12 | 1, 2, 3 | Yes | Yes | CROB; v2 and v3 decode but the outstation treats them as v1 |
+| 12 | 1, 2, 3 | Yes | v1 only | CROB. The pattern control block (v2) and its mask (v3) decode, but the outstation refuses both without calling a handler: their semantics (a set of points named by a mask) are not a CROB's |
 | 13 | 1, 2 | Yes | Yes | Binary output command events; raised when a control is operated on a point with a `CommandEventClass` |
 | 20–23 | see spec | Yes | Yes | Counters and frozen counters |
 | 30–33 | see spec | Yes | Yes | Analog inputs, frozen, and their events |

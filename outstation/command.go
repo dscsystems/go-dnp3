@@ -234,6 +234,16 @@ func (s *Session) executeCommands(
 	selecting := frag.Header.Func == app.FuncSelect
 
 	for _, h := range frag.Objects {
+		// Pattern control (g12v2, with its g12v3 mask) operates a set of points
+		// named by a bit mask, which is not what a CROB does. Handing a pattern
+		// control block to the handler as though it were a CROB would operate
+		// the one point it names and call the rest done, so both are refused as
+		// objects this outstation does not have. Only g12v1 is a CROB.
+		if h.Group == 12 && h.Variation != 1 {
+			s.iin = s.iin.Set(app.IINObjectUnknown)
+			continue
+		}
+
 		d, ok := objects.Lookup(objects.GV(h.Group, h.Variation))
 		if !ok || d.Kind != objects.KindCommand {
 			s.iin = s.iin.Set(app.IINObjectUnknown)
@@ -304,6 +314,9 @@ func (s *Session) runCommand(
 ) dnp3.CommandStatus {
 	switch group {
 	case 12:
+		if variation != 1 {
+			return dnp3.CommandNotSupported
+		}
 		c := objects.ParseCROB(raw)
 		if selecting {
 			return s.cmds.SelectCROB(index, c)
