@@ -1070,6 +1070,61 @@ var descriptors = map[GroupVar]Descriptor{
 		SizeBits:    1,
 		Packed:      true,
 	},
+	GV(86, 2): {
+		GV:          GV(86, 2),
+		Name:        "DatasetCharacteristics",
+		Level:       4,
+		Kind:        KindAttribute,
+		Measurement: dnp3.TypeUnknown,
+		SizeBits:    8,
+	},
+	GV(120, 3): {
+		GV:          GV(120, 3),
+		Name:        "AuthenticationAggressiveRequest",
+		Level:       4,
+		Kind:        KindTime,
+		Measurement: dnp3.TypeUnknown,
+		SizeBits:    48,
+	},
+	GV(120, 4): {
+		GV:          GV(120, 4),
+		Name:        "AuthenticationKeyStatusRequest",
+		Level:       4,
+		Kind:        KindTime,
+		Measurement: dnp3.TypeUnknown,
+		SizeBits:    16,
+	},
+	GV(121, 1): {
+		GV:          GV(121, 1),
+		Name:        "SecurityStatistic",
+		Level:       4,
+		Kind:        KindStatic,
+		Measurement: dnp3.TypeUnknown,
+		SizeBits:    56,
+		HasFlags:    true,
+		ValueBits:   32,
+	},
+	GV(122, 1): {
+		GV:          GV(122, 1),
+		Name:        "SecurityStatisticEvent",
+		Level:       4,
+		Kind:        KindEvent,
+		Measurement: dnp3.TypeUnknown,
+		SizeBits:    56,
+		HasFlags:    true,
+		ValueBits:   32,
+	},
+	GV(122, 2): {
+		GV:          GV(122, 2),
+		Name:        "SecurityStatisticEventTime",
+		Level:       4,
+		Kind:        KindEvent,
+		Measurement: dnp3.TypeUnknown,
+		SizeBits:    104,
+		HasFlags:    true,
+		HasTime:     true,
+		ValueBits:   32,
+	},
 }
 
 // lengthIsVariationGroups carry their octet length in the variation
@@ -1084,8 +1139,15 @@ var lengthIsVariationGroups = map[uint8]bool{
 // variableGroups are genuinely variable-length. Their encodings carry an
 // explicit size, so a parser walks them instead of looking them up.
 var variableGroups = map[uint8]bool{
-	0:  true, // DeviceAttribute
-	70: true, // FileTransfer
+	0:   true, // DeviceAttribute
+	70:  true, // FileTransfer
+	85:  true, // DatasetPrototype
+	86:  true, // DatasetDescriptor
+	87:  true, // DatasetPresentValue
+	88:  true, // DatasetSnapshot
+	90:  true, // ApplicationIdentifier
+	91:  true, // ActivationResult
+	120: true, // AuthenticationChallenge
 }
 
 var _ = dnp3.TypeUnknown

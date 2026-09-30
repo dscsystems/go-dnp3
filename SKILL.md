@@ -353,13 +353,21 @@ unimplemented rather than writing a call that will not compile.
   RECORD_CURRENT_TIME procedure (`SyncTimeRecorded`) do exist.
   (`Database.FreezeCounters()` and `Database.AssignClass()` are outstation-local
   calls, not protocol requests.)
-- **No datasets** (groups 85–87), **no Secure
-  Authentication v5** (out of scope — use TLS), **no self-address** (0xFFFC).
-- **Device attributes are implemented** (group 0) for reading, including the
-  variation 255 "list of attributes" request. No writing.
-- **File transfer is implemented** (group 70) — read, write, list, delete — but
-  there is **no `AUTHENTICATE_FILE` handshake**, and an outstation serves **one
-  transfer at a time**.
+- **Datasets** (groups 85–88) are stored and read, but the library does not
+  resolve prototype-dependent values: `Config.DatasetWrite` has to.
+- **Secure Authentication v5 is a symmetric subset, not a certified profile**
+  (`SecureAuthentication` on both configurations): locally provisioned update
+  keys, challenge/reply for critical requests, no aggressive mode, no remote
+  key management. TLS is separate. Its MAC construction has not been checked
+  against the standard or another implementation, so do not claim
+  interoperability with other vendors' Secure Authentication.
+- **Self-address** (0xFFFC) is opt-in on the outstation (`Config.SelfAddress`).
+- **Device attributes are implemented** (group 0), including the variation 255
+  "list of attributes" request. Writing is limited to the attributes named in
+  `Config.WritableAttributes`.
+- **File transfer is implemented** (group 70) — read, write, list, delete, and
+  `AUTHENTICATE_FILE` when `Files.Authenticate` is set — and an outstation
+  serves **one transfer at a time**.
 - **No multi-master TCP server.** `TCPServer`/`TLSServer` serve one connection at
   a time; concurrent sessions would need a session per connection, which is not
   implemented.

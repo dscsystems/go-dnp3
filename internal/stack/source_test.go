@@ -88,3 +88,66 @@ func TestFrameFromTheSameRoleIsIgnored(t *testing.T) {
 		t.Error("a frame with the wrong direction bit was answered")
 	}
 }
+
+// A request sent to the self address is answered from the outstation's own, so
+// the first valid reply names it. That is the only time a reply from an address
+// other than the one sent to is accepted, and once the station has named
+// itself it is held to that address like any other.
+func TestSelfAddressDiscoveryAdoptsTheFirstValidReplierOnly(t *testing.T) {
+	newStack := func() *Stack {
+		s := New(Config{LocalAddr: 1, RemoteAddr: link.SelfAddress, IsMaster: true, UseConfirms: true, MaxRetries: 3})
+		if err := s.Send(&bytes.Buffer{}, []byte{0xC0}); err != nil {
+			t.Fatalf("send: %v", err)
+		}
+		return s
+	}
+	ackFrom := func(src uint16) []byte {
+		raw, err := link.Encode(nil, link.Header{
+			Control: link.Control{Prm: false, Func: link.FuncAck},
+			Dest:    1, Src: src, Length: link.MinLength,
+		}, nil)
+		if err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		return raw
+	}
+	recv := func(s *Stack, src uint16) {
+		t.Helper()
+		if err := s.Receive(&bytes.Buffer{}, ackFrom(src), func(Received) {}); err != nil {
+			t.Fatalf("receive: %v", err)
+		}
+	}
+
+	// An address no station may hold cannot name itself.
+	s := newStack()
+	if s.dest != link.SelfAddress {
+		t.Fatalf("dest = %#x after sending to the self address", s.dest)
+	}
+	recv(s, link.BroadcastNoConfirm)
+	if s.dest != link.SelfAddress {
+		t.Errorf("a reply from a reserved address was adopted: dest = %#x", s.dest)
+	}
+
+	// A real station answers and is adopted; nobody else is accepted after it.
+	recv(s, 10)
+	if s.dest != 10 {
+		t.Fatalf("dest = %d after a reply from 10, want 10", s.dest)
+	}
+	busy := s.Busy()
+	recv(s, 99)
+	if s.dest != 10 {
+		t.Errorf("a later reply from 99 replaced the adopted station: dest = %d", s.dest)
+	}
+	if s.Busy() != busy {
+		t.Error("a reply from a station other than the adopted one advanced the exchange")
+	}
+
+	// Discovery is for the self address alone: an ordinary destination is
+	// never rewritten by a reply from somewhere else.
+	plain := New(Config{LocalAddr: 1, RemoteAddr: 10, IsMaster: true, UseConfirms: true, MaxRetries: 3})
+	_ = plain.Send(&bytes.Buffer{}, []byte{0xC0})
+	recv(plain, 99)
+	if plain.dest != 10 {
+		t.Errorf("an ordinary destination was rewritten by a reply from 99: dest = %d", plain.dest)
+	}
+}

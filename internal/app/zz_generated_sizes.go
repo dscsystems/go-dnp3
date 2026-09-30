@@ -112,6 +112,12 @@ var generatedSizes = map[uint16]int{
 	gv(60, 3):  0,   // Class2Data
 	gv(60, 4):  0,   // Class3Data
 	gv(80, 1):  1,   // InternalIndications
+	gv(86, 2):  8,   // DatasetCharacteristics
+	gv(120, 3): 48,  // AuthenticationAggressiveRequest
+	gv(120, 4): 16,  // AuthenticationKeyStatusRequest
+	gv(121, 1): 56,  // SecurityStatistic
+	gv(122, 1): 56,  // SecurityStatisticEvent
+	gv(122, 2): 104, // SecurityStatisticEventTime
 }
 
 // lengthIsVariationGroups carry their octet length in the variation number.
@@ -124,6 +130,13 @@ var lengthIsVariationGroups = map[uint8]bool{
 
 // variableGroups have no fixed size; their encoding carries one.
 var variableGroups = map[uint8]bool{
-	0:  true, // DeviceAttribute
-	70: true, // FileTransfer
+	0:   true, // DeviceAttribute
+	70:  true, // FileTransfer
+	85:  true, // DatasetPrototype
+	86:  true, // DatasetDescriptor
+	87:  true, // DatasetPresentValue
+	88:  true, // DatasetSnapshot
+	90:  true, // ApplicationIdentifier
+	91:  true, // ActivationResult
+	120: true, // AuthenticationChallenge
 }

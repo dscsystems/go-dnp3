@@ -18,14 +18,17 @@ type Event struct {
 	Variation uint8
 	Time      dnp3.Timestamp
 
-	Binary        dnp3.Binary
-	DoubleBit     dnp3.DoubleBitBinary
-	Counter       dnp3.Counter
-	FrozenCounter dnp3.FrozenCounter
-	Analog        dnp3.Analog
-	BinaryOutput  dnp3.BinaryOutputStatus
-	AnalogOutput  dnp3.AnalogOutputStatus
-	OctetString   dnp3.OctetString
+	Binary            dnp3.Binary
+	DoubleBit         dnp3.DoubleBitBinary
+	Counter           dnp3.Counter
+	FrozenCounter     dnp3.FrozenCounter
+	Dataset           []byte
+	SecurityStatistic uint32
+	FrozenAnalog      dnp3.Analog
+	Analog            dnp3.Analog
+	BinaryOutput      dnp3.BinaryOutputStatus
+	AnalogOutput      dnp3.AnalogOutputStatus
+	OctetString       dnp3.OctetString
 
 	// CommandStatus, CommandState and CommandValue describe a command event
 	// (TypeBinaryCommandEvent, TypeAnalogCommandEvent): the outcome the

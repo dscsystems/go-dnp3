@@ -28,6 +28,9 @@ func (SpecSizer) SizeBits(group, variation uint8) (int, bool) {
 		// means "any length" and appears only in requests.
 		return int(variation) * 8, true
 	}
+	if bits, ok := generatedSizes[gv(group, variation)]; ok {
+		return bits, true
+	}
 	if variableGroups[group] {
 		// Genuinely variable-length. Reporting unknown makes the parser say so
 		// rather than guess, and pushes it onto the size-prefix path.

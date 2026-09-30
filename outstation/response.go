@@ -19,6 +19,7 @@ var staticTypes = []dnp3.PointType{
 	dnp3.TypeCounter,
 	dnp3.TypeFrozenCounter,
 	dnp3.TypeAnalog,
+	dnp3.TypeFrozenAnalog,
 	dnp3.TypeAnalogOutputStatus,
 	dnp3.TypeOctetString,
 }
@@ -261,6 +262,11 @@ func (s *Session) encodeStatic(dst []byte, pt dnp3.PointType, gv objects.GroupVa
 		if c, ok := objects.FrozenCounterCodec(gv); ok {
 			return c.Write(dst, v, ctx)
 		}
+	case dnp3.TypeFrozenAnalog:
+		v, _, _ := s.db.FrozenAnalog(index)
+		if c, ok := objects.AnalogCodec(gv); ok {
+			return c.Write(dst, v, ctx)
+		}
 	case dnp3.TypeAnalog:
 		v, _, _ := s.db.Analog(index)
 		if c, ok := objects.AnalogCodec(gv); ok {
@@ -295,6 +301,9 @@ func (s *Session) pointConfig(pt dnp3.PointType, index uint16) (any, PointConfig
 	case dnp3.TypeFrozenCounter:
 		v, c, ok := s.db.FrozenCounter(index)
 		return v, c, ok
+	case dnp3.TypeFrozenAnalog:
+		v, c, ok := s.db.FrozenAnalog(index)
+		return v, c, ok
 	case dnp3.TypeAnalog:
 		v, c, ok := s.db.Analog(index)
 		return v, c, ok
@@ -318,6 +327,8 @@ func typeCount(c DatabaseConfig, pt dnp3.PointType) int {
 		return c.Counter
 	case dnp3.TypeFrozenCounter:
 		return c.FrozenCounter
+	case dnp3.TypeFrozenAnalog:
+		return c.FrozenAnalog
 	case dnp3.TypeAnalog:
 		return c.Analog
 	case dnp3.TypeBinaryOutputStatus:
@@ -439,6 +450,14 @@ func eventGroup(pt dnp3.PointType) uint8 {
 		return 22
 	case dnp3.TypeFrozenCounter:
 		return 23
+	case dnp3.TypeFrozenAnalog:
+		return 33
+	case dnp3.TypeDataset:
+		return 88
+	case dnp3.TypeSecurityStatistic:
+		return 122
+	case dnp3.TypeVirtualTerminal:
+		return 113
 	case dnp3.TypeAnalog:
 		return 32
 	case dnp3.TypeAnalogOutputStatus:
@@ -469,6 +488,14 @@ func eventTypeForGroup(group uint8) (dnp3.PointType, bool) {
 		return dnp3.TypeCounter, true
 	case 23:
 		return dnp3.TypeFrozenCounter, true
+	case 33:
+		return dnp3.TypeFrozenAnalog, true
+	case 88:
+		return dnp3.TypeDataset, true
+	case 122:
+		return dnp3.TypeSecurityStatistic, true
+	case 113:
+		return dnp3.TypeVirtualTerminal, true
 	case 32:
 		return dnp3.TypeAnalog, true
 	case 42:
@@ -488,6 +515,16 @@ func eventTypeForGroup(group uint8) (dnp3.PointType, bool) {
 // so a burst of analog changes becomes one header rather than fifty.
 func (s *Session) buildEvents(b *responseBuilder, events []Event) {
 	for i := 0; i < len(events); {
+		if events[i].Type == dnp3.TypeDataset {
+			h, err := app.FreeFormat(88, 1, events[i].Dataset)
+			if err == nil && h.Size()+app.ResponseHeaderSize <= b.max {
+				b.add(h)
+			} else {
+				s.db.events.Release([]Event{events[i]})
+			}
+			i++
+			continue
+		}
 		gv := objects.GV(eventGroup(events[i].Type), events[i].Variation)
 
 		// An octet string's size is its variation, not a table lookup: group
@@ -495,7 +532,7 @@ func (s *Session) buildEvents(b *responseBuilder, events []Event) {
 		// registry first would silently drop every string event.
 		var size int
 		relative := false
-		if events[i].Type == dnp3.TypeOctetString {
+		if events[i].Type == dnp3.TypeOctetString || events[i].Type == dnp3.TypeVirtualTerminal {
 			size = int(gv.Variation)
 		} else {
 			d, ok := objects.Lookup(gv)
@@ -617,6 +654,10 @@ func (s *Session) encodeEvent(dst []byte, gv objects.GroupVar, e Event, ctx obje
 		if c, ok := objects.FrozenCounterCodec(gv); ok {
 			return c.Write(dst, e.FrozenCounter, ctx)
 		}
+	case dnp3.TypeFrozenAnalog:
+		if c, ok := objects.AnalogCodec(gv); ok {
+			return c.Write(dst, e.FrozenAnalog, ctx)
+		}
 	case dnp3.TypeAnalog:
 		if c, ok := objects.AnalogCodec(gv); ok {
 			return c.Write(dst, e.Analog, ctx)
@@ -629,7 +670,14 @@ func (s *Session) encodeEvent(dst []byte, gv objects.GroupVar, e Event, ctx obje
 		if c, ok := objects.AnalogOutputCodec(gv); ok {
 			return c.Write(dst, e.AnalogOutput, ctx)
 		}
-	case dnp3.TypeOctetString:
+	case dnp3.TypeSecurityStatistic:
+		dst = append(dst, byte(dnp3.Online), 0, 0)
+		dst = binary.LittleEndian.AppendUint32(dst, e.SecurityStatistic)
+		if gv.Variation == 2 {
+			dst = objects.AppendTime48(dst, e.Time)
+		}
+		return dst
+	case dnp3.TypeOctetString, dnp3.TypeVirtualTerminal:
 		return appendOctetString(dst, e.OctetString, int(gv.Variation))
 	case dnp3.TypeBinaryCommandEvent, dnp3.TypeAnalogCommandEvent:
 		return objects.AppendCommandEvent(dst, gv.Group, gv.Variation, dnp3.CommandEvent{

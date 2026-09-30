@@ -128,8 +128,9 @@ rather than an encoding.
 ## Scope
 
 Targeting IEEE 1815 conformance **Level 2, then Level 3**, with Level 4 features
-staged after that. Transports: TCP, TLS, serial and UDP. Secure Authentication
-v5 is out of scope; use TLS.
+staged after that. Transports: TCP, TLS, serial and UDP. A symmetric Secure
+Authentication v5 subset is available independently of TLS; see the
+[device profile](docs/device-profile.md) for its supported exchanges and limits.
 
 ## Commands
 

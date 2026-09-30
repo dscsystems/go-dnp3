@@ -319,3 +319,25 @@ objects:
   # rather than look them up.
   - {group: 0, variation: 0, name: DeviceAttribute, level: 4, kind: attribute, measurement: none, variable: true}
   - {group: 70, variation: 0, name: FileTransfer, level: 0, kind: file, measurement: none, variable: true}
+
+  # Secure Authentication symmetric exchange. Variable objects use 0x5B.
+  - {group: 120, variation: 1, name: AuthenticationChallenge, level: 4, kind: time, measurement: none, variable: true}
+  - {group: 120, variation: 2, name: AuthenticationReply, level: 4, kind: time, measurement: none, variable: true}
+  - {group: 120, variation: 3, name: AuthenticationAggressiveRequest, level: 4, kind: time, measurement: none, fields: [{name: Sequence, type: u32}, {name: User, type: u16}]}
+  - {group: 120, variation: 4, name: AuthenticationKeyStatusRequest, level: 4, kind: time, measurement: none, fields: [{name: User, type: u16}]}
+  - {group: 120, variation: 5, name: AuthenticationKeyStatus, level: 4, kind: time, measurement: none, variable: true}
+  - {group: 120, variation: 6, name: AuthenticationKeyChange, level: 4, kind: time, measurement: none, variable: true}
+  - {group: 120, variation: 7, name: AuthenticationError, level: 4, kind: time, measurement: none, variable: true}
+  - {group: 120, variation: 9, name: AuthenticationMAC, level: 4, kind: time, measurement: none, variable: true}
+  - {group: 121, variation: 1, name: SecurityStatistic, level: 4, kind: static, measurement: none, fields: [{name: Flags, type: flags}, {name: Association, type: u16}, {name: Value, type: u32}]}
+  - {group: 122, variation: 1, name: SecurityStatisticEvent, level: 4, kind: event, measurement: none, fields: [{name: Flags, type: flags}, {name: Association, type: u16}, {name: Value, type: u32}]}
+  - {group: 122, variation: 2, name: SecurityStatisticEventTime, level: 4, kind: event, measurement: none, fields: [{name: Flags, type: flags}, {name: Association, type: u16}, {name: Value, type: u32}, {name: Time, type: time48}]}
+
+  - {group: 85, variation: 1, name: DatasetPrototype, level: 4, kind: attribute, measurement: none, variable: true}
+  - {group: 86, variation: 1, name: DatasetDescriptor, level: 4, kind: attribute, measurement: none, variable: true}
+  - {group: 86, variation: 2, name: DatasetCharacteristics, level: 4, kind: attribute, measurement: none, fields: [{name: Characteristics, type: u8}]}
+  - {group: 86, variation: 3, name: DatasetPointAttributes, level: 4, kind: attribute, measurement: none, variable: true}
+  - {group: 87, variation: 1, name: DatasetPresentValue, level: 4, kind: static, measurement: none, variable: true}
+  - {group: 88, variation: 1, name: DatasetSnapshot, level: 4, kind: event, measurement: none, variable: true}
+  - {group: 90, variation: 1, name: ApplicationIdentifier, level: 4, kind: attribute, measurement: none, variable: true}
+  - {group: 91, variation: 1, name: ActivationResult, level: 4, kind: attribute, measurement: none, variable: true}

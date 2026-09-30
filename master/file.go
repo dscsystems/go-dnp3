@@ -27,6 +27,7 @@ import (
 type transfer struct {
 	name      string
 	requestID uint16
+	key       uint32
 
 	// handle, size and blockSize are what the open told us. A zero handle
 	// means nothing was opened, so nothing needs closing.
@@ -123,6 +124,7 @@ func newFileOpenTask(t *transfer, mode dnp3.FileMode, blockSize uint16, next fun
 		build: func(b *app.Builder) error {
 			h, err := app.FreeFormat(70, 3, objects.AppendFileCommand(nil, objects.FileCommand{
 				Name:         t.name,
+				Key:          t.key,
 				Mode:         mode,
 				Size:         t.size,
 				MaxBlockSize: blockSize,
@@ -349,6 +351,7 @@ func newFileDeleteTask(t *transfer) *task {
 		build: func(b *app.Builder) error {
 			h, err := app.FreeFormat(70, 3, objects.AppendFileCommand(nil, objects.FileCommand{
 				Name:      t.name,
+				Key:       t.key,
 				Mode:      dnp3.FileModeNull,
 				RequestID: t.requestID,
 			}))

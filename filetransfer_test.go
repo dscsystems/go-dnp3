@@ -31,6 +31,10 @@ const testBlockSize = 16
 
 // filePair builds a master and an outstation serving dir, and starts both.
 func filePair(t *testing.T, files outstation.FileConfig) *master.Session {
+	return filePairCredentials(t, files, nil)
+}
+
+func filePairCredentials(t *testing.T, files outstation.FileConfig, credentials *master.FileCredentials) *master.Session {
 	t.Helper()
 
 	mch, och := channel.Pipe()
@@ -48,6 +52,7 @@ func filePair(t *testing.T, files outstation.FileConfig) *master.Session {
 		RemoteAddr:      10,
 		ResponseTimeout: 2 * time.Second,
 		FileBlockSize:   testBlockSize,
+		FileCredentials: credentials,
 	}, nil)
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -65,6 +70,40 @@ func filePair(t *testing.T, files outstation.FileConfig) *master.Session {
 
 	waitFor(t, 3*time.Second, func() bool { return m.Connected() })
 	return m
+}
+
+func TestAuthenticatedFileTransfer(t *testing.T) {
+	for _, password := range []string{"secret", "wrong"} {
+		t.Run(password, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "data.bin"), []byte("authenticated contents"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			h, err := outstation.OpenDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = h.Close() })
+			m := filePairCredentials(t, outstation.FileConfig{Handler: h, MaxBlockSize: testBlockSize,
+				Authenticate: func(user, pass string) bool { return user == "operator" && pass == "secret" }},
+				&master.FileCredentials{User: "operator", Password: password})
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			data, err := m.ReadFileBytes(ctx, "/data.bin")
+			if password == "wrong" {
+				if !errors.Is(err, dnp3.ErrFileTransfer) || len(data) != 0 {
+					t.Fatalf("rejected credentials: %v", err)
+				}
+				return
+			}
+			if err != nil || string(data) != "authenticated contents" {
+				t.Fatalf("%q: %v", data, err)
+			}
+			if err := m.DeleteFile(ctx, "/data.bin"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 }
 
 // serving builds a handler over a temporary directory holding the given files.
@@ -479,5 +518,46 @@ func TestFileWriteShorterThanDeclaredFails(t *testing.T) {
 	err := m.WriteFile(ctx, "/short.bin", strings.NewReader(data), 1000)
 	if err == nil {
 		t.Fatal("a write that delivered 100 of 1000 declared octets reported success")
+	}
+}
+
+// AuthenticateFile is the explicit form of the handshake a master otherwise
+// performs before each transfer: credentials go in, a key comes back.
+func TestAuthenticateFileReturnsAKeyOrRefuses(t *testing.T) {
+	dir := t.TempDir()
+	h, err := outstation.OpenDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+
+	m := filePair(t, outstation.FileConfig{Handler: h, MaxBlockSize: testBlockSize,
+		Authenticate: func(user, pass string) bool { return user == "operator" && pass == "secret" }})
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+
+	key, err := m.AuthenticateFile(ctx, "operator", "secret")
+	if err != nil || key == 0 {
+		t.Fatalf("right credentials: key %d, %v", key, err)
+	}
+	if key2, err := m.AuthenticateFile(ctx, "operator", "secret"); err != nil || key2 == 0 {
+		t.Errorf("authenticating again: key %d, %v", key2, err)
+	}
+
+	if key, err := m.AuthenticateFile(ctx, "operator", "wrong"); err == nil || key != 0 {
+		t.Errorf("wrong password: key %d, %v; want a refusal and no key", key, err)
+	}
+	if _, err := m.AuthenticateFile(ctx, "", ""); err == nil {
+		t.Error("empty credentials were accepted")
+	}
+}
+
+func TestAuthenticateFileAgainstAnOutstationWithoutItIsNotSupported(t *testing.T) {
+	m, _ := serving(t, nil) // no Authenticate handler
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+
+	if _, err := m.AuthenticateFile(ctx, "operator", "secret"); !errors.Is(err, dnp3.ErrNotSupported) {
+		t.Errorf("error = %v, want ErrNotSupported", err)
 	}
 }

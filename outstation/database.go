@@ -46,6 +46,9 @@ type DatabaseConfig struct {
 	Counter            int
 	FrozenCounter      int
 	Analog             int
+	FrozenAnalog       int
+	TimeAndInterval    int
+	VirtualTerminal    int
 	BinaryOutputStatus int
 	AnalogOutputStatus int
 	OctetString        int
@@ -69,16 +72,21 @@ type point[T any] struct {
 // It is not safe for concurrent use on its own. Access goes through
 // [Session.Update] and the session's own goroutine, which serialises it.
 type Database struct {
-	binary    []point[dnp3.Binary]
-	doubleBit []point[dnp3.DoubleBitBinary]
-	counter   []point[dnp3.Counter]
-	frozen    []point[dnp3.FrozenCounter]
-	analog    []point[dnp3.Analog]
-	binaryOut []point[dnp3.BinaryOutputStatus]
-	analogOut []point[dnp3.AnalogOutputStatus]
-	octet     []point[dnp3.OctetString]
+	binary          []point[dnp3.Binary]
+	doubleBit       []point[dnp3.DoubleBitBinary]
+	counter         []point[dnp3.Counter]
+	frozen          []point[dnp3.FrozenCounter]
+	analog          []point[dnp3.Analog]
+	frozenAnalog    []point[dnp3.Analog]
+	timeAndInterval []dnp3.TimeAndInterval
+	terminal        []point[dnp3.OctetString]
+	binaryOut       []point[dnp3.BinaryOutputStatus]
+	analogOut       []point[dnp3.AnalogOutputStatus]
+	octet           []point[dnp3.OctetString]
 
-	events *EventBuffer
+	datasets       map[datasetKey][]byte
+	datasetClasses map[uint16]dnp3.Class
+	events         *EventBuffer
 
 	// mu guards reads taken outside the session goroutine, such as a
 	// diagnostic snapshot.
@@ -93,6 +101,7 @@ var defaultStaticVariations = map[dnp3.PointType]uint8{
 	dnp3.TypeDoubleBitBinary:    2, // g3v2
 	dnp3.TypeCounter:            1, // g20v1, 32-bit with flags
 	dnp3.TypeFrozenCounter:      1, // g21v1
+	dnp3.TypeFrozenAnalog:       1,
 	dnp3.TypeAnalog:             1, // g30v1, 32-bit with flags
 	dnp3.TypeBinaryOutputStatus: 2, // g10v2
 	dnp3.TypeAnalogOutputStatus: 1, // g40v1
@@ -103,6 +112,7 @@ var defaultEventVariations = map[dnp3.PointType]uint8{
 	dnp3.TypeDoubleBitBinary:    2, // g4v2
 	dnp3.TypeCounter:            5, // g22v5, with time
 	dnp3.TypeFrozenCounter:      5, // g23v5
+	dnp3.TypeFrozenAnalog:       3,
 	dnp3.TypeAnalog:             3, // g32v3, 32-bit with time
 	dnp3.TypeBinaryOutputStatus: 2, // g11v2
 	dnp3.TypeAnalogOutputStatus: 3, // g42v3
@@ -116,6 +126,9 @@ func NewDatabase(cfg DatabaseConfig, events *EventBuffer) *Database {
 	db.doubleBit = makePoints[dnp3.DoubleBitBinary](cfg.DoubleBitBinary, dnp3.TypeDoubleBitBinary, cfg.DefaultClass)
 	db.counter = makePoints[dnp3.Counter](cfg.Counter, dnp3.TypeCounter, cfg.DefaultClass)
 	db.frozen = makePoints[dnp3.FrozenCounter](cfg.FrozenCounter, dnp3.TypeFrozenCounter, cfg.DefaultClass)
+	db.frozenAnalog = makePoints[dnp3.Analog](cfg.FrozenAnalog, dnp3.TypeFrozenAnalog, cfg.DefaultClass)
+	db.timeAndInterval = make([]dnp3.TimeAndInterval, cfg.TimeAndInterval)
+	db.terminal = makePoints[dnp3.OctetString](cfg.VirtualTerminal, dnp3.TypeVirtualTerminal, cfg.DefaultClass)
 	db.analog = makePoints[dnp3.Analog](cfg.Analog, dnp3.TypeAnalog, cfg.DefaultClass)
 	db.binaryOut = makePoints[dnp3.BinaryOutputStatus](cfg.BinaryOutputStatus, dnp3.TypeBinaryOutputStatus, cfg.DefaultClass)
 	db.analogOut = makePoints[dnp3.AnalogOutputStatus](cfg.AnalogOutputStatus, dnp3.TypeAnalogOutputStatus, cfg.DefaultClass)
@@ -144,6 +157,9 @@ func (db *Database) Counts() DatabaseConfig {
 		Counter:            len(db.counter),
 		FrozenCounter:      len(db.frozen),
 		Analog:             len(db.analog),
+		FrozenAnalog:       len(db.frozenAnalog),
+		TimeAndInterval:    len(db.timeAndInterval),
+		VirtualTerminal:    len(db.terminal),
 		BinaryOutputStatus: len(db.binaryOut),
 		AnalogOutputStatus: len(db.analogOut),
 		OctetString:        len(db.octet),
@@ -167,6 +183,10 @@ func (db *Database) Configure(pt dnp3.PointType, index uint16, cfg PointConfig) 
 		return setConfig(db.counter, i, cfg)
 	case dnp3.TypeFrozenCounter:
 		return setConfig(db.frozen, i, cfg)
+	case dnp3.TypeFrozenAnalog:
+		return setConfig(db.frozenAnalog, i, cfg)
+	case dnp3.TypeVirtualTerminal:
+		return setConfig(db.terminal, i, cfg)
 	case dnp3.TypeAnalog:
 		return setConfig(db.analog, i, cfg)
 	case dnp3.TypeBinaryOutputStatus:
@@ -206,6 +226,15 @@ func (db *Database) assignClassRange(pt dnp3.PointType, class dnp3.Class, start,
 	defer db.mu.Unlock()
 
 	switch pt {
+	case dnp3.TypeDataset:
+		if db.datasetClasses == nil {
+			db.datasetClasses = map[uint16]dnp3.Class{}
+		}
+		for key := range db.datasets {
+			if key.group == 87 && key.index >= start && key.index <= stop {
+				db.datasetClasses[key.index] = class
+			}
+		}
 	case dnp3.TypeBinary:
 		assignClass(db.binary, class, start, stop)
 	case dnp3.TypeDoubleBitBinary:
@@ -214,6 +243,10 @@ func (db *Database) assignClassRange(pt dnp3.PointType, class dnp3.Class, start,
 		assignClass(db.counter, class, start, stop)
 	case dnp3.TypeFrozenCounter:
 		assignClass(db.frozen, class, start, stop)
+	case dnp3.TypeFrozenAnalog:
+		assignClass(db.frozenAnalog, class, start, stop)
+	case dnp3.TypeVirtualTerminal:
+		assignClass(db.terminal, class, start, stop)
 	case dnp3.TypeAnalog:
 		assignClass(db.analog, class, start, stop)
 	case dnp3.TypeBinaryOutputStatus:
@@ -664,6 +697,10 @@ func staticGroupVar(pt dnp3.PointType, variation uint8) objects.GroupVar {
 		group = 20
 	case dnp3.TypeFrozenCounter:
 		group = 21
+	case dnp3.TypeFrozenAnalog:
+		group = 31
+	case dnp3.TypeVirtualTerminal:
+		group = 112
 	case dnp3.TypeAnalog:
 		group = 30
 	case dnp3.TypeBinaryOutputStatus:

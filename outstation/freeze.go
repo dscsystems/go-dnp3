@@ -19,7 +19,8 @@ type freezeSchedule struct {
 	// interval repeats the freeze; zero freezes once.
 	interval time.Duration
 	// ranges are the counters to freeze, as inclusive index ranges.
-	ranges [][2]uint16
+	ranges       [][2]uint16
+	analogRanges [][2]uint16
 }
 
 // onFreezeAtTime schedules a freeze.
@@ -34,11 +35,12 @@ type freezeSchedule struct {
 // to the next multiple that has not passed.
 func (s *Session) onFreezeAtTime(frag app.Fragment) {
 	var (
-		haveTime bool
-		first    time.Time
-		interval time.Duration
-		ranges   [][2]uint16
-		named    bool
+		haveTime     bool
+		first        time.Time
+		interval     time.Duration
+		ranges       [][2]uint16
+		analogRanges [][2]uint16
+		named        bool
 	)
 
 	for _, h := range frag.Objects {
@@ -55,6 +57,12 @@ func (s *Session) onFreezeAtTime(frag app.Fragment) {
 			interval = time.Duration(ms) * time.Millisecond
 			haveTime = true
 
+		case h.Group == 30:
+			named = true
+			if !forEachPointRun(h, func(start, stop uint16) { analogRanges = append(analogRanges, [2]uint16{start, stop}) }) {
+				s.iin = s.iin.Set(app.IINParameterError)
+				return
+			}
 		case h.Group == 20:
 			named = true
 			if !forEachPointRun(h, func(start, stop uint16) {
@@ -76,6 +84,7 @@ func (s *Session) onFreezeAtTime(frag app.Fragment) {
 	}
 	if !named {
 		ranges = [][2]uint16{{0, 0xFFFF}}
+		analogRanges = [][2]uint16{{0, 0xFFFF}}
 	}
 
 	now := s.appl.Now()
@@ -92,7 +101,7 @@ func (s *Session) onFreezeAtTime(frag app.Fragment) {
 	// The same freeze asked for twice is one freeze: the request is
 	// understood, and the operation is already waiting to run.
 	for _, f := range s.freezes {
-		if f.next.Equal(next) && f.interval == interval && slices.Equal(f.ranges, ranges) {
+		if f.next.Equal(next) && f.interval == interval && slices.Equal(f.ranges, ranges) && slices.Equal(f.analogRanges, analogRanges) {
 			s.iin = s.iin.Set(app.IINAlreadyExecuting)
 			return
 		}
@@ -102,7 +111,7 @@ func (s *Session) onFreezeAtTime(frag app.Fragment) {
 		s.iin = s.iin.Set(app.IINParameterError)
 		return
 	}
-	s.freezes = append(s.freezes, freezeSchedule{next: next, interval: interval, ranges: ranges})
+	s.freezes = append(s.freezes, freezeSchedule{next: next, interval: interval, ranges: ranges, analogRanges: analogRanges})
 	s.log.Debug("freeze scheduled", "at", next, "interval", interval, "ranges", len(ranges))
 }
 
@@ -128,6 +137,9 @@ func (s *Session) runFreezes(now time.Time) {
 		}
 		for _, r := range f.ranges {
 			s.db.freezeCountersRange(r[0], r[1], at)
+		}
+		for _, r := range f.analogRanges {
+			s.db.freezeAnalogsRange(r[0], r[1], at, false)
 		}
 		s.bump(func(st *Stats) { st.ScheduledFreezes++ })
 

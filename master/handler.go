@@ -74,6 +74,18 @@ type CommandEventHandler interface {
 	HandleCommandEvent(info HeaderInfo, values []dnp3.Indexed[dnp3.CommandEvent])
 }
 
+// DatasetHandler receives complete dataset objects, including their encoded
+// identifier. The application interprets values using the associated prototype.
+type DatasetHandler interface {
+	HandleDataset(info HeaderInfo, data []byte)
+}
+
+// FrozenAnalogHandler distinguishes frozen inputs from running analogs.
+// Handlers without this interface receive both through HandleAnalog.
+type FrozenAnalogHandler interface {
+	HandleFrozenAnalog(info HeaderInfo, values []dnp3.Indexed[dnp3.Analog])
+}
+
 // NopHandler discards everything. Embed it to implement only the methods you
 // care about.
 type NopHandler struct{}
@@ -107,6 +119,7 @@ type Update struct {
 	Counter       dnp3.Counter
 	FrozenCounter dnp3.FrozenCounter
 	Analog        dnp3.Analog
+	FrozenAnalog  dnp3.Analog
 	BinaryOutput  dnp3.BinaryOutputStatus
 	AnalogOutput  dnp3.AnalogOutputStatus
 	OctetString   dnp3.OctetString
@@ -185,6 +198,12 @@ func (h *ChannelHandler) HandleAnalog(info HeaderInfo, values []dnp3.Indexed[dnp
 	}
 }
 
+func (h *ChannelHandler) HandleFrozenAnalog(info HeaderInfo, values []dnp3.Indexed[dnp3.Analog]) {
+	for _, v := range values {
+		h.send(Update{Info: info, Type: dnp3.TypeFrozenAnalog, Index: v.Index, FrozenAnalog: v.Value})
+	}
+}
+
 func (h *ChannelHandler) HandleBinaryOutputStatus(info HeaderInfo, values []dnp3.Indexed[dnp3.BinaryOutputStatus]) {
 	for _, v := range values {
 		h.send(Update{Info: info, Type: dnp3.TypeBinaryOutputStatus, Index: v.Index, BinaryOutput: v.Value})
@@ -198,8 +217,12 @@ func (h *ChannelHandler) HandleAnalogOutputStatus(info HeaderInfo, values []dnp3
 }
 
 func (h *ChannelHandler) HandleOctetString(info HeaderInfo, values []dnp3.Indexed[dnp3.OctetString]) {
+	pt := dnp3.TypeOctetString
+	if info.GV.Group == 112 || info.GV.Group == 113 {
+		pt = dnp3.TypeVirtualTerminal
+	}
 	for _, v := range values {
-		h.send(Update{Info: info, Type: dnp3.TypeOctetString, Index: v.Index, OctetString: v.Value})
+		h.send(Update{Info: info, Type: pt, Index: v.Index, OctetString: v.Value})
 	}
 }
 

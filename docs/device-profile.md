@@ -9,7 +9,7 @@ the Level 2 procedures (`conformance/`), which is a useful check and not the
 same thing. Where this document says "supported", it means "implemented and
 covered by tests in this repository".
 
-Last updated for the state of the tree as of the transports-and-examples work.
+Updated for frozen analogs, extended services, and symmetric authentication.
 
 ---
 
@@ -35,7 +35,7 @@ Last updated for the state of the tree as of the transports-and-examples work.
 | Serial | Yes, via `go.bug.st/serial` |
 | Link addresses | Full 16-bit range |
 | Broadcast addresses | Received and executed; never answered |
-| Self-address (0xFFFC) | **Not supported** |
+| Self-address (0xFFFC) | Opt-in outstation discovery via `Config.SelfAddress`; replies identify the configured address. A master addressing it adopts the first valid replier, with or without link confirms |
 | Link confirmation | Yes, configurable, with retransmission |
 | Link status / keep-alive | Yes |
 | Frame size | 292 octets maximum, per the standard |
@@ -64,7 +64,7 @@ Default maximum receive fragment: 2048 octets, configurable.
 | --- | --- | --- | --- |
 | 0 | CONFIRM | Sends | Receives |
 | 1 | READ | Yes | Yes |
-| 2 | WRITE | Yes | Yes (g50v1 and g50v3 time, g80v1 indications, g34 deadbands) |
+| 2 | WRITE | Yes | Time, indexed intervals, indications, deadbands, writable attributes, terminals, and dataset backend |
 | 3 | SELECT | Yes | Yes |
 | 4 | OPERATE | Yes | Yes |
 | 5 | DIRECT_OPERATE | Yes | Yes |
@@ -74,6 +74,7 @@ Default maximum receive fragment: 2048 octets, configurable.
 | 11/12 | FREEZE_AT_TIME(_NR) | Yes | Yes; a time already past with no interval is refused with `PARAMETER_ERROR` |
 | 13 | COLD_RESTART | Yes | Yes |
 | 14 | WARM_RESTART | Yes | Yes |
+| 15–19 | INITIALIZE_DATA / INITIALIZE_APPL / START_APPL / STOP_APPL / SAVE_CONFIG | — | `Config.Management` handler |
 | 20/21 | ENABLE/DISABLE_UNSOLICITED | Yes | Yes |
 | 22 | ASSIGN_CLASS | — | Yes |
 | 23 | DELAY_MEASURE | Yes | Yes |
@@ -82,12 +83,13 @@ Default maximum receive fragment: 2048 octets, configurable.
 | 26 | CLOSE_FILE | Yes | Yes |
 | 27 | DELETE_FILE | Yes | Yes |
 | 28 | GET_FILE_INFO | Yes | Yes |
-| 29 | AUTHENTICATE_FILE | **No** | **No** |
+| 29 | AUTHENTICATE_FILE | Yes; automatic with `FileCredentials` | `Files.Authenticate` handler; session-scoped keys |
 | 30 | ABORT_FILE | — | Yes |
-| 31 | ACTIVATE_CONFIG | **No** | **No** |
-| 32/33 | Authentication | **No** | **No** |
+| 31 | ACTIVATE_CONFIG | — | `Config.ActivateConfig` handler; g91v1 results |
+| 32/33 | Authentication | Symmetric key exchange and challenge replies | Symmetric key exchange, challenge verification and authentication errors |
 | 129 | RESPONSE | Receives | Sends |
 | 130 | UNSOLICITED_RESPONSE | Receives | Sends |
+| 131 | AUTHENTICATION_RESPONSE | Receives | Sends |
 
 An unknown function code is answered with `IIN2.NO_FUNC_CODE_SUPPORT`.
 
@@ -110,7 +112,7 @@ Of note:
 
 ### Event reads
 
-A read of an event group (g2, g4, g11, g13, g22, g23, g32, g42, g43, g111) returns the
+A read of an event group (g2, g4, g11, g13, g22, g23, g32, g33, g42, g43, g88, g111, g113, g122) returns the
 buffered events of that kind, whatever class they are in, in the variation named
 (variation 0 keeps each point's configured one). A count qualifier limits how many; the
 rest stay queued. A class read (g60 v2 to v4) takes a count the same way, and every event
@@ -143,17 +145,19 @@ Sizes and field layouts for all of these are generated from
 | 30–33 | see spec | Yes | Yes | Analog inputs, frozen, and their events |
 | 34 | 1, 2, 3 | Yes | Yes | Analog deadbands, writable by a master |
 | 40–43 | see spec | Yes | Yes | Analog outputs, commands and events; g43 command events are raised like g13, in the width of the command unless the point names one |
-| 50 | 1, 2, 3, 4 | Yes | Yes | Time and date |
+| 50 | 1, 2, 3, 4 | Yes | Yes | Current-time READ v1; clock writes v1/v3; indexed time-and-interval READ/WRITE v4 |
 | 51 | 1, 2 | Yes | Yes | Common time of occurrence |
 | 52 | 1, 2 | Yes | Yes | Time delay |
 | 60 | 1, 2, 3, 4 | Yes | Yes | Class data |
-| 80 | 1 | Yes | Yes | Internal indications |
+| 80 | 1 | Yes | Yes | Packed indication READ; restart indication WRITE |
 | 110, 111 | any length | Yes | Yes | Octet strings, static and event |
-| 112, 113 | — | Sizes only | — | Virtual terminal |
+| 112, 113 | any length | Yes | Yes | Terminal output callback, stored input, and confirmed input events |
 | 0 | any | Yes | Yes | Device attributes |
 | 70 | 2–8 | Yes | Yes | File transfer |
-| 85–87 | — | **No** | **No** | Datasets |
-| 120–121 | — | **No** | **No** | Secure Authentication v5 — use TLS |
+| 85–88 | v1; g86 v1–3 | Yes | Backend | Prototype/descriptor codecs, encoded storage, reads, writes, and confirmed value events; application resolves prototype-dependent values |
+| 90, 91 | 1 | Yes | Yes | Application identifiers and activation results |
+| 120 | 1–7, 9 framing | Yes | Yes | Symmetric SAv5 subset described below |
+| 121, 122 | g121v1; g122v1/v2 | Yes | Yes | Security statistic reads and threshold events |
 
 "Sizes only" means the framing layer can walk past the objects without
 misparsing the rest of the fragment, but no codec turns them into values.
@@ -181,6 +185,23 @@ misparsing the rest of the fragment, but no codec turns them into values.
 | Clock procedures accepted | Direct write (g50v1) and the recorded-time procedure (RECORD_CURRENT_TIME then a g50v3 write) |
 | Cold and warm restart | Yes, answered with a g52v2 time delay |
 
+Frozen analogs have independent storage and point configuration. Size
+`Database.FrozenAnalog`, configure `TypeFrozenAnalog`, and freeze running g30
+inputs with immediate, clear, or scheduled freezes. Reads route to g31 and
+events to g33, including class and unsolicited reporting. Counter and analog
+freeze targets may share a schedule.
+
+`Database.TimeAndInterval` sizes indexed g50v4 storage. READ g50v1 reports the
+current clock and READ g80v1 reports a packed range of current indications.
+`Database.VirtualTerminal` sizes terminal inputs; `TerminalWrite` consumes
+master output, and `UpdateVirtualTerminal` queues g113 input events, including
+successive identical input blocks.
+
+Application/configuration function codes 15–19 call `Management.Manage` with
+a copied object section. `ActivateConfig` receives configuration-file names
+from g70v8 and returns a g91v1 delay and status list. These operations require
+device-specific handlers; an absent handler reports `NO_FUNC_CODE_SUPPORT`.
+
 ### Default variations
 
 | Type | Static | Event |
@@ -191,6 +212,7 @@ misparsing the rest of the fragment, but no codec turns them into values.
 | Counter | g20v1 | g22v5 |
 | Frozen counter | g21v1 | g23v5 |
 | Analog input | g30v1 | g32v3 |
+| Frozen analog input | g31v1 | g33v3 |
 | Analog output status | g40v1 | g42v3 |
 
 **The analog defaults are 32-bit integers.** That is the widest lossless
@@ -243,14 +265,10 @@ Listed rather than left to be discovered:
   Refusing is deliberate: acting on half a control request is worse than not
   acting on it.
 
-- **Self-address** (0xFFFC) is not implemented, so a master cannot address an
-  outstation whose configured address it does not know.
-- **Device attributes** (group 0) are implemented for reading, in any set: a
-  master reads one attribute or all of them, and an outstation answers from
-  what the application configured plus the point counts and fragment sizes it
-  derives from its own database. The "list of attribute variations" request
-  (variation 255) is answered with the variations the set holds, none marked
-  writable. What is not implemented: writing an attribute.
+- **Device attributes** (group 0) support reads in any set and same-type writes
+  to attributes listed in `Config.WritableAttributes`. Variation 255 reports
+  the writable property. `Config.AttributeWrite` may persist or reject a write;
+  persistence across process restarts belongs to the application.
 
   Variation numbers, both those the outstation answers with and the names this
   library prints, follow IEEE 1815-2012's set 0 (the table Wireshark's DNP3
@@ -260,10 +278,12 @@ Listed rather than left to be discovered:
 - **File transfer** (group 70) is implemented for reading, writing, listing and
   deleting: `OPEN_FILE`, `CLOSE_FILE`, `DELETE_FILE`, `ABORT_FILE`,
   `GET_FILE_INFO`, and the `READ`/`WRITE` of group 70 variation 5 blocks.
-  Variations 2 through 8 all decode. What is not implemented: the
-  `AUTHENTICATE_FILE` exchange (variation 2 is encoded and decoded, but a
-  session never performs the handshake, so an outstation demanding one cannot
-  be talked to), and an outstation serves one transfer at a time. Blocks must
+  `AUTHENTICATE_FILE` validates credentials via `Files.Authenticate` and returns
+  a random key bound to the requesting link source, connection, and file timeout.
+  When authentication is configured, opens and deletes require that key. A master
+  configured with `FileCredentials` authenticates automatically before each open
+  and delete. File passwords need transport confidentiality; this handshake
+  does not encrypt them. An outstation serves one transfer at a time. Blocks must
   arrive in order — the outstation cannot rewind a stream, so a master that
   re-requests an earlier block is answered with `BLOCK_SEQUENCE`.
   `GET_FILE_INFO` follows this implementation's reading of the standard, with
@@ -275,8 +295,34 @@ Listed rather than left to be discovered:
   each type; a request naming a higher index is answered as naming no point
   (a command for one is refused with `NOT_SUPPORTED`) rather than wrapped onto
   one that exists.
-- **Datasets** (groups 85–87) are not implemented.
-- **Secure Authentication v5** is out of scope by design; use TLS.
+- **Datasets** (groups 85–88) have encoded object storage, prototype/descriptor
+  element codecs, range/all-object reads, write callbacks, class assignment,
+  and confirmed event snapshots. `Config.DatasetWrite` must validate and apply
+  prototype-dependent values and descriptor index mappings. Automatic prototype
+  expansion, typed dataset element controls, and backend persistence are not
+  provided. Master handlers may implement `master.DatasetHandler` to receive
+  complete encoded objects.
+- **Secure Authentication v5** implements a symmetric subset: locally provisioned
+  128/256-bit AES update keys, RFC 3394 session-key wrapping, SHA-256 HMAC with
+  16-byte MACs, critical-request challenge/reply, source binding, time/message
+  expiry, function authorization, and security statistic reads/events. Both
+  peers opt in using `Config.SecureAuthentication`. Aggressive mode, authenticated
+  unsolicited traffic, remote user/update-key management, other MAC algorithms,
+  and a complete certified SAv5 profile are not implemented. TLS is a separate
+  transport feature and does not substitute for DNP3 Secure Authentication.
+
+  Every request that changes state is critical and is challenged: writes,
+  selects and operates, restarts, application and configuration functions, file
+  operations, freezes (immediate, clear and at-time), `ASSIGN_CLASS`,
+  `INITIALIZE_DATA`, and the enable and disable of unsolicited reporting. Reads,
+  confirms and the delay measurement are not. The primitives are checked
+  against published test vectors (RFC 3394 wrapping across every key size,
+  RFC 4231 HMAC-SHA-256 truncated to 16 octets) and the exchange against
+  replay, expiry, wrong-MAC and wrong-request attacks. What has **not** been
+  checked, for want of the standard's text and any reference implementation, is
+  whether the MAC input (the whole challenge fragment followed by the original
+  request) and the object layouts match what another vendor's device expects;
+  until they have been, treat it as compatible with this library only.
 - The **TCP server** serves one master at a time.
 - **Analog output status points are not driven by analog output commands** in
   the library: a command reaches the `CommandHandler`, and it is the

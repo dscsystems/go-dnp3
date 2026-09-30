@@ -30,6 +30,8 @@ type Config struct {
 	RemoteAddr uint16
 	// IsMaster sets the direction bit and selects which side answers what.
 	IsMaster bool
+	// SelfAddress accepts the discovery destination for outstations only.
+	SelfAddress bool
 	// UseConfirms enables link-layer confirmation. Over TCP this is normally
 	// off, since the transport already guarantees ordered delivery; over
 	// serial it is normally on.
@@ -347,7 +349,17 @@ func (s *Stack) drain(w io.Writer, fn func(Received)) error {
 		// complete or advance an exchange it has nothing to do with, forged
 		// or merely misrouted from some other station on the line.
 		if f.Header.Src != s.dest {
-			continue
+			// The one exception is discovery. A request sent to the self
+			// address is answered from the station's own, so the first valid
+			// reply names it: the exchange carries on with that address from
+			// here, and anyone else's frame is refused as before. Without this
+			// a link-confirmed exchange with an unknown outstation could never
+			// be acknowledged, since the ACK comes from an address the primary
+			// was not sent to.
+			if s.dest != link.SelfAddress || !link.IsValidSource(f.Header.Src) {
+				continue
+			}
+			s.dest = f.Header.Src
 		}
 
 		next, action := s.pri.OnFrame(f)
@@ -385,7 +397,7 @@ func (s *Stack) deliver(f link.Frame, payload []byte, fn func(Received)) {
 
 // addressedToUs reports whether a frame is ours to process.
 func (s *Stack) addressedToUs(dest uint16) bool {
-	return dest == s.cfg.LocalAddr || link.IsBroadcast(dest)
+	return dest == s.cfg.LocalAddr || link.IsBroadcast(dest) || (s.cfg.SelfAddress && !s.cfg.IsMaster && dest == link.SelfAddress)
 }
 
 // write encodes a frame into buf and sends it.

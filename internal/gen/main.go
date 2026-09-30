@@ -125,8 +125,10 @@ func emitDescriptors(b *bytes.Buffer, s *Spec) {
 	b.WriteString("// variableGroups are genuinely variable-length. Their encodings carry an\n")
 	b.WriteString("// explicit size, so a parser walks them instead of looking them up.\n")
 	b.WriteString("var variableGroups = map[uint8]bool{\n")
+	seenVariable := map[uint8]bool{}
 	for _, o := range s.Objects {
-		if o.Variable {
+		if o.Variable && !seenVariable[o.Group] {
+			seenVariable[o.Group] = true
 			fmt.Fprintf(b, "\t%d: true, // %s\n", o.Group, o.Name)
 		}
 	}
@@ -174,8 +176,10 @@ var generatedSizes = map[uint16]int{
 
 	b.WriteString("// variableGroups have no fixed size; their encoding carries one.\n")
 	b.WriteString("var variableGroups = map[uint8]bool{\n")
+	seenVariable := map[uint8]bool{}
 	for _, o := range s.Objects {
-		if o.Variable {
+		if o.Variable && !seenVariable[o.Group] {
+			seenVariable[o.Group] = true
 			fmt.Fprintf(b, "\t%d: true, // %s\n", o.Group, o.Name)
 		}
 	}

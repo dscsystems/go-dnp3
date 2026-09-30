@@ -334,3 +334,52 @@ func TestFreezeStampsTheTimeOfTheFreeze(t *testing.T) {
 		t.Errorf("frozen counter time = %v, want the freeze time %v", v.Time.Time, at.Time)
 	}
 }
+
+func TestFreezeAnalogsCopiesRunningValuesWithTheFreezeTime(t *testing.T) {
+	events := NewEventBuffer(EventBufferConfig{})
+	db := NewDatabase(DatabaseConfig{Analog: 3, FrozenAnalog: 2, DefaultClass: dnp3.Class1}, events)
+	db.UpdateAnalog(0, dnp3.Analog{Value: 1.5, Flags: dnp3.Online})
+	db.UpdateAnalog(1, dnp3.Analog{Value: -7, Flags: dnp3.Online})
+	db.UpdateAnalog(2, dnp3.Analog{Value: 9, Flags: dnp3.Online}) // no frozen counterpart
+
+	before := time.Now()
+	db.FreezeAnalogs()
+
+	for i, want := range []float64{1.5, -7} {
+		v, _, ok := db.FrozenAnalog(uint16(i))
+		if !ok || v.Value != want {
+			t.Errorf("frozen[%d] = %v (exists %v), want %v", i, v.Value, ok, want)
+		}
+		if v.Time.Time.Before(before.Add(-time.Second)) || v.Time.Time.IsZero() {
+			t.Errorf("frozen[%d] carries time %v, want the moment of the freeze", i, v.Time.Time)
+		}
+	}
+	if _, _, ok := db.FrozenAnalog(2); ok {
+		t.Error("a frozen analog appeared beyond the configured count")
+	}
+	if v, _, _ := db.Analog(0); v.Value != 1.5 {
+		t.Errorf("freezing changed the running analog to %v", v.Value)
+	}
+}
+
+func TestUpdateFrozenAnalogStoresAndReportsAnEventOnChange(t *testing.T) {
+	events := NewEventBuffer(EventBufferConfig{})
+	db := NewDatabase(DatabaseConfig{FrozenAnalog: 1, DefaultClass: dnp3.Class2}, events)
+
+	db.UpdateFrozenAnalog(0, dnp3.Analog{Value: 4, Flags: dnp3.Online})
+	if v, _, _ := db.FrozenAnalog(0); v.Value != 4 {
+		t.Fatalf("frozen analog = %v, want 4", v.Value)
+	}
+	if got := events.Count(dnp3.Class2); got != 1 {
+		t.Errorf("%d class 2 events after the first update, want 1", got)
+	}
+
+	db.UpdateFrozenAnalog(0, dnp3.Analog{Value: 4, Flags: dnp3.Online}) // no change
+	if got := events.Total(); got != 1 {
+		t.Errorf("an unchanged value raised an event (%d in all)", got)
+	}
+	db.UpdateFrozenAnalog(5, dnp3.Analog{Value: 1}) // no such point: ignored
+	if got := events.Total(); got != 1 {
+		t.Errorf("an update past the last point raised an event (%d in all)", got)
+	}
+}
