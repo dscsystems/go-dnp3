@@ -239,7 +239,7 @@ func (d *Decoder) decodeValues(headers []app.ObjectHeader) [][]Value {
 
 	for i, h := range headers {
 		if h.Group == groupCTO && len(h.Data) >= objects.Time48Size {
-			ctx = ctx.WithCTO(objects.ParseTime48(h.Data).Time)
+			ctx = ctx.WithGroup51(objects.ParseTime48(h.Data).Time, h.Variation)
 			continue
 		}
 		if vals, ok := DecodeValues(h, ctx); ok {

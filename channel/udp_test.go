@@ -123,3 +123,84 @@ func setDeadline(t *testing.T, rw io.ReadWriteCloser, d time.Duration) {
 }
 
 var _ net.Addr = (*net.UDPAddr)(nil)
+
+func udpPair(t *testing.T) (server, client io.ReadWriteCloser) {
+	t.Helper()
+	sch := UDPChannel(UDPConfig{LocalAddr: "127.0.0.1:0"})
+	t.Cleanup(func() { _ = sch.Close() })
+	sc, err := sch.Connect(t.Context())
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	cch := UDPChannel(UDPConfig{LocalAddr: "127.0.0.1:0", RemoteAddr: ServerAddr(sch).String()})
+	t.Cleanup(func() { _ = cch.Close() })
+	cc, err := cch.Connect(t.Context())
+	if err != nil {
+		t.Fatalf("client bind: %v", err)
+	}
+	return sc, cc
+}
+
+// A datagram larger than the caller's buffer used to lose everything past it.
+// It is now handed out across as many Reads as it takes.
+func TestUDPDatagramLargerThanTheReadBufferIsDeliveredWhole(t *testing.T) {
+	sc, cc := udpPair(t)
+
+	msg := make([]byte, 1000)
+	for i := range msg {
+		msg[i] = byte(i)
+	}
+	if _, err := cc.Write(msg); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	setDeadline(t, sc, 3*time.Second)
+	var got []byte
+	buf := make([]byte, 292) // one link frame, as a session reads
+	for len(got) < len(msg) {
+		n, err := sc.Read(buf)
+		if err != nil {
+			t.Fatalf("read after %d octets: %v", len(got), err)
+		}
+		got = append(got, buf[:n]...)
+	}
+	if string(got) != string(msg) {
+		t.Errorf("the datagram came back altered (%d octets)", len(got))
+	}
+}
+
+// The frames of one message leave as one datagram, and a write outside a
+// message is still a datagram of its own.
+func TestUDPMessageFramesShareADatagram(t *testing.T) {
+	sc, cc := udpPair(t)
+
+	mw := cc.(interface {
+		BeginMessage()
+		EndMessage() error
+	})
+	mw.BeginMessage()
+	for _, part := range []string{"aaaa", "bbbb", "cccc"} {
+		if _, err := cc.Write([]byte(part)); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	if err := mw.EndMessage(); err != nil {
+		t.Fatalf("end message: %v", err)
+	}
+	if _, err := cc.Write([]byte("dd")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Read datagram by datagram with a buffer big enough to see each whole.
+	raw := sc.(*udpConn)
+	setDeadline(t, sc, 3*time.Second)
+	buf := make([]byte, 64)
+	n, err := raw.Read(buf)
+	if err != nil || string(buf[:n]) != "aaaabbbbcccc" {
+		t.Fatalf("first datagram = %q, %v; want the three frames together", buf[:n], err)
+	}
+	n, err = raw.Read(buf)
+	if err != nil || string(buf[:n]) != "dd" {
+		t.Fatalf("second datagram = %q, %v; want the write outside the message alone", buf[:n], err)
+	}
+}

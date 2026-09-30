@@ -779,7 +779,11 @@ func (s *Session) deliver(frag app.Fragment, unsolicited bool) {
 		// A group 51 object sets the base for the relative-time events that
 		// follow it in this fragment.
 		if h.Group == 51 && len(h.Data) >= objects.Time48Size {
-			ctx = ctx.WithCTO(objects.ParseTime48(h.Data).Time)
+			// The variation says whether the outstation's clock was
+			// synchronised when it took the base, which is what the relative
+			// events after it inherit — not the session's current idea of the
+			// outstation, which may have moved on since.
+			ctx = ctx.WithGroup51(objects.ParseTime48(h.Data).Time, h.Variation)
 			continue
 		}
 		s.dispatch(h, ctx)

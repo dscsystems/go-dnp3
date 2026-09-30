@@ -155,8 +155,30 @@ func (s *Stack) SendTo(w io.Writer, dest uint16, fragment []byte) error {
 	return s.pump(w)
 }
 
+// messageWriter is implemented by a writer for a transport that carries a
+// message as one unit, such as a UDP datagram. The stack brackets the frames
+// of what it sends between BeginMessage and EndMessage so they travel
+// together.
+type messageWriter interface {
+	BeginMessage()
+	EndMessage() error
+}
+
 // pump sends segments until one needs acknowledging or the fragment is done.
-func (s *Stack) pump(w io.Writer) error {
+// Everything one call sends is one message to a transport that has them.
+func (s *Stack) pump(w io.Writer) (err error) {
+	if mw, ok := w.(messageWriter); ok {
+		mw.BeginMessage()
+		defer func() {
+			if eerr := mw.EndMessage(); err == nil {
+				err = eerr
+			}
+		}()
+	}
+	return s.pumpFrames(w)
+}
+
+func (s *Stack) pumpFrames(w io.Writer) error {
 	for s.seg.Pending() {
 		if s.pri.DataFlowControl() {
 			// The peer's last reply said its buffers are full: what is left
