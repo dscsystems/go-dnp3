@@ -94,8 +94,8 @@ claim.
 
 ### Interoperability
 
-Verified in both directions against opendnp3, built
-from source in container:
+Verified in both directions against opendnp3 3.1.2, built from source (see
+[what was run and what it did not cover](docs/interop-results.md)):
 
 ```
 make interop-build   # clone and compile opendnp3 3.1.2
