@@ -21,6 +21,7 @@ package interop
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -318,10 +319,18 @@ func dockerAvailable() bool {
 	return err == nil && !strings.Contains(string(out), "Cannot connect")
 }
 
+// TestMain refuses to report success for a run that tested nothing. Returning
+// without calling m.Run made `make interop` exit 0 on a machine with no Docker,
+// which reads as a pass. Set INTEROP_ALLOW_SKIP=1 to skip instead.
 func TestMain(m *testing.M) {
 	if !dockerAvailable() {
-		fmt.Println("interop: docker is not available; skipping")
-		return
+		if os.Getenv("INTEROP_ALLOW_SKIP") != "" {
+			fmt.Println("interop: docker is not available; skipping")
+			return
+		}
+		fmt.Fprintln(os.Stderr, "interop: docker is not available, so nothing was tested "+
+			"(set INTEROP_ALLOW_SKIP=1 to skip instead)")
+		os.Exit(1)
 	}
-	m.Run()
+	os.Exit(m.Run())
 }

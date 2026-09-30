@@ -85,8 +85,8 @@ func (s *Session) onFreezeAtTime(frag app.Fragment) {
 			s.iin = s.iin.Set(app.IINParameterError)
 			return
 		}
-		missed := now.Sub(first)/interval + 1
-		next = first.Add(missed * interval)
+		periods := int64(now.Sub(first)/interval) + 1
+		next = first.Add(time.Duration(periods) * interval)
 	}
 
 	// The same freeze asked for twice is one freeze: the request is
@@ -134,7 +134,8 @@ func (s *Session) runFreezes(now time.Time) {
 		if f.interval <= 0 {
 			continue // one-shot: done
 		}
-		f.next = f.next.Add(f.interval * (now.Sub(f.next)/f.interval + 1))
+		periods := int64(now.Sub(f.next)/f.interval) + 1
+		f.next = f.next.Add(time.Duration(periods) * f.interval)
 		kept = append(kept, f)
 	}
 	s.freezes = kept

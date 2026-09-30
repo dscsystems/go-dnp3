@@ -201,7 +201,7 @@ func (h *DirFileHandler) List(name string) ([]dnp3.FileInfo, dnp3.FileStatus) {
 	if err != nil {
 		return nil, statusForError(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read-only: nothing to lose
 
 	entries, err := f.ReadDir(-1)
 	if err != nil {

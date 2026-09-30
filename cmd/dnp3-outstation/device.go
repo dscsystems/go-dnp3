@@ -181,7 +181,7 @@ func describeAttributes(attrs []dnp3.Attribute) string {
 	var b strings.Builder
 	b.WriteString("\n  Device attributes (group 0)\n")
 	for _, a := range attrs {
-		b.WriteString(fmt.Sprintf("    %3d  %-28s %s\n", a.Variation, a.Name(), a.Value()))
+		fmt.Fprintf(&b, "    %3d  %-28s %s\n", a.Variation, a.Name(), a.Value())
 	}
 	return b.String()
 }

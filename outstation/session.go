@@ -783,8 +783,10 @@ func timeWriteData(h app.ObjectHeader) ([]byte, bool) {
 func (s *Session) rejectMalformed(w io.Writer, r stack.Received, perr error) error {
 	hdr, _, herr := app.ParseHeader(r.Fragment)
 	if herr != nil || hdr.IsResponse() {
+		// Not answerable, so the failure is the indication and not an error to
+		// end the session with: the stream that carried it is still good.
 		s.iin = s.iin.Set(app.IINParameterError)
-		return nil
+		return nil //nolint:nilerr // deliberate: the malformed request is reported, not returned
 	}
 
 	switch {
@@ -1524,11 +1526,10 @@ func eventReadLimit(h app.ObjectHeader) (int, bool) {
 	if h.Qualifier.IndexPrefix() != app.PrefixNone {
 		return 0, false
 	}
-	switch {
-	case h.Range.Spec == app.RangeAllObjects:
+	switch h.Range.Spec {
+	case app.RangeAllObjects:
 		return math.MaxInt32, true
-	case h.Range.Spec == app.RangeCount8 || h.Range.Spec == app.RangeCount16 ||
-		h.Range.Spec == app.RangeCount32:
+	case app.RangeCount8, app.RangeCount16, app.RangeCount32:
 		return int(h.Range.Count), true
 	}
 	return 0, false

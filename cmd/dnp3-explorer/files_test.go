@@ -164,7 +164,7 @@ func TestFilesDeleteAsksFirst(t *testing.T) {
 
 	// Confirming does.
 	m = press(m, "D")
-	m, cmd = pressCmd(m, "y")
+	_, cmd = pressCmd(m, "y")
 	if cmd == nil {
 		t.Error("confirming the dialog issued nothing")
 	}
@@ -614,7 +614,7 @@ func TestFilesListsOnArrival(t *testing.T) {
 	// And it does not fetch again on every visit.
 	m.applyFiles(filesMsg{dir: "/", entries: []dnp3.FileInfo{file("a", 1)}})
 	m = press(m, "1")
-	m, cmd = pressCmd(m, "5")
+	_, cmd = pressCmd(m, "5")
 	if cmd != nil {
 		t.Error("coming back to the screen re-listed it")
 	}
