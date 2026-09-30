@@ -349,7 +349,17 @@ func (s *Stack) drain(w io.Writer, fn func(Received)) error {
 		// complete or advance an exchange it has nothing to do with, forged
 		// or merely misrouted from some other station on the line.
 		if f.Header.Src != s.dest {
-			continue
+			// The one exception is discovery. A request sent to the self
+			// address is answered from the station's own, so the first valid
+			// reply names it: the exchange carries on with that address from
+			// here, and anyone else's frame is refused as before. Without this
+			// a link-confirmed exchange with an unknown outstation could never
+			// be acknowledged, since the ACK comes from an address the primary
+			// was not sent to.
+			if s.dest != link.SelfAddress || !link.IsValidSource(f.Header.Src) {
+				continue
+			}
+			s.dest = f.Header.Src
 		}
 
 		next, action := s.pri.OnFrame(f)

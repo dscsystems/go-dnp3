@@ -55,7 +55,7 @@ func (s *Session) writeAttribute(h app.ObjectHeader) {
 }
 
 func (s *Session) readCurrentTime(b *responseBuilder, h app.ObjectHeader) {
-	if h.Range.Spec != app.RangeAllObjects && !(h.Range.Spec.IsCount() && h.Count() == 1 && h.Qualifier.IndexPrefix() == app.PrefixNone) {
+	if h.Range.Spec != app.RangeAllObjects && (!h.Range.Spec.IsCount() || h.Count() != 1 || h.Qualifier.IndexPrefix() != app.PrefixNone) {
 		s.iin = s.iin.Set(app.IINParameterError)
 		return
 	}
@@ -90,7 +90,7 @@ func (s *Session) readIIN(b *responseBuilder, h app.ObjectHeader) {
 // eachIndexedValue walks a data-bearing header, respecting index prefixes.
 func eachIndexedValue(h app.ObjectHeader, size int, fn func(uint32, []byte)) bool {
 	prefix := h.Qualifier.IndexPrefix().Octets()
-	if size <= 0 || (!h.Range.Spec.IsStartStop() && !(h.Range.Spec.IsCount() && h.Qualifier.IndexPrefix().IsIndex())) {
+	if size <= 0 || (!h.Range.Spec.IsStartStop() && (!h.Range.Spec.IsCount() || !h.Qualifier.IndexPrefix().IsIndex())) {
 		return false
 	}
 	if uint64(h.Count())*uint64(size+prefix) != uint64(len(h.Data)) {

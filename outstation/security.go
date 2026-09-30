@@ -93,9 +93,18 @@ func (s *Session) securityKeyTimeout() time.Duration {
 	return 15 * time.Minute
 }
 
-// criticalFunction includes every mandatory SAv5 critical request.
+// criticalFunction reports whether a request changes the device's state or
+// configuration and so needs authenticating. It is deliberately the whole set
+// of state-changing functions, not only the ones a reading of the standard
+// makes mandatory: a request that freezes or clears counters, or moves points
+// between event classes, is as much a change as a control, and leaving it open
+// leaves an unauthenticated peer able to disturb what an authenticated
+// operator sees. Only reads, confirms and the delay measurement stay open.
 func criticalFunction(f app.FuncCode) bool {
 	switch f {
+	case app.FuncImmedFreeze, app.FuncImmedFreezeNR, app.FuncFreezeClear, app.FuncFreezeClearNR,
+		app.FuncFreezeAtTime, app.FuncFreezeAtTimeNR, app.FuncAssignClass, app.FuncInitializeData:
+		return true
 	case app.FuncWrite, app.FuncSelect, app.FuncOperate, app.FuncDirectOperate, app.FuncDirectOperateNR,
 		app.FuncColdRestart, app.FuncWarmRestart, app.FuncInitializeAppl, app.FuncStartAppl, app.FuncStopAppl,
 		app.FuncSaveConfig, app.FuncEnableUnsolicited, app.FuncDisableUnsolicited, app.FuncRecordCurrentTime,

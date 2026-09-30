@@ -35,7 +35,7 @@ Updated for frozen analogs, extended services, and symmetric authentication.
 | Serial | Yes, via `go.bug.st/serial` |
 | Link addresses | Full 16-bit range |
 | Broadcast addresses | Received and executed; never answered |
-| Self-address (0xFFFC) | Opt-in outstation discovery via `Config.SelfAddress`; replies identify the configured address |
+| Self-address (0xFFFC) | Opt-in outstation discovery via `Config.SelfAddress`; replies identify the configured address. A master addressing it adopts the first valid replier, with or without link confirms |
 | Link confirmation | Yes, configurable, with retransmission |
 | Link status / keep-alive | Yes |
 | Frame size | 292 octets maximum, per the standard |
@@ -310,6 +310,19 @@ Listed rather than left to be discovered:
   unsolicited traffic, remote user/update-key management, other MAC algorithms,
   and a complete certified SAv5 profile are not implemented. TLS is a separate
   transport feature and does not substitute for DNP3 Secure Authentication.
+
+  Every request that changes state is critical and is challenged: writes,
+  selects and operates, restarts, application and configuration functions, file
+  operations, freezes (immediate, clear and at-time), `ASSIGN_CLASS`,
+  `INITIALIZE_DATA`, and the enable and disable of unsolicited reporting. Reads,
+  confirms and the delay measurement are not. The primitives are checked
+  against published test vectors (RFC 3394 wrapping across every key size,
+  RFC 4231 HMAC-SHA-256 truncated to 16 octets) and the exchange against
+  replay, expiry, wrong-MAC and wrong-request attacks. What has **not** been
+  checked, for want of the standard's text and any reference implementation, is
+  whether the MAC input (the whole challenge fragment followed by the original
+  request) and the object layouts match what another vendor's device expects;
+  until they have been, treat it as compatible with this library only.
 - The **TCP server** serves one master at a time.
 - **Analog output status points are not driven by analog output commands** in
   the library: a command reaches the `CommandHandler`, and it is the

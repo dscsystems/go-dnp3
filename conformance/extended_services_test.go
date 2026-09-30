@@ -161,3 +161,25 @@ func TestVirtualTerminalWriteAndEvent(t *testing.T) {
 		t.Fatal(r)
 	}
 }
+
+// A static read of a virtual terminal returns what it last held, in the
+// variation that is its length.
+func TestVirtualTerminalStaticReadReturnsTheLastInput(t *testing.T) {
+	h := newHarness(t, outstation.Config{Database: outstation.DatabaseConfig{VirtualTerminal: 2, DefaultClass: dnp3.ClassNone}}, nil)
+
+	if r := h.request(app.FuncRead, app.ReadRange(112, 0, 0, 1)); len(r.Objects) != 0 {
+		t.Fatalf("empty terminals returned %d objects", len(r.Objects))
+	}
+	h.out.Update(func(db *outstation.Database) { db.UpdateVirtualTerminal(1, []byte("hello")) })
+	waitFor(t, func() bool { return h.out.Database().Counts().VirtualTerminal == 2 })
+
+	var r app.Fragment
+	waitFor(t, func() bool {
+		r = h.request(app.FuncRead, app.ReadRange(112, 0, 0, 1))
+		return len(r.Objects) == 1
+	})
+	o := r.Objects[0]
+	if o.Variation != 5 || string(o.Data) != "hello" || o.Range.Start != 1 {
+		t.Errorf("terminal read = g112v%d at %d holding %q, want g112v5 at 1 holding hello", o.Variation, o.Range.Start, o.Data)
+	}
+}

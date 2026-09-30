@@ -520,3 +520,44 @@ func TestFileWriteShorterThanDeclaredFails(t *testing.T) {
 		t.Fatal("a write that delivered 100 of 1000 declared octets reported success")
 	}
 }
+
+// AuthenticateFile is the explicit form of the handshake a master otherwise
+// performs before each transfer: credentials go in, a key comes back.
+func TestAuthenticateFileReturnsAKeyOrRefuses(t *testing.T) {
+	dir := t.TempDir()
+	h, err := outstation.OpenDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+
+	m := filePair(t, outstation.FileConfig{Handler: h, MaxBlockSize: testBlockSize,
+		Authenticate: func(user, pass string) bool { return user == "operator" && pass == "secret" }})
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+
+	key, err := m.AuthenticateFile(ctx, "operator", "secret")
+	if err != nil || key == 0 {
+		t.Fatalf("right credentials: key %d, %v", key, err)
+	}
+	if key2, err := m.AuthenticateFile(ctx, "operator", "secret"); err != nil || key2 == 0 {
+		t.Errorf("authenticating again: key %d, %v", key2, err)
+	}
+
+	if key, err := m.AuthenticateFile(ctx, "operator", "wrong"); err == nil || key != 0 {
+		t.Errorf("wrong password: key %d, %v; want a refusal and no key", key, err)
+	}
+	if _, err := m.AuthenticateFile(ctx, "", ""); err == nil {
+		t.Error("empty credentials were accepted")
+	}
+}
+
+func TestAuthenticateFileAgainstAnOutstationWithoutItIsNotSupported(t *testing.T) {
+	m, _ := serving(t, nil) // no Authenticate handler
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+
+	if _, err := m.AuthenticateFile(ctx, "operator", "secret"); !errors.Is(err, dnp3.ErrNotSupported) {
+		t.Errorf("error = %v, want ErrNotSupported", err)
+	}
+}
