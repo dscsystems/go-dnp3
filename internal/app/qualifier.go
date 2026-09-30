@@ -32,6 +32,26 @@ func (q Qualifier) String() string {
 	return fmt.Sprintf("%#02x(%s,%s)", uint8(q), q.IndexPrefix(), q.RangeSpec())
 }
 
+// Consistent reports whether the prefix and range specifier are a combination
+// the standard uses. Each is valid alone, but they compose only in some ways:
+// an index prefix goes with a count, since a range already says which indexes
+// and a per-object index would contradict it; a size prefix goes with the
+// variable-format range and the variable-format range with nothing else.
+// Qualifiers like 0x10, 0x26 or 0x0B are the result of composing them freely.
+func (q Qualifier) Consistent() bool {
+	p, r := q.IndexPrefix(), q.RangeSpec()
+	switch {
+	case q.Reserved(), !p.Valid(), !r.Valid():
+		return false
+	case p.IsIndex():
+		return r == RangeCount8 || r == RangeCount16 || r == RangeCount32
+	case p.IsSize():
+		return r == RangeVariable
+	default:
+		return r != RangeVariable
+	}
+}
+
 // IndexPrefix says what precedes each object in the data field.
 type IndexPrefix uint8
 

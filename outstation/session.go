@@ -551,6 +551,35 @@ func (s *Session) handle(w io.Writer, r stack.Received) error {
 		return nil
 	}
 
+	// Two things a well-formed message never does, whatever it is asking for.
+	// A CONFIRM is a bare header: objects after it are not an acknowledgement
+	// of anything. And CON and UNS belong to responses — a request asks the
+	// outstation for nothing by setting them, so one that does is discarded
+	// unanswered rather than acted on as though it meant something else.
+	if frag.Header.Func == app.FuncConfirm && len(frag.Objects) > 0 {
+		s.bump(func(st *Stats) { st.MalformedRequests++ })
+		s.log.Warn("discarding a confirm that carries objects", "seq", frag.Header.Control.Seq)
+		return nil
+	}
+	if frag.Header.Func != app.FuncConfirm && (frag.Header.Control.Con || frag.Header.Control.Uns) {
+		s.bump(func(st *Stats) { st.MalformedRequests++ })
+		s.log.Warn("discarding a request with CON or UNS set",
+			"func", frag.Header.Func, "con", frag.Header.Control.Con, "uns", frag.Header.Control.Uns)
+		return nil
+	}
+
+	// A prefix and a range that do not go together — an index prefix on a
+	// start-stop range, say — are not a qualifier the standard defines, and
+	// which points they name is anyone's guess.
+	for _, h := range frag.Objects {
+		if !h.Qualifier.Consistent() {
+			s.bump(func(st *Stats) { st.MalformedRequests++ })
+			s.log.Warn("request carries an inconsistent qualifier",
+				"group", h.Group, "variation", h.Variation, "qualifier", h.Qualifier)
+			return s.rejectMalformed(w, r, fmt.Errorf("%w: %s", app.ErrBadQualifier, h.Qualifier))
+		}
+	}
+
 	// A confirm is an acknowledgement of our own response, not a request: it
 	// has its own sequence space and nothing to replay, so it is dispatched
 	// without going near the repeat-detection below.
