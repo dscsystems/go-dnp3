@@ -52,8 +52,9 @@ type DeviceYAML struct {
 	// report by accident.
 	Subset int `yaml:"subset"`
 
-	// Disabled stops the outstation reporting attributes at all, which is how
-	// a master's handling of a device without them gets tested.
+	// Disabled stops the outstation reporting attributes at all — the derived
+	// point counts and fragment sizes included — which is how a master's
+	// handling of a device without them gets tested.
 	Disabled bool `yaml:"disabled"`
 
 	// Extra carries attributes this section does not name, including a
@@ -173,7 +174,10 @@ func (e AttributeYAML) attribute() (dnp3.Attribute, error) {
 
 // describe renders the attributes for the startup banner, so whoever points a
 // master at this device can see what it will answer with.
-func describeAttributes(attrs []dnp3.Attribute) string {
+func describeAttributes(attrs []dnp3.Attribute, disabled bool) string {
+	if disabled {
+		return "  Device attributes: disabled — every group 0 request is refused\n"
+	}
 	if len(attrs) == 0 {
 		return "  Device attributes: none — the outstation reports only its point counts\n"
 	}

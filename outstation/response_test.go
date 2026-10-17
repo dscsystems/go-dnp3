@@ -148,22 +148,70 @@ func TestConfigureRejectsUnencodableEventVariation(t *testing.T) {
 	}
 }
 
-// Restart used to go through Update, whose fallback for a full queue runs the
+// Restart used to go through Update, whose fallback for a full queue ran the
 // closure on the caller's goroutine — and the closure wrote session state the
 // session goroutine reads unlocked. The session state now changes only when
 // the session goroutine applies the pending restart.
-func TestRestartWithFullQueueLeavesSessionStateAlone(t *testing.T) {
+func TestRestartLeavesSessionStateToTheSessionGoroutine(t *testing.T) {
 	s := New(Config{Database: DatabaseConfig{Binary: 1}}, nil, nil)
 	s.iin = s.iin.Clear(app.IINDeviceRestart)
-	for len(s.updates) < cap(s.updates) {
-		s.updates <- func(*Database) {}
-	}
 	s.Restart()
 	if s.iin.Has(app.IINDeviceRestart) {
 		t.Fatal("Restart changed session state off the session goroutine")
 	}
 	s.drainUpdates()
 	if !s.iin.Has(app.IINDeviceRestart) {
-		t.Error("the pending restart was not applied when the queue drained")
+		t.Error("the pending restart was not applied when the updates drained")
+	}
+}
+
+// Update used to queue 64 batches and run the 65th on the caller's goroutine,
+// where it overtook the queued ones and could interleave with a response being
+// built. Batches now apply in submission order however many are waiting, and
+// a batch submitted after serving stops runs only once the waiting ones have.
+func TestUpdateKeepsSubmissionOrder(t *testing.T) {
+	s := New(Config{Database: DatabaseConfig{Binary: 1}}, nil, nil)
+
+	var order []int
+	s.Update(func(*Database) { order = append(order, -1) })
+	if len(order) != 1 {
+		t.Fatal("with no connection being served, Update did not apply the batch before returning")
+	}
+
+	s.setServing(true)
+	for i := range 200 {
+		s.Update(func(*Database) { order = append(order, i) })
+	}
+	if len(order) != 1 {
+		t.Fatalf("%d batches ran off the session goroutine while it was serving", len(order)-1)
+	}
+	s.drainUpdates() // the session goroutine's turn: the first 200
+	for i := range 50 {
+		s.Update(func(*Database) { order = append(order, 200+i) })
+	}
+	s.setServing(false) // the rest are handed over in order
+	s.Update(func(*Database) { order = append(order, 250) })
+
+	for i, v := range order[1:] {
+		if v != i {
+			t.Fatalf("batch %d ran in position %d", v, i)
+		}
+	}
+	if len(order) != 252 {
+		t.Errorf("%d batches ran, want 252", len(order))
+	}
+}
+
+// A nil Application accepted a master's clock write and discarded it, so the
+// outstation cleared NEED_TIME and reported synchronized timestamps from a
+// clock nobody had set. The write now takes effect.
+func TestNilApplicationAppliesClockWrites(t *testing.T) {
+	s := New(Config{}, nil, nil)
+	want := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	if !s.appl.WriteAbsoluteTime(want) {
+		t.Fatal("the clock write was refused")
+	}
+	if got := s.appl.Now(); got.Sub(want).Abs() > time.Second {
+		t.Errorf("Now() = %v after setting %v", got, want)
 	}
 }

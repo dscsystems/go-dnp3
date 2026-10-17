@@ -182,3 +182,24 @@ func readHexFile(t *testing.T, path string) ([]byte, error) {
 	defer f.Close()
 	return readHex(f)
 }
+
+// A frame whose CRC does not check is skipped octet by octet to find the next
+// delimiter. Those skips used to go uncounted, so a corrupt frame followed by
+// a good one decoded with no errors and exited 0.
+func TestDecodeCountsACorruptFrame(t *testing.T) {
+	good := []byte{0x05, 0x64, 0x05, 0xC0, 0x0A, 0x00, 0x01, 0x00, 0xB1, 0xAC}
+	bad := append([]byte(nil), good...)
+	bad[9] ^= 0xFF // break the header CRC
+
+	var out strings.Builder
+	frames, errs := decode(&out, append(bad, good...), false, false)
+	if frames != 1 {
+		t.Errorf("decoded %d frames, want the 1 good one", frames)
+	}
+	if errs != 1 {
+		t.Errorf("%d errors, want 1 for the corrupt frame:\n%s", errs, out.String())
+	}
+	if !strings.Contains(out.String(), "skipped 10 octet(s)") {
+		t.Errorf("the output does not report the skipped octets:\n%s", out.String())
+	}
+}
