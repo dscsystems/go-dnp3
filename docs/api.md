@@ -1409,14 +1409,27 @@ func (s *Session) Stats() Stats
 any goroutine. They describe the device, not the protocol, so the library cannot
 know them; `Config.Indications` sets them from the start.
 
-A nil `Application` uses `NopApplication`. **A nil `CommandHandler` uses
+A nil `Application` uses `NopApplication`'s defaults with a clock a master can
+set: a clock write is kept as an offset from the host clock and `Now` includes
+it. `NopApplication` itself, for embedding, accepts a clock write and discards
+it, so an embedder that accepts writes must override `Now` and
+`WriteAbsoluteTime` together — accepting one tells the master the outstation is
+synchronized. **A nil `CommandHandler` uses
 `RejectingCommandHandler`, which refuses every control** — an outstation whose
 controls are not wired up must say so rather than silently report success.
 
-`Update` applies `fn` from the session goroutine and is safe to call from
-anywhere. Batching related changes in one call is what makes a breaker opening
-and its alarm asserting produce one consistent set of events rather than a torn
-read.
+`Update` applies `fn` as one batch and is safe to call from anywhere. Batching
+related changes in one call is what makes a breaker opening and its alarm
+asserting produce one consistent set of events rather than a torn read. Batches
+apply in the order they were submitted, however many are waiting, and never
+while a request is being answered.
+
+While a connection is being served, `fn` runs on the session goroutine between
+requests and `Update` returns without waiting; a request that arrives after it
+returns is answered with the batch applied. With no connection — before `Run`,
+while reconnecting, after it returns — `Update` applies `fn` itself before
+returning, so changes made before `Run` are in place when it starts. `fn` must
+not call `Update`.
 
 ```go
 out.Update(func(db *outstation.Database) {
@@ -1458,6 +1471,7 @@ type Config struct {
     Files FileConfig // see File transfer
 
     Attributes         []dnp3.Attribute       // see Device attributes
+    DisableAttributes  bool                   // answer group 0 like a device without attributes
     WritableAttributes []AttributeID          // attributes that accept same-type writes
     AttributeWrite     func(dnp3.Attribute) bool // may persist or reject a write
 
@@ -1554,9 +1568,12 @@ type UnsolicitedConfig struct {
 ```
 
 `Enabled` alone does not start unsolicited reporting: the master still has to
-enable the individual classes with ENABLE_UNSOLICITED. After `MaxRetries`
-unconfirmed re-sends the outstation gives up and waits for the master to poll
-instead.
+enable the individual classes with ENABLE_UNSOLICITED. An unconfirmed response
+is re-sent unchanged up to `MaxRetries` times, one `ConfirmTimeout` apart. Then
+its events go back in the queue for a poll to collect, and after one more
+`ConfirmTimeout` the outstation starts again with a fresh response — so on a
+dead link it sends `MaxRetries + 1` responses every `(MaxRetries + 2) ×
+ConfirmTimeout` while events are pending.
 
 ## Database
 
@@ -1753,6 +1770,10 @@ A write to an attribute in `Config.WritableAttributes` is accepted when the
 value has the same type as the configured one, and `Config.AttributeWrite`, if
 set, may persist or reject it. Every other attribute is read-only.
 
+`Config.DisableAttributes` turns group 0 off: every read and write of it is
+refused with OBJECT_UNKNOWN, configured and derived attributes alike, which is
+what a master sees from a device that does not implement attributes.
+
 ## File transfer
 
 ```go
@@ -1825,7 +1846,7 @@ type Application interface {
     SupportsWriteTime() bool            // whether clock writes are accepted at all
 }
 
-type NopApplication struct{} // usable defaults for every method
+type NopApplication struct{} // defaults for embedding; WriteAbsoluteTime accepts and discards
 ```
 
 The returned restart duration is reported back to the master in a group 52 time

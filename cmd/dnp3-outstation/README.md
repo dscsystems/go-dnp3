@@ -245,7 +245,9 @@ device:
     - {set: 1, variation: 210, type: string, value: "private"}
 ```
 
-`-no-attributes` reports none, which is the other case a master needs to have
+`-no-attributes` turns group 0 off: every attribute read is refused with
+OBJECT_UNKNOWN, the derived point counts and fragment sizes included, which is
+what a device without attributes does and the other case a master needs to have
 met.
 
 ## File transfer

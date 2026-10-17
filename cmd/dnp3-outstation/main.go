@@ -166,7 +166,7 @@ func run() error {
 	fmt.Print(sim.Describe())
 	fmt.Printf("\nOutstation %d listening for master %d on %s\n",
 		cfg.Address, cfg.Master, description)
-	fmt.Print(describeAttributes(cfg.attributes))
+	fmt.Print(describeAttributes(cfg.attributes, cfg.Device.Disabled))
 	fmt.Printf("File transfer: %s\n", servingFiles)
 	if m, ok := files.Handler.(*memFiles); ok {
 		fmt.Print(m.Describe())

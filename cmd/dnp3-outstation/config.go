@@ -274,8 +274,9 @@ func (c *Config) outstationConfig() outstation.Config {
 			AnalogOutputStatus: c.Points.AnalogOutputStatus,
 			DefaultClass:       dnp3.Class1,
 		},
-		Events:     outstation.EventBufferConfig{MaxEvents: c.MaxEvents},
-		Attributes: c.attributes,
+		Events:            outstation.EventBufferConfig{MaxEvents: c.MaxEvents},
+		Attributes:        c.attributes,
+		DisableAttributes: c.Device.Disabled,
 		Unsolicited: outstation.UnsolicitedConfig{
 			Enabled:   c.Unsolicited.Enabled,
 			HoldTime:  c.Unsolicited.HoldTime,

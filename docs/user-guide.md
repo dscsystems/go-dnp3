@@ -208,17 +208,26 @@ h := master.NewChannelHandler(1024)
 m := master.New(cfg, h)
 go func() { _ = m.Run(ctx, ch) }()
 
-for u := range h.Updates() {
-	switch u.Type {
-	case dnp3.TypeBinary:
-		save(u.Index, u.Binary.Value, u.Binary.Time)
-	case dnp3.TypeAnalog:
-		save(u.Index, u.Analog.Value, u.Analog.Time)
-	case dnp3.TypeCounter:
-		save(u.Index, u.Counter.Value, u.Counter.Time)
+for {
+	select {
+	case <-ctx.Done():
+		return
+	case u := <-h.Updates():
+		switch u.Type {
+		case dnp3.TypeBinary:
+			save(u.Index, u.Binary.Value, u.Binary.Time)
+		case dnp3.TypeAnalog:
+			save(u.Index, u.Analog.Value, u.Analog.Time)
+		case dnp3.TypeCounter:
+			save(u.Index, u.Counter.Value, u.Counter.Time)
+		}
 	}
 }
 ```
+
+The updates channel is never closed — the handler may serve another `Run`
+after this one ends — so `for range h.Updates()` would wait forever once the
+session stops. Stop on the same context that stops the session.
 
 The session never blocks on this channel. When the consumer falls behind,
 updates are **dropped** and counted — a stalled UI must not stall the protocol.
@@ -286,6 +295,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"time"
 
 	"github.com/dscsystems/go-dnp3"
@@ -346,15 +356,33 @@ func (c *commands) OperateAnalog(index uint16, v outstation.AnalogOutput, op out
 
 // app supplies the clock and the restart behaviour. Embedding NopApplication
 // gives working defaults for anything we leave out.
+//
+// Accepting a clock write tells the master the outstation is now synchronized,
+// so the write has to take effect: here it is kept as an offset from the host
+// clock, which an outstation process should not be changing.
 type app struct {
 	outstation.NopApplication
+
+	mu     sync.Mutex
+	offset time.Duration
 }
 
-func (app) Now() time.Time                     { return time.Now() }
-func (app) SupportsWriteTime() bool            { return true }
-func (app) WriteAbsoluteTime(t time.Time) bool { return true } // accept the master's clock
-func (app) ColdRestart() time.Duration         { return 30 * time.Second }
-func (app) WarmRestart() time.Duration         { return 2 * time.Second }
+func (a *app) Now() time.Time {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return time.Now().Add(a.offset)
+}
+
+func (a *app) WriteAbsoluteTime(t time.Time) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.offset = time.Until(t)
+	return true
+}
+
+func (*app) SupportsWriteTime() bool    { return true }
+func (*app) ColdRestart() time.Duration { return 30 * time.Second }
+func (*app) WarmRestart() time.Duration { return 2 * time.Second }
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -383,7 +411,7 @@ func main() {
 			HoldTime:  200 * time.Millisecond, // coalesce a burst into one response
 			MaxEvents: 20,
 		},
-	}, app{}, cmds)
+	}, &app{}, cmds)
 	cmds.sess = out // the handler needs the session to write back
 
 	// Point configuration, before Run: analog 0 carries fractions, so give it
@@ -421,12 +449,14 @@ func main() {
 ### The rules that matter
 
 **Update from `Session.Update`, not from `Database()` directly.** The database is
-accessed under a lock, so a stray call will not corrupt it, but `Update` runs
-your function on the session goroutine, which serialises it against the
-protocol and keeps related changes together. Touching `Database()` directly is
-fine *before* `Run` starts — that is where point configuration belongs — but
-afterwards a change made outside `Update` can be reported as a torn set of
-events.
+accessed under a lock, so a stray call will not corrupt it, but `Update` applies
+your function as one batch — on the session goroutine, between requests, while
+a master is connected — in the order the batches were submitted. That
+serialises it against the protocol and keeps related changes together. Touching
+`Database()` directly is fine *before* `Run` starts — that is where point
+configuration belongs — but afterwards a change made outside `Update` can be
+reported as a torn set of events. Do not call `Update` from inside an `Update`
+function.
 
 **Batch related changes into one `Update`.** A breaker opening and its alarm
 asserting should be one call, so they become one consistent set of events rather
@@ -732,10 +762,18 @@ _ = m.DisableUnsolicited(ctx, dnp3.Class123)
 ```
 
 Setting `HoldTime` to zero sends as soon as an event appears, which turns a
-100-point plant trip into 100 responses. After `MaxRetries` unconfirmed re-sends
-the outstation gives up and waits to be polled — so **keep polling even when you
-use unsolicited reporting**. Unsolicited is an optimisation, not a substitute
-for a poll schedule.
+100-point plant trip into 100 responses.
+
+An unconfirmed response is re-sent unchanged after each `ConfirmTimeout`, up to
+`MaxRetries` times. Once those run out the outstation puts the events back in
+the queue, where the next poll collects them, waits one more `ConfirmTimeout`,
+and then starts again with a fresh response carrying whatever is queued. It
+never stops for good: against a master that has gone away, expect
+`MaxRetries + 1` transmissions every `(MaxRetries + 2) × ConfirmTimeout` while
+events are pending — with the defaults, four every 25 seconds. **Keep polling
+even when you use unsolicited reporting**: until a response is confirmed, a poll
+is the only way the events are guaranteed to arrive. Unsolicited is an
+optimisation, not a substitute for a poll schedule.
 
 ---
 
@@ -909,6 +947,9 @@ A write to group 0 is accepted for an attribute listed in
 `Config.WritableAttributes`, provided the value has the same type as the one
 configured; `Config.AttributeWrite`, if set, may persist or reject it. Every
 other attribute is read-only.
+
+`Config.DisableAttributes` makes the outstation a device without attributes:
+group 0 is refused with OBJECT_UNKNOWN, the derived counts included.
 
 ---
 

@@ -37,8 +37,12 @@ dnp3-decode [flags] -f FILE
 Input comes from the arguments, from `-f FILE`, or from standard input when the
 only argument is `-`.
 
-Exit status is `0` when everything decoded, `2` when any frame failed, and `1`
-for a usage error.
+Exit status is `0` when everything decoded, `2` when anything did not, and `1`
+for a usage error. "Did not decode" covers a frame whose application layer is
+malformed, octets skipped because they form no valid frame — a frame with a bad
+CRC is skipped this way, and the output says how many octets went — and a
+truncated frame at the end of the input. With `-s`, octets or transport segments
+the stream parser discarded count too.
 
 ## Reading input
 

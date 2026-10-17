@@ -103,18 +103,38 @@ func decode(out *strings.Builder, data []byte, showHex, stream bool) (frames, er
 
 	// Frame-at-a-time mode: each frame is decoded independently, which is what
 	// you want when pasting frames captured out of context.
+	//
+	// Octets skipped to resynchronise are a failure too — a frame whose CRC
+	// does not check is skipped this way — so each run of them is reported and
+	// counted. Passing over them silently would let a capture with a corrupt
+	// frame followed by a good one exit as though everything had decoded.
+	var skipped int
+	var skipErr error
+	flushSkipped := func() {
+		if skipped > 0 {
+			fmt.Fprintf(out, "-- skipped %d octet(s) that do not form a valid frame: %v\n\n", skipped, skipErr)
+			errs++
+			skipped, skipErr = 0, nil
+		}
+	}
 	for off := 0; off < len(data); {
 		t, n, err := decoder.DecodeFrame(nil, data[off:])
 		if err != nil {
 			if errors.Is(err, link.ErrShortFrame) {
+				flushSkipped()
 				fmt.Fprintf(out, "-- %d trailing octet(s) do not form a complete frame\n", len(data)-off)
 				return frames, errs + 1
 			}
 			// Not a frame at this offset. Skip an octet and look for the next
 			// delimiter, the same way the streaming parser resynchronises.
+			if skipped == 0 {
+				skipErr = err
+			}
+			skipped++
 			off++
 			continue
 		}
+		flushSkipped()
 		frames++
 		if t.App != nil && t.App.Err != nil {
 			errs++
@@ -123,6 +143,7 @@ func decode(out *strings.Builder, data []byte, showHex, stream bool) (frames, er
 		out.WriteByte('\n')
 		off += n
 	}
+	flushSkipped()
 	return frames, errs
 }
 

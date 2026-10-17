@@ -101,10 +101,18 @@ func (c *commands) OperateCROB(i uint16, crob dnp3.ControlRelayOutputBlock, op o
 func (c *commands) SelectAnalog(i uint16, v outstation.AnalogOutput) dnp3.CommandStatus { … }
 func (c *commands) OperateAnalog(i uint16, v outstation.AnalogOutput, op outstation.OperateType) dnp3.CommandStatus { … }
 
-type app struct{ outstation.NopApplication }
-func (app) Now() time.Time                     { return time.Now() }
-func (app) SupportsWriteTime() bool            { return true }
-func (app) WriteAbsoluteTime(t time.Time) bool { return true }
+// Accepting a clock write marks the outstation synchronized and clears
+// NEED_TIME, so the time must take effect. Keep it as an offset; never return
+// true without applying it.
+type app struct {
+	outstation.NopApplication
+	mu     sync.Mutex
+	offset time.Duration
+}
+func (a *app) Now() time.Time { a.mu.Lock(); defer a.mu.Unlock(); return time.Now().Add(a.offset) }
+func (a *app) WriteAbsoluteTime(t time.Time) bool {
+	a.mu.Lock(); defer a.mu.Unlock(); a.offset = time.Until(t); return true
+}
 
 cmds := &commands{}
 out := outstation.New(outstation.Config{
@@ -115,7 +123,7 @@ out := outstation.New(outstation.Config{
 	},
 	Events: outstation.EventBufferConfig{MaxEvents: 5000},
 	Unsolicited: outstation.UnsolicitedConfig{Enabled: true, HoldTime: 200 * time.Millisecond, MaxEvents: 20},
-}, app{}, cmds)
+}, &app{}, cmds)
 cmds.sess = out
 
 go func() { _ = out.Run(ctx, channel.TCPServer(":20000")) }()
@@ -441,7 +449,8 @@ the spec.
   makes the picture correct again (`IntegrityOnStartup: true` does this
   automatically).
 - **Keep polling even with unsolicited enabled** — after `MaxRetries`
-  unconfirmed re-sends, the outstation gives up and waits to be polled.
+  unconfirmed re-sends the outstation requeues the events and pauses one
+  `ConfirmTimeout` before trying again; a poll is what guarantees delivery.
 - **Nothing here is a certified conformance claim.** Point users at
   [`docs/device-profile.md`](docs/device-profile.md), including its known-gaps
   section, before they rely on a feature in the field.

@@ -208,3 +208,49 @@ func TestUnsolicitedSequenceAdvancesAfterGivingUp(t *testing.T) {
 			first.Header.Control.Seq)
 	}
 }
+
+// What happens when the retries run out, as the guide describes it: the events
+// go back in the queue, the outstation waits one more confirm timeout, and then
+// starts again with a fresh response — a new sequence number, the same events.
+// It does not stop until a poll. That makes the traffic on a dead link
+// MaxRetries+1 responses every (MaxRetries+2) confirm timeouts.
+func TestUnsolicitedStartsAgainAfterTheRetriesRunOut(t *testing.T) {
+	const confirmTimeout = 150 * time.Millisecond
+	h := newHarness(t, outstation.Config{
+		Database: smallDB(),
+		Unsolicited: outstation.UnsolicitedConfig{
+			Enabled:        true,
+			ConfirmTimeout: confirmTimeout,
+			MaxRetries:     1,
+		},
+	}, nil)
+
+	null := h.await(0)
+	sendUnsolConfirm(h, null.Header.Control.Seq)
+	enableUnsolicited(h)
+
+	before := h.count()
+	h.out.Update(func(db *outstation.Database) {
+		db.UpdateBinary(0, dnp3.Binary{Value: true, Flags: dnp3.Online})
+	})
+	original := h.await(before)
+	retry := h.await(before + 1)
+	retried := time.Now()
+	fresh := h.await(before + 2)
+	gap := time.Since(retried)
+
+	if retry.Header.Control.Seq != original.Header.Control.Seq {
+		t.Fatalf("the retry changed sequence %d → %d",
+			original.Header.Control.Seq, retry.Header.Control.Seq)
+	}
+	if fresh.Header.Control.Seq == original.Header.Control.Seq {
+		t.Error("after the retries ran out, the next response reused the old sequence number")
+	}
+	if len(fresh.Objects) == 0 {
+		t.Error("the fresh response does not carry the requeued event")
+	}
+	// The retry's own timeout, then the pause: two confirm timeouts.
+	if gap < confirmTimeout*3/2 {
+		t.Errorf("the fresh response came %v after the retry; want about %v", gap, 2*confirmTimeout)
+	}
+}

@@ -289,3 +289,42 @@ func TestAttributesDoNotBreakPolling(t *testing.T) {
 		t.Fatalf("attributes after a poll: %v", err)
 	}
 }
+
+// DisableAttributes is a device without group 0. The derived point counts used
+// to be reported regardless, so a simulator asked to have no attributes still
+// answered with some, and a master's handling of the real case went untested.
+func TestDisabledAttributesAreNotSupported(t *testing.T) {
+	mch, och := channel.Pipe()
+	out := outstation.New(outstation.Config{
+		LocalAddr: 10, RemoteAddr: 1,
+		Database:          outstation.DatabaseConfig{Binary: 6, Analog: 3},
+		Attributes:        []dnp3.Attribute{objects.StringAttribute(250, "RTU")},
+		DisableAttributes: true,
+	}, nil, nil)
+	m := master.New(master.Config{
+		LocalAddr: 1, RemoteAddr: 10, ResponseTimeout: 2 * time.Second,
+	}, nil)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _ = out.Run(ctx, och) }()
+	go func() { defer wg.Done(); _ = m.Run(ctx, mch) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = mch.Close()
+		_ = och.Close()
+		wg.Wait()
+	})
+	waitFor(t, 3*time.Second, func() bool { return m.Connected() })
+
+	rctx, rcancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer rcancel()
+	attrs, err := m.ReadAttributes(rctx)
+	if !errors.Is(err, dnp3.ErrNotSupported) {
+		t.Errorf("ReadAttributes = %d attributes, err %v; want dnp3.ErrNotSupported", len(attrs), err)
+	}
+	if _, err := m.ReadAttribute(rctx, dnp3.AttrSetStandard, outstation.AttrBinaryInputCount); !errors.Is(err, dnp3.ErrNotSupported) {
+		t.Errorf("reading the derived binary input count: %v, want dnp3.ErrNotSupported", err)
+	}
+}

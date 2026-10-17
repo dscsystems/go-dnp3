@@ -38,6 +38,9 @@ type attributeStore map[attributeKey]dnp3.Attribute
 // should report that rather than anything this package inferred.
 func buildAttributes(cfg Config) attributeStore {
 	store := attributeStore{}
+	if cfg.DisableAttributes {
+		return store
+	}
 
 	for _, a := range derivedAttributes(cfg) {
 		store[attributeKey{a.Set, a.Variation}] = a

@@ -56,6 +56,12 @@ type Config struct {
 	// entry here overrides a derived one.
 	Attributes []dnp3.Attribute
 
+	// DisableAttributes answers group 0 the way a device without device
+	// attributes does: every read and write is refused with OBJECT_UNKNOWN.
+	// Attributes, and the point counts and fragment sizes otherwise derived
+	// from this configuration, are not reported.
+	DisableAttributes bool
+
 	// WritableAttributes lists attributes that accept same-type writes.
 	WritableAttributes []AttributeID
 	// AttributeWrite may reject or persist an attribute before it is stored.
@@ -137,7 +143,14 @@ type Application interface {
 	SupportsWriteTime() bool
 }
 
-// NopApplication is an Application with sensible defaults.
+// NopApplication is an Application with sensible defaults, for embedding.
+//
+// Its WriteAbsoluteTime accepts a master's clock write and discards it, and its
+// Now is the host clock. An embedder that accepts clock writes has to override
+// the two together: accepting a write tells the master the outstation is now
+// synchronized, clearing NEED_TIME, so a time that is never applied leaves the
+// device reporting synchronized timestamps from a clock nobody set. A nil
+// Application passed to [New] does apply the writes.
 type NopApplication struct{}
 
 func (NopApplication) Now() time.Time                   { return time.Now() }
@@ -145,6 +158,29 @@ func (NopApplication) WriteAbsoluteTime(time.Time) bool { return true }
 func (NopApplication) ColdRestart() time.Duration       { return 0 }
 func (NopApplication) WarmRestart() time.Duration       { return 0 }
 func (NopApplication) SupportsWriteTime() bool          { return true }
+
+// offsetClock is the Application a nil one becomes: NopApplication's defaults,
+// with a clock a master can set. A write is kept as an offset from the host
+// clock rather than applied to it, which a library has no business changing.
+type offsetClock struct {
+	NopApplication
+
+	mu     sync.Mutex
+	offset time.Duration
+}
+
+func (c *offsetClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return time.Now().Add(c.offset)
+}
+
+func (c *offsetClock) WriteAbsoluteTime(t time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.offset = time.Until(t)
+	return true
+}
 
 // Indication is a device-controlled internal indication: one the library
 // cannot know for itself, because it depends on the device rather than on the
@@ -290,7 +326,17 @@ type Session struct {
 	// delay before setting the clock.
 	recordedTime time.Time
 
-	updates chan func(*Database)
+	// updates holds the batches submitted through [Session.Update] while the
+	// session is serving a connection, in submission order, and wake tells
+	// the session goroutine there is something to apply. serving says whether
+	// that goroutine is there to apply them; when it is not, Update applies a
+	// batch itself. All three are guarded by updateMu, which is also held
+	// while a batch is applied off the session goroutine, so batches can
+	// never overtake one another.
+	updateMu sync.Mutex
+	updates  []func(*Database)
+	serving  bool
+	wake     chan struct{}
 	// restartPending carries a [Session.Restart] to the session goroutine,
 	// which owns the state a restart resets. It is a flag rather than a
 	// queued closure so the request survives a full queue and a session that
@@ -342,7 +388,7 @@ type Stats struct {
 func New(cfg Config, appl Application, cmds CommandHandler) *Session {
 	cfg.applyDefaults()
 	if appl == nil {
-		appl = NopApplication{}
+		appl = &offsetClock{}
 	}
 	if cmds == nil {
 		cmds = RejectingCommandHandler{}
@@ -359,8 +405,8 @@ func New(cfg Config, appl Application, cmds CommandHandler) *Session {
 		// A fresh outstation reports a restart until the master clears it.
 		// Suppressing that would deny the master the one signal that says
 		// "my event history is gone, re-poll everything".
-		iin:     app.IINDeviceRestart,
-		updates: make(chan func(*Database), 64),
+		iin:  app.IINDeviceRestart,
+		wake: make(chan struct{}, 1),
 	}
 	for _, v := range cfg.Datasets {
 		if err := s.db.UpdateDataset(v, dnp3.ClassNone); err != nil {
@@ -383,10 +429,15 @@ func (s *Session) Restart() {
 	s.restartPending.Store(true)
 	// The event buffer takes its own lock, so the history can go now.
 	s.db.events.Reset()
-	// Wake the session goroutine to apply the rest. If the queue is full it
-	// is already awake and will see the flag at its next update or request.
+	// Wake the session goroutine to apply the rest. If no connection is being
+	// served, the next one applies it before saying anything.
+	s.notify()
+}
+
+// notify wakes the session goroutine, if it is not already due to wake.
+func (s *Session) notify() {
 	select {
-	case s.updates <- func(*Database) {}:
+	case s.wake <- struct{}{}:
 	default:
 	}
 }
@@ -416,34 +467,58 @@ func (s *Session) Stats() Stats {
 	return s.stats
 }
 
-// Update applies fn to the database from the session goroutine.
+// Update applies fn to the database as one batch.
 //
 // Batching changes in one call is what makes a set of related updates — a
 // breaker opening and its alarm asserting — produce one consistent set of
-// events rather than a torn read.
+// events rather than a torn read. Batches are applied in the order they were
+// submitted, and none is ever applied while a request is being answered.
+//
+// While a connection is being served, fn runs on the session goroutine,
+// between requests, and Update returns without waiting for it; a request that
+// arrives after Update returns is answered with the batch applied. With no
+// connection — before Run, while reconnecting, after it returns — there is no
+// protocol for a batch to interleave with, so Update applies fn itself before
+// returning, and changes made before Run are in place when it starts.
+//
+// fn must not call Update: off the session goroutine that would deadlock.
 func (s *Session) Update(fn func(*Database)) {
-	select {
-	case s.updates <- fn:
-	default:
-		// The queue is full, which means the session is not running or is
-		// wedged. Apply directly rather than dropping the update: the
-		// database takes its own lock. That makes this path safe for fn
-		// touching the database and nothing else, which is all Update
-		// promises; session state goes through the session goroutine.
+	s.updateMu.Lock()
+	if s.serving {
+		s.updates = append(s.updates, fn)
+		s.updateMu.Unlock()
+		s.notify()
+		return
+	}
+	defer s.updateMu.Unlock()
+	fn(s.db)
+}
+
+// drainUpdates applies every update already submitted, in order, without
+// waiting for more. It runs on the session goroutine.
+func (s *Session) drainUpdates() {
+	defer s.applyRestart()
+	s.updateMu.Lock()
+	batch := s.updates
+	s.updates = nil
+	s.updateMu.Unlock()
+	for _, fn := range batch {
 		fn(s.db)
 	}
 }
 
-// drainUpdates applies every update already queued, without waiting for more.
-func (s *Session) drainUpdates() {
-	defer s.applyRestart()
-	for {
-		select {
-		case fn := <-s.updates:
+// setServing records whether the session goroutine is serving a connection,
+// and so whether it or Update applies the next batch. Updates still queued
+// when serving stops are applied before Update can apply a later one itself.
+func (s *Session) setServing(on bool) {
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
+	s.serving = on
+	if !on {
+		for _, fn := range s.updates {
 			fn(s.db)
-		default:
-			return
 		}
+		s.updates = nil
 	}
 }
 
@@ -509,7 +584,9 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 	s.lastReqValid = false
 	s.unsol.reset()
 	s.applyRestart()
+	s.setServing(true)
 	defer func() {
+		s.setServing(false)
 		s.connected = false
 		// A transfer belongs to the connection it started on: the master that
 		// opened it cannot come back to the same handle, and holding the file
@@ -546,9 +623,8 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 			}
 			return
 
-		case fn := <-s.updates:
-			fn(s.db)
-			s.applyRestart()
+		case <-s.wake:
+			s.drainUpdates()
 
 		case data := <-rx:
 			// Updates the application submitted before this request arrived

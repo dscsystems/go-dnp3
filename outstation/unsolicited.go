@@ -187,14 +187,16 @@ func (s *Session) onUnsolicitedTimeout(w io.Writer, now time.Time) error {
 
 	if s.unsol.retries > s.cfg.Unsolicited.MaxRetries {
 		// Only now do the events go back in the queue, for the master's next
-		// poll to collect: losing them because unsolicited delivery failed
+		// poll — or the next unsolicited response, one confirm timeout from
+		// now — to collect: losing them because unsolicited delivery failed
 		// would defeat the point of the confirmation. Returning them any
 		// earlier, while a retry still owes them, would let the retry sweep
 		// up whatever else has arrived since and send the lot under the
 		// original sequence number.
 		requeued := s.db.events.Unselect()
-		s.log.Warn("giving up on unsolicited reporting until the master polls",
-			"retries", s.unsol.retries, "events_requeued", requeued)
+		s.log.Warn("unsolicited response never confirmed; events requeued, pausing before the next",
+			"retries", s.unsol.retries, "events_requeued", requeued,
+			"pause", s.cfg.Unsolicited.ConfirmTimeout)
 		s.unsol.retries = 0
 		s.unsol.lastFrag = nil
 		s.unsol.nextAllowed = now.Add(s.cfg.Unsolicited.ConfirmTimeout)
