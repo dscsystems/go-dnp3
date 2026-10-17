@@ -108,6 +108,11 @@ func objectDataLen(sizer ObjectSizer, h ObjectHeader, buf []byte, carriesData bo
 	if prefix.IsSize() && h.Range.Count > 0 && h.Variation != 0 {
 		return walkSizePrefixed(prefix.Octets(), h.Range.Count, buf)
 	}
+	// Variation zero carries no objects, so it has nothing for a size prefix to
+	// describe. Accepting it would leave a count nothing was checked against.
+	if prefix.IsSize() && h.Range.Count > 0 {
+		return 0, ErrBadQualifier
+	}
 
 	if !carriesData {
 		// No object data follows, but a list of point indexes may. A request

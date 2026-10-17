@@ -124,7 +124,7 @@ func (c *tlsClient) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 		conn, err := dialer.DialContext(ctx, "tcp", c.addr)
 		if err == nil {
 			c.attempt = 0
-			return conn, nil
+			return closeIfClosed(&c.mu, &c.closed, conn)
 		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -208,12 +208,34 @@ func (s *tlsServer) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	raw, err := acceptContext(ctx, l)
-	if err != nil {
-		return nil, err
+	for {
+		raw, err := acceptContext(ctx, l)
+		if err != nil {
+			return nil, err
+		}
+		// Handshake before handing the connection over. tls.Server alone
+		// defers it to the first read or write, so the caller would be given
+		// a peer that has presented no certificate, and a peer that connected
+		// and then said nothing would park the session in that first write
+		// for good. A failed handshake is the peer's problem, not the
+		// listener's: drop it and wait for the next one.
+		conn := tls.Server(raw, s.cfg)
+		hctx, cancel := context.WithTimeout(ctx, tlsHandshakeTimeout)
+		err = conn.HandshakeContext(hctx)
+		cancel()
+		if err == nil {
+			return conn, nil
+		}
+		_ = raw.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 	}
-	return tls.Server(raw, s.cfg), nil
 }
+
+// tlsHandshakeTimeout bounds how long an accepted peer has to complete the
+// handshake, matching the client's dial timeout.
+const tlsHandshakeTimeout = 10 * time.Second
 
 func (s *tlsServer) Close() error {
 	s.mu.Lock()

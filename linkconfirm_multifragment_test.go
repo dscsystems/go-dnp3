@@ -1,7 +1,9 @@
 package dnp3_test
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"sync"
 	"testing"
 	"time"
@@ -96,5 +98,95 @@ func TestConfirmedLinkMultiFragmentResponse(t *testing.T) {
 	if st = out.Stats(); st.FragmentsSent <= st.ResponsesSent {
 		t.Fatalf("%d fragment(s) across %d response(s): nothing was split, so the test did "+
 			"not actually force a multi-fragment response", st.FragmentsSent, st.ResponsesSent)
+	}
+}
+
+// recordingChannel records every frame written through the connections it
+// hands out.
+type recordingChannel struct {
+	channel.Channel
+	mu     sync.Mutex
+	writes [][]byte
+}
+
+func (c *recordingChannel) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
+	conn, err := c.Channel.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return recordingConn{conn, c}, nil
+}
+
+type recordingConn struct {
+	io.ReadWriteCloser
+	c *recordingChannel
+}
+
+func (r recordingConn) Write(p []byte) (int, error) {
+	r.c.mu.Lock()
+	r.c.writes = append(r.c.writes, bytes.Clone(p))
+	r.c.mu.Unlock()
+	return r.ReadWriteCloser.Write(p)
+}
+
+// The master sent a link-confirmed frame without arming the retransmission
+// timer, and while a request was in flight it slept until the response
+// deadline regardless of the link. Against a peer that never acknowledges,
+// the first retransmission has to come one link timeout after the frame —
+// not on the next tick, and not at the response timeout.
+func TestConfirmedLinkRetransmitsAtTheLinkTimeout(t *testing.T) {
+	const linkTimeout = 200 * time.Millisecond
+	mraw, och := channel.Pipe()
+	mch := &recordingChannel{Channel: mraw}
+
+	m := master.New(master.Config{
+		LocalAddr: 1, RemoteAddr: 10,
+		ResponseTimeout: 10 * time.Second,
+		UseLinkConfirms: true,
+		LinkTimeout:     linkTimeout,
+		LinkRetries:     3,
+	}, nil)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _ = m.Run(ctx, mch) }()
+	go func() {
+		// A peer that reads everything and answers nothing.
+		defer wg.Done()
+		conn, err := och.Connect(ctx)
+		if err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, conn)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = mch.Close()
+		_ = och.Close()
+		wg.Wait()
+	})
+
+	go func() { _ = m.IntegrityPoll(ctx) }()
+
+	start := time.Now()
+	var first, second time.Time
+	waitFor(t, 3*time.Second, func() bool {
+		mch.mu.Lock()
+		defer mch.mu.Unlock()
+		if len(mch.writes) >= 1 && first.IsZero() {
+			first = time.Now()
+		}
+		if len(mch.writes) >= 2 {
+			second = time.Now()
+			return true
+		}
+		return false
+	})
+	if gap := second.Sub(first); gap < linkTimeout/2 {
+		t.Fatalf("retransmitted %v after the first frame, before the %v link timeout", gap, linkTimeout)
+	}
+	if elapsed := second.Sub(start); elapsed > 2*time.Second {
+		t.Fatalf("first retransmission took %v; the link timeout is %v", elapsed, linkTimeout)
 	}
 }

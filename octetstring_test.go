@@ -274,3 +274,26 @@ func TestOctetStringTooLongIsTruncated(t *testing.T) {
 		t.Errorf("received %d octets, want the %d maximum", len(got), dnp3.MaxOctetStringLen)
 	}
 }
+
+// A class 0 poll reported octet strings while an explicit read of group 110
+// was refused as an unknown object: the read path had no point type for the
+// group.
+func TestOctetStringsReadByGroup(t *testing.T) {
+	m, out, coll := stringPair(t, 3)
+
+	out.Update(func(db *outstation.Database) {
+		db.UpdateOctetString(1, []byte("Feeder 2"))
+		db.UpdateOctetString(2, []byte("Bus tie"))
+	})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := m.ScanRange(ctx, 110, 0, 1, 2); err != nil {
+		t.Fatalf("read of g110v0 1-2: %v", err)
+	}
+	for i, want := range map[uint32]string{1: "Feeder 2", 2: "Bus tie"} {
+		if got := coll.get(i); got != want {
+			t.Errorf("string %d = %q, want %q", i, got, want)
+		}
+	}
+}

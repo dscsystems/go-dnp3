@@ -291,8 +291,13 @@ type Session struct {
 	recordedTime time.Time
 
 	updates chan func(*Database)
-	mu      sync.Mutex
-	stats   Stats
+	// restartPending carries a [Session.Restart] to the session goroutine,
+	// which owns the state a restart resets. It is a flag rather than a
+	// queued closure so the request survives a full queue and a session that
+	// is not running yet.
+	restartPending atomic.Bool
+	mu             sync.Mutex
+	stats          Stats
 }
 
 // Stats counts what a session has done.
@@ -313,12 +318,12 @@ type Stats struct {
 	UnsolicitedSent     uint64
 	UnsolicitedTimeouts uint64
 
-	// File transfer. FileErrors counts the operations refused with a status
-	// code — a missing file, a denied write — which is a configuration
-	// problem far more often than a protocol one.
 	// AttributesRead counts group 0 reads answered.
 	AttributesRead uint64
 
+	// File transfer. FileErrors counts the operations refused with a status
+	// code — a missing file, a denied write — which is a configuration
+	// problem far more often than a protocol one.
 	FilesOpened        uint64
 	FileBlocksSent     uint64
 	FileBlocksReceived uint64
@@ -375,12 +380,26 @@ func New(cfg Config, appl Application, cmds CommandHandler) *Session {
 // event history is gone, so no incremental poll can recover it and only a full
 // re-baseline will do.
 func (s *Session) Restart() {
-	s.Update(func(*Database) {
-		s.iin = s.iin.Set(app.IINDeviceRestart)
-		s.synchronized = false
-		s.db.events.Reset()
-		s.unsol.reset()
-	})
+	s.restartPending.Store(true)
+	// The event buffer takes its own lock, so the history can go now.
+	s.db.events.Reset()
+	// Wake the session goroutine to apply the rest. If the queue is full it
+	// is already awake and will see the flag at its next update or request.
+	select {
+	case s.updates <- func(*Database) {}:
+	default:
+	}
+}
+
+// applyRestart applies a pending [Session.Restart]. It runs on the session
+// goroutine, which owns everything it touches.
+func (s *Session) applyRestart() {
+	if !s.restartPending.Swap(false) {
+		return
+	}
+	s.iin = s.iin.Set(app.IINDeviceRestart)
+	s.synchronized = false
+	s.unsol.reset()
 }
 
 // Database returns the point database. Prefer [Session.Update] for
@@ -408,13 +427,16 @@ func (s *Session) Update(fn func(*Database)) {
 	default:
 		// The queue is full, which means the session is not running or is
 		// wedged. Apply directly rather than dropping the update: the
-		// database takes its own lock.
+		// database takes its own lock. That makes this path safe for fn
+		// touching the database and nothing else, which is all Update
+		// promises; session state goes through the session goroutine.
 		fn(s.db)
 	}
 }
 
 // drainUpdates applies every update already queued, without waiting for more.
 func (s *Session) drainUpdates() {
+	defer s.applyRestart()
 	for {
 		select {
 		case fn := <-s.updates:
@@ -470,15 +492,23 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 	// The read goroutine only moves octets. Everything that touches protocol
 	// state runs on this goroutine, so the stack needs no locking and a
 	// response can never interleave with the processing of an inbound frame.
+	//
+	// The reader gets a context of its own, ended when serve returns for any
+	// reason. Closing the connection unblocks a reader parked in Read, but
+	// not one parked handing over a chunk nobody will now take; without this
+	// it would wait there for the caller's context.
+	readCtx, stopReader := context.WithCancel(ctx)
+	defer stopReader()
 	rx := make(chan []byte, 8)
 	readErr := make(chan error, 1)
-	go readInto(ctx, conn, rx, readErr)
+	go readInto(readCtx, conn, rx, readErr)
 
 	s.connected = true
 	// Cached application replies belong to this connection, including file
 	// authentication keys and requests with device side effects.
 	s.lastReqValid = false
 	s.unsol.reset()
+	s.applyRestart()
 	defer func() {
 		s.connected = false
 		// A transfer belongs to the connection it started on: the master that
@@ -518,6 +548,7 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 
 		case fn := <-s.updates:
 			fn(s.db)
+			s.applyRestart()
 
 		case data := <-rx:
 			// Updates the application submitted before this request arrived
@@ -1013,10 +1044,13 @@ func (s *Session) onRead(w io.Writer, r stack.Received, frag app.Fragment) error
 		}
 	}
 
+	hasEvents := false
 	if len(selected) > 0 {
-		s.buildEvents(b, selected)
+		unsent := s.buildEvents(b, selected)
+		s.db.events.Discard(unsent)
+		hasEvents = len(unsent) < len(selected)
 	}
-	return s.sendFragments(w, r, frag.Header, b.done(), len(selected) > 0)
+	return s.sendFragments(w, r, frag.Header, b.done(), hasEvents)
 }
 
 // onWrite handles the write function code.
@@ -1137,14 +1171,23 @@ func (s *Session) writeDeadbands(h app.ObjectHeader) {
 			return
 		}
 
-		index := uint16(h.Range.IndexOf(uint32(i)))
+		wide := uint64(h.Range.IndexOf(uint32(i)))
 		if prefixLen > 0 {
-			index = uint16(readPrefix(h.Data[off:], prefixLen))
+			wide = uint64(readPrefix(h.Data[off:], prefixLen))
 			off += prefixLen
 		}
 
 		value := decodeDeadband(h.Variation, h.Data[off:off+size])
 		off += size
+
+		// A four-octet index can name a point no database has. Narrowing it
+		// to uint16 would wrap it onto one that does — index 65541 setting
+		// point 5's deadband — so it is refused, as a command's would be.
+		if wide > 0xFFFF {
+			s.iin = s.iin.Set(app.IINParameterError)
+			continue
+		}
+		index := uint16(wide)
 
 		_, cfg, exists := s.db.Analog(index)
 		if !exists {
@@ -1584,6 +1627,8 @@ func pointTypeForGroup(group uint8) (dnp3.PointType, bool) {
 		return dnp3.TypeAnalog, true
 	case 40, 42:
 		return dnp3.TypeAnalogOutputStatus, true
+	case 110, 111:
+		return dnp3.TypeOctetString, true
 	}
 	return dnp3.TypeUnknown, false
 }

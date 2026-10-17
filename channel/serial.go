@@ -156,6 +156,13 @@ func (c *serialChannel) Connect(ctx context.Context) (io.ReadWriteCloser, error)
 				return nil, fmt.Errorf("channel: setting the read timeout: %w", err)
 			}
 			c.mu.Lock()
+			if c.closed {
+				// Closed while the port was opening: Close found no port to
+				// close, so this one would be left open for good.
+				c.mu.Unlock()
+				_ = port.Close()
+				return nil, ErrClosed
+			}
 			c.port = port
 			c.mu.Unlock()
 			c.attempt = 0

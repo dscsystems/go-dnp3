@@ -902,7 +902,13 @@ describes the first time somebody adds a point.
 An attribute the device does not have is refused with the object-unknown
 indication rather than answered with something else. Variation 255 — "which
 attributes do you have" — is answered with the list of everything the set
-holds, derived and configured alike, none of it writable.
+holds, derived and configured alike, each marked writable if it is listed in
+`Config.WritableAttributes`.
+
+A write to group 0 is accepted for an attribute listed in
+`Config.WritableAttributes`, provided the value has the same type as the one
+configured; `Config.AttributeWrite`, if set, may persist or reject it. Every
+other attribute is read-only.
 
 ---
 

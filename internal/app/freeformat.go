@@ -62,7 +62,10 @@ func FreeFormatObjects(h ObjectHeader) ([][]byte, error) {
 	}
 
 	width := prefix.Octets()
-	out := make([][]byte, 0, h.Range.Count)
+	// The count is wire-supplied and was not necessarily checked against the
+	// data, so it is only a hint: every object costs at least its prefix, which
+	// bounds how many the data can actually hold.
+	out := make([][]byte, 0, min(uint64(h.Range.Count), uint64(len(h.Data)/width)))
 
 	for off := 0; off < len(h.Data); {
 		if off+width > len(h.Data) {

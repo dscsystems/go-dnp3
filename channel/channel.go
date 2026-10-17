@@ -40,8 +40,13 @@ var ErrClosed = errors.New("channel: closed")
 // they all retry in lockstep and keep colliding, turning one outage into a
 // self-sustaining thundering herd.
 type Retry struct {
-	Min    time.Duration
-	Max    time.Duration
+	// Min is the first delay. Zero or less means connect once, no retry.
+	Min time.Duration
+	// Max caps the delay. Zero or less caps it at DefaultRetry's maximum,
+	// since an uncapped exponential soon waits longer than anyone means.
+	Max time.Duration
+	// Factor multiplies the delay after each failed attempt. Below 1 it is
+	// taken as 1: a constant delay, never a shrinking one.
 	Factor float64
 	// Jitter is the fraction of the delay to randomise, from 0 to 1.
 	Jitter float64
@@ -64,11 +69,17 @@ func (r Retry) delay(n int) time.Duration {
 	if r.Min <= 0 {
 		return 0
 	}
+	ceiling := r.Max
+	if ceiling <= 0 {
+		ceiling = DefaultRetry.Max
+	}
+	ceiling = max(ceiling, r.Min)
+	factor := max(r.Factor, 1)
 	d := float64(r.Min)
 	for range n {
-		d *= r.Factor
-		if r.Max > 0 && d >= float64(r.Max) {
-			d = float64(r.Max)
+		d *= factor
+		if d >= float64(ceiling) {
+			d = float64(ceiling)
 			break
 		}
 	}
@@ -131,7 +142,7 @@ func (c *tcpClient) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 		conn, err := c.dialer.DialContext(ctx, "tcp", c.addr)
 		if err == nil {
 			c.attempt = 0
-			return conn, nil
+			return closeIfClosed(&c.mu, &c.closed, conn)
 		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -145,6 +156,22 @@ func (c *tcpClient) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 		}
 		c.attempt++
 	}
+}
+
+// closeIfClosed hands back a connection that was established while the
+// channel was open, or closes it and reports ErrClosed if the channel was
+// closed while the connection was being made. A dial can take seconds, and a
+// connection made for a channel nobody is using any more has nobody to close
+// it.
+func closeIfClosed[C io.Closer](mu *sync.Mutex, closed *bool, conn C) (C, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	if *closed {
+		_ = conn.Close()
+		var zero C
+		return zero, ErrClosed
+	}
+	return conn, nil
 }
 
 func (c *tcpClient) Close() error {
@@ -221,20 +248,57 @@ func (s *tcpServer) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 	return conn, nil
 }
 
-// acceptContext accepts one connection, giving up when the context ends.
+// acceptContext accepts one connection, giving up when the context ends or
+// the listener is closed.
+//
+// Any other accept error is the listener's trouble rather than the caller's —
+// a stale deadline, a process out of file descriptors, a connection reset
+// before it could be accepted — and it passes. A server channel has no retry
+// policy, and the sessions treat a connect error as fatal, so returning one
+// would end an outstation for good over a moment's trouble. It waits and
+// accepts again instead, backing off as net/http's server does.
+func acceptContext(ctx context.Context, l *net.TCPListener) (net.Conn, error) {
+	var backoff time.Duration
+	for {
+		conn, err := acceptOnce(ctx, l)
+		if err == nil || ctx.Err() != nil {
+			return conn, err
+		}
+		if errors.Is(err, net.ErrClosed) {
+			return nil, ErrClosed
+		}
+		backoff = min(max(2*backoff, acceptMinBackoff), acceptMaxBackoff)
+		t := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return nil, ctx.Err()
+		case <-t.C:
+		}
+	}
+}
+
+// The bounds of the wait between failed accepts.
+const (
+	acceptMinBackoff = 5 * time.Millisecond
+	acceptMaxBackoff = time.Second
+)
+
+// acceptOnce makes one accept, interruptible by the context.
 //
 // The interruption is a deadline rather than a close. Closing the listener
 // would work once and then leave the channel permanently unable to accept —
 // a session whose connect was cancelled could never come back, which is
 // exactly what a reconnect is.
-func acceptContext(ctx context.Context, l *net.TCPListener) (net.Conn, error) {
+func acceptOnce(ctx context.Context, l *net.TCPListener) (net.Conn, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
 	done := make(chan struct{})
-	defer close(done)
+	exited := make(chan struct{})
 	go func() {
+		defer close(exited)
 		select {
 		case <-ctx.Done():
 			_ = l.SetDeadline(time.Now())
@@ -243,7 +307,12 @@ func acceptContext(ctx context.Context, l *net.TCPListener) (net.Conn, error) {
 	}()
 
 	conn, err := l.Accept()
-	// Clear the deadline so the next accept is not immediately stale.
+	// Stop the watchdog, and wait for it, before clearing the deadline so the
+	// next accept is not immediately stale. Clearing first would race a
+	// cancellation landing just after Accept returned: the watchdog's
+	// deadline would outlive the clear and fail the next accept outright.
+	close(done)
+	<-exited
 	_ = l.SetDeadline(time.Time{})
 
 	if err != nil {

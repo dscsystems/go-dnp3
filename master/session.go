@@ -311,9 +311,16 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 	// state — the link state machines, the reassembler, the scheduler — runs
 	// on this goroutine, so the stack needs no locking and a send can never
 	// interleave with the processing of an inbound frame.
+	//
+	// The reader gets a context of its own, ended when serve returns for any
+	// reason. Closing the connection unblocks a reader parked in Read, but
+	// not one parked handing over a chunk nobody will now take; without this
+	// it would wait there for the caller's context.
+	readCtx, stopReader := context.WithCancel(ctx)
+	defer stopReader()
 	rx := make(chan []byte, 8)
 	readErr := make(chan error, 1)
-	go readInto(ctx, conn, rx, readErr)
+	go readInto(readCtx, conn, rx, readErr)
 
 	timer := time.NewTimer(time.Hour)
 	defer timer.Stop()
@@ -430,10 +437,19 @@ func (s *Session) checkKeepAlive(w io.Writer) {
 func (s *Session) nextWakeup() time.Duration {
 	now := time.Now()
 
+	// An unacknowledged link frame is retried at the link timeout whether or
+	// not a request is waiting on it; sleeping until the response deadline
+	// would let the link layer's whole retry budget collapse into one late
+	// retransmission.
+	linkPending := s.stack != nil && s.stack.Pending()
 	if s.inflight != nil {
-		return max(s.inflight.deadline.Sub(now), time.Millisecond)
+		next := s.inflight.deadline
+		if linkPending && s.linkDeadline.Before(next) {
+			next = s.linkDeadline
+		}
+		return max(next.Sub(now), time.Millisecond)
 	}
-	if s.stack != nil && s.stack.Pending() {
+	if linkPending {
 		return max(s.linkDeadline.Sub(now), time.Millisecond)
 	}
 	if t, ok := s.sched.peek(); ok {
@@ -501,7 +517,7 @@ func (s *Session) sendTask(w io.Writer, t *task) {
 	if s.cfg.SecureAuthentication != nil && t.funcCode != app.FuncAuthRequest {
 		s.security.lastRequest = append([]byte(nil), b.Bytes()...)
 	}
-	if err := s.stack.Send(w, b.Bytes()); err != nil {
+	if err := s.send(w, b.Bytes()); err != nil {
 		s.log.Warn("send failed", "task", t.name, "err", err)
 		s.completeTask(t, err)
 		return
@@ -779,13 +795,27 @@ func (s *Session) onUnsolicited(w io.Writer, frag app.Fragment) {
 	}
 }
 
+// send transmits a fragment and, when the link layer is now waiting for an
+// acknowledgement, arms the retransmission timer. Without the timer the
+// deadline is whatever it was last set to — usually long past — and the frame
+// would be retransmitted on the very next tick.
+func (s *Session) send(w io.Writer, frag []byte) error {
+	if err := s.stack.Send(w, frag); err != nil {
+		return err
+	}
+	if s.stack.Pending() {
+		s.linkDeadline = time.Now().Add(s.cfg.LinkTimeout)
+	}
+	return nil
+}
+
 // sendConfirm answers a fragment that asked to be confirmed.
 func (s *Session) sendConfirm(w io.Writer, seq uint8, unsolicited bool) {
 	frag := app.AppendHeader(nil, app.Header{
 		Control: app.Control{Fir: true, Fin: true, Uns: unsolicited, Seq: seq},
 		Func:    app.FuncConfirm,
 	})
-	if err := s.stack.Send(w, frag); err != nil {
+	if err := s.send(w, frag); err != nil {
 		s.log.Warn("confirm failed", "err", err, "seq", seq)
 	}
 }

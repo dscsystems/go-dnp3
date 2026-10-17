@@ -241,7 +241,7 @@ func (s *Session) sendUnsolicited(w io.Writer, events []Event, now time.Time, nu
 	ctx := objects.Context{Synchronized: s.synchronized}
 	b := newResponseBuilder(s.cfg.MaxTxFragment, ctx)
 	if !null {
-		s.buildEvents(b, events)
+		s.db.events.Discard(s.buildEvents(b, events))
 	}
 	body := b.done()[0]
 

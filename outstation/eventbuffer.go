@@ -289,6 +289,39 @@ func (b *EventBuffer) Release(events []Event) int {
 	return n
 }
 
+// Discard removes the given events, previously handed out by
+// [EventBuffer.Select], because they can never be reported — no encoding
+// exists for them, or one alone is larger than a fragment. Keeping them would
+// re-select them forever; dropping them quietly would leave a hole the master
+// cannot see. So they count as lost, and the overflow indication says so.
+func (b *EventBuffer) Discard(events []Event) int {
+	if len(events) == 0 {
+		return 0
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	discard := make(map[uint64]struct{}, len(events))
+	for _, e := range events {
+		discard[e.seq] = struct{}{}
+	}
+	kept := b.events[:0]
+	n := 0
+	for _, e := range b.events {
+		if _, ok := discard[e.seq]; ok && e.selected {
+			n++
+			continue
+		}
+		kept = append(kept, e)
+	}
+	b.events = kept
+	if n > 0 {
+		b.overflow = true
+		b.drops += uint64(n)
+	}
+	return n
+}
+
 // Reset empties the buffer, as a cold restart does.
 func (b *EventBuffer) Reset() {
 	b.mu.Lock()

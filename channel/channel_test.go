@@ -190,6 +190,24 @@ func TestRetryJitterSpreadsRetries(t *testing.T) {
 	}
 }
 
+// A zero Factor used to multiply the delay to nothing, so a channel that could
+// not connect retried in a hot spin. A zero Max left the delay uncapped, and a
+// peer that never came back soon pushed it past what a Duration holds.
+func TestRetryZeroFieldsStaySane(t *testing.T) {
+	noFactor := Retry{Min: 100 * time.Millisecond, Max: time.Second}
+	for i := range 5 {
+		if got := noFactor.delay(i); got != 100*time.Millisecond {
+			t.Errorf("Factor 0: delay(%d) = %v, want a constant 100ms", i, got)
+		}
+	}
+	noMax := Retry{Min: time.Second, Factor: 2}
+	for _, n := range []int{10, 100, 10000} {
+		if got := noMax.delay(n); got != DefaultRetry.Max {
+			t.Errorf("Max 0: delay(%d) = %v, want the default cap %v", n, got, DefaultRetry.Max)
+		}
+	}
+}
+
 func TestNoRetryReturnsZero(t *testing.T) {
 	if got := NoRetry.delay(3); got != 0 {
 		t.Errorf("NoRetry delay = %v, want 0", got)
@@ -388,4 +406,60 @@ func bindServer(t *testing.T, server Channel) string {
 		t.Fatal("the server never bound")
 	}
 	return addr
+}
+
+// Closing a server while it waits in accept is a shutdown, and has to say so
+// with ErrClosed: the sessions return cleanly on ErrClosed and treat any other
+// connect error as a failure. The listener's own "use of closed network
+// connection" used to come back instead.
+func TestTCPServerCloseDuringAcceptIsErrClosed(t *testing.T) {
+	s := TCPServer("127.0.0.1:0")
+	errc := make(chan error, 1)
+	go func() {
+		_, err := s.Connect(t.Context())
+		errc <- err
+	}()
+	for TCPServerAddr(s) == nil {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond) // let Connect reach Accept
+	_ = s.Close()
+
+	select {
+	case err := <-errc:
+		if !errors.Is(err, ErrClosed) {
+			t.Errorf("Connect after Close = %v, want ErrClosed", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Connect did not return after Close")
+	}
+}
+
+// A failed accept that is not a shutdown — here a deadline left in the past,
+// as a cancellation racing the end of an earlier accept used to leave — is
+// passed over rather than returned. Returned, it ended the session for good.
+func TestTCPServerAcceptRecoversFromTransientErrors(t *testing.T) {
+	ch := TCPServer("127.0.0.1:0")
+	t.Cleanup(func() { _ = ch.Close() })
+	s := ch.(*tcpServer)
+	l, err := s.listen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = l.SetDeadline(time.Now().Add(-time.Second))
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		if c, err := net.Dial("tcp", l.Addr().String()); err == nil {
+			t.Cleanup(func() { _ = c.Close() })
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	conn, err := ch.Connect(ctx)
+	if err != nil {
+		t.Fatalf("Connect with a stale deadline: %v", err)
+	}
+	_ = conn.Close()
 }

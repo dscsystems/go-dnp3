@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -118,9 +119,9 @@ func TestTLSMutualAuthentication(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = server.Close() })
 
-	// Go performs the TLS handshake lazily, on the first read or write. The
-	// server side has to drive it concurrently with the client's dial, or the
-	// two sit waiting for each other's handshake records.
+	// The server's Connect completes the handshake before returning, so it
+	// has to run concurrently with the client's dial, or the two sit waiting
+	// for each other's handshake records.
 	accepted := make(chan io.ReadWriteCloser, 1)
 	go func() {
 		c, err := server.Connect(t.Context())
@@ -245,6 +246,80 @@ func TestTLSRejectsUnauthenticatedPeer(t *testing.T) {
 	}
 	if err == nil {
 		t.Error("a client certificate from an unrelated authority was accepted")
+	}
+}
+
+// The server used to return a connection before any handshake, so a caller
+// was handed a peer that had presented no certificate. Connect now completes
+// the handshake first, and a peer that fails it is dropped while the server
+// goes on to the next one rather than giving up.
+func TestTLSServerHandshakesBeforeReturning(t *testing.T) {
+	_, ca, sCert, sKey, cCert, cKey := certs(t)
+
+	server, err := TLSServer("127.0.0.1:0", TLSConfig{
+		CertFile: sCert, KeyFile: sKey, CAFile: ca,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+
+	accepted := make(chan io.ReadWriteCloser, 1)
+	go func() {
+		c, err := server.Connect(t.Context())
+		if err != nil {
+			close(accepted)
+			return
+		}
+		accepted <- c
+	}()
+
+	var addr string
+	for range 200 {
+		if a := ServerAddr(server); a != nil {
+			addr = a.String()
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if addr == "" {
+		t.Fatal("the TLS server never bound")
+	}
+
+	// A peer that speaks something other than TLS.
+	junk, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = junk.Write([]byte("GET / HTTP/1.0\r\n\r\n"))
+	_ = junk.Close()
+
+	client, err := TLSClient(addr, TLSConfig{
+		CertFile: cCert, KeyFile: cKey, CAFile: ca, ServerName: "localhost",
+	}, NoRetry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	cc, err := client.Connect(t.Context())
+	if err != nil {
+		t.Fatalf("TLS dial: %v", err)
+	}
+	defer cc.Close()
+
+	var sc io.ReadWriteCloser
+	select {
+	case sc = <-accepted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the server never returned the authenticated connection")
+	}
+	if sc == nil {
+		t.Fatal("the server gave up after a peer failed the handshake")
+	}
+	defer sc.Close()
+	st := sc.(*tls.Conn).ConnectionState()
+	if !st.HandshakeComplete || len(st.PeerCertificates) == 0 {
+		t.Error("Connect returned before the peer presented its certificate")
 	}
 }
 

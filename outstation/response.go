@@ -508,19 +508,23 @@ func eventTypeForGroup(group uint8) (dnp3.PointType, bool) {
 	return dnp3.TypeUnknown, false
 }
 
-// buildEvents appends event objects for the selected events.
+// buildEvents appends event objects for the selected events, and returns the
+// ones it could not encode at all: a variation with no encoding, or an object
+// larger than an empty fragment. Those can never be sent, and the caller has
+// to take them out of the selection — otherwise confirming the response would
+// delete them as though the master had received them.
 //
 // Events carry per-object index prefixes because the points that changed are
 // not contiguous, and they are grouped into runs sharing a group and variation
 // so a burst of analog changes becomes one header rather than fifty.
-func (s *Session) buildEvents(b *responseBuilder, events []Event) {
+func (s *Session) buildEvents(b *responseBuilder, events []Event) (unsent []Event) {
 	for i := 0; i < len(events); {
 		if events[i].Type == dnp3.TypeDataset {
 			h, err := app.FreeFormat(88, 1, events[i].Dataset)
 			if err == nil && h.Size()+app.ResponseHeaderSize <= b.max {
 				b.add(h)
 			} else {
-				s.db.events.Release([]Event{events[i]})
+				unsent = append(unsent, events[i])
 			}
 			i++
 			continue
@@ -536,19 +540,13 @@ func (s *Session) buildEvents(b *responseBuilder, events []Event) {
 			size = int(gv.Variation)
 		} else {
 			d, ok := objects.Lookup(gv)
-			if !ok {
-				i++
-				continue
+			if ok {
+				size, _ = d.SizeOctets()
+				relative = d.RelativeTime
 			}
-			var okSize bool
-			size, okSize = d.SizeOctets()
-			if !okSize {
-				i++
-				continue
-			}
-			relative = d.RelativeTime
 		}
 		if size == 0 {
+			unsent = append(unsent, events[i])
 			i++
 			continue
 		}
@@ -595,7 +593,9 @@ func (s *Session) buildEvents(b *responseBuilder, events []Event) {
 				b.flush()
 				avail = b.room() - ctoSize - headerOverhead
 				if avail < perObject {
-					return
+					unsent = append(unsent, events[i:j]...)
+					i = j
+					break
 				}
 			}
 
@@ -633,6 +633,7 @@ func (s *Session) buildEvents(b *responseBuilder, events []Event) {
 			i += runLen
 		}
 	}
+	return unsent
 }
 
 // encodeEvent appends one event's object encoding.

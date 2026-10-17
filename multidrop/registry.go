@@ -83,6 +83,14 @@ func (r *Registry) Open(ch channel.Channel, cfg Config) *Bus {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if e, ok := r.entries[key]; ok && e.bus.isClosed() {
+		// Someone closed the bus directly rather than releasing it. Its
+		// channel is closed with it, so handing it out would give the caller
+		// a bus that can never connect; build a new one on ch instead. The
+		// callers still holding the old one have nothing left to release.
+		delete(r.entries, key)
+		delete(r.byBus, e.bus)
+	}
 	if e, ok := r.entries[key]; ok {
 		e.refs++
 		if ch != e.ch {

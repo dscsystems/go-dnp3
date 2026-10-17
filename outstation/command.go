@@ -263,6 +263,7 @@ func (s *Session) executeCommands(
 		}
 
 		echo := make([]byte, 0, len(h.Data))
+		echoed := 0
 		off := 0
 		for range int(h.Count()) {
 			if off+prefixLen+size > len(h.Data) {
@@ -294,13 +295,19 @@ func (s *Session) executeCommands(
 			// overwriting it in place turns the echoed request into the
 			// response the master expects.
 			echo[len(echo)-1] = byte(status)
+			echoed++
 		}
 
+		// The count says how many objects follow. A request that ran short
+		// of data echoes fewer than it claimed, and repeating its count would
+		// have the master read past the end of the header.
+		rng := h.Range
+		rng.Count = uint32(echoed)
 		body = app.AppendObjectHeader(body, app.ObjectHeader{
 			Group:     h.Group,
 			Variation: h.Variation,
 			Qualifier: h.Qualifier,
-			Range:     h.Range,
+			Range:     rng,
 			Data:      echo,
 		})
 	}

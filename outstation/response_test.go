@@ -110,3 +110,60 @@ func TestOctetStringsTerminateAtTheTopOfTheIndexSpace(t *testing.T) {
 			covered, top, n, n-1)
 	}
 }
+
+// An event with no encoding used to be skipped by buildEvents yet stay
+// selected, so the response's confirmation deleted it as though the master had
+// received it. It now comes back as unsent, is discarded, and is counted as a
+// loss the overflow indication reports; the encodable event beside it is
+// still the only one the confirmation removes.
+func TestUnencodableEventsAreNotConfirmedAway(t *testing.T) {
+	s := New(Config{Database: DatabaseConfig{Binary: 2}}, nil, nil)
+	s.db.events.Add(Event{Type: dnp3.TypeBinary, Index: 0, Class: dnp3.Class1, Variation: 99})
+	s.db.events.Add(Event{Type: dnp3.TypeBinary, Index: 1, Class: dnp3.Class1, Variation: 1})
+
+	selected := s.db.events.Select(dnp3.Class1, 10)
+	b := newResponseBuilder(0, objects.Context{})
+	unsent := s.buildEvents(b, selected)
+	if len(unsent) != 1 || unsent[0].Index != 0 {
+		t.Fatalf("unsent = %+v, want only the variation-99 event", unsent)
+	}
+	if n := s.db.events.Discard(unsent); n != 1 {
+		t.Fatalf("Discard removed %d events, want 1", n)
+	}
+	if !s.db.events.Overflowed() {
+		t.Error("discarding an unreportable event did not set the overflow indication")
+	}
+	if n := s.db.events.Confirm(); n != 1 {
+		t.Errorf("Confirm removed %d events, want 1", n)
+	}
+}
+
+func TestConfigureRejectsUnencodableEventVariation(t *testing.T) {
+	s := New(Config{Database: DatabaseConfig{Binary: 1}}, nil, nil)
+	if s.db.Configure(dnp3.TypeBinary, 0, PointConfig{EventVariation: 99}) {
+		t.Error("Configure accepted binary event variation 99")
+	}
+	if !s.db.Configure(dnp3.TypeBinary, 0, PointConfig{EventVariation: 2}) {
+		t.Error("Configure refused binary event variation 2")
+	}
+}
+
+// Restart used to go through Update, whose fallback for a full queue runs the
+// closure on the caller's goroutine — and the closure wrote session state the
+// session goroutine reads unlocked. The session state now changes only when
+// the session goroutine applies the pending restart.
+func TestRestartWithFullQueueLeavesSessionStateAlone(t *testing.T) {
+	s := New(Config{Database: DatabaseConfig{Binary: 1}}, nil, nil)
+	s.iin = s.iin.Clear(app.IINDeviceRestart)
+	for len(s.updates) < cap(s.updates) {
+		s.updates <- func(*Database) {}
+	}
+	s.Restart()
+	if s.iin.Has(app.IINDeviceRestart) {
+		t.Fatal("Restart changed session state off the session goroutine")
+	}
+	s.drainUpdates()
+	if !s.iin.Has(app.IINDeviceRestart) {
+		t.Error("the pending restart was not applied when the queue drained")
+	}
+}

@@ -175,10 +175,19 @@ const (
     TypeBinaryOutputStatus
     TypeAnalogOutputStatus
     TypeOctetString
+    TypeBinaryCommandEvent // event-only: a control operated on a binary output (group 13)
+    TypeAnalogCommandEvent // event-only: a control operated on an analog output (group 43)
+    TypeFrozenAnalog
+    TypeVirtualTerminal
+    TypeSecurityStatistic
+    TypeDataset
 )
 
 func (p PointType) String() string
 ```
+
+The two command event types have no static value: they record that a control
+was operated, and exist only as events.
 
 ## Flags
 
@@ -275,6 +284,18 @@ func DNP3ToTime(ms uint64) time.Time     // UTC; bits above the low 48 ignored
 ```
 
 Times before the epoch clamp to zero.
+
+```go
+type TimeAndInterval struct {
+    Time     Timestamp
+    Interval uint32
+    Units    uint8 // the DNP3 interval-units code
+}
+```
+
+An indexed group 50 variation 4 value: a schedule, such as when a device should
+next do something and how often. Writing one does not change the outstation's
+clock.
 
 ## Classes
 
@@ -454,6 +475,23 @@ example, 239 is the number of binary inputs and 240 and 241 are the transmit
 and receive fragment sizes.
 
 ```go
+type AttributeType uint8
+
+const (
+    AttrVisibleString AttributeType = 1
+    AttrUnsignedInt   AttributeType = 2
+    AttrSignedInt     AttributeType = 3
+    AttrFloat         AttributeType = 4
+    AttrOctetString   AttributeType = 5
+    AttrBitString     AttributeType = 6
+    AttrTime          AttributeType = 7
+    // AttrAttributeList and AttrExtAttributeList: see Attribute lists below
+)
+
+func (t AttributeType) String() string
+```
+
+```go
 const (
     AttrSetStandard uint8 = 0   // the standard's set
     AttrAll         uint8 = 254 // read this to ask for every attribute
@@ -503,11 +541,64 @@ func (f FileInfo) IsDir() bool
 ```
 
 ```go
-type FileType uint16   // FileTypeDirectory, FileTypeSimple
-type FileMode uint16   // FileModeNull, FileModeRead, FileModeWrite, FileModeAppend
-type FileStatus uint8  // FileSuccess, FileNotFound, FilePermissionDenied, FileLocked, …
+type FileType uint16
+
+const (
+    FileTypeDirectory FileType = 0
+    FileTypeSimple    FileType = 1
+)
+
+type FileMode uint16
+
+const (
+    FileModeNull   FileMode = 0 // opens nothing; what a delete carries
+    FileModeRead   FileMode = 1
+    FileModeWrite  FileMode = 2 // creates or truncates
+    FileModeAppend FileMode = 3
+)
+
+type FileStatus uint8
+
+const (
+    FileSuccess          FileStatus = 0
+    FilePermissionDenied FileStatus = 1
+    FileInvalidMode      FileStatus = 2  // a mode the outstation does not allow for that file
+    FileNotFound         FileStatus = 3
+    FileLocked           FileStatus = 4  // another master has it open
+    FileTooManyOpen      FileStatus = 5
+    FileInvalidHandle    FileStatus = 6  // unknown handle, e.g. after the outstation timed the transfer out
+    FileWriteBlockSize   FileStatus = 7
+    FileCommLost         FileStatus = 8
+    FileCannotAbort      FileStatus = 9
+    FileNotOpen          FileStatus = 16
+    FileHandleExpired    FileStatus = 17 // closed by the outstation after inactivity
+    FileBufferOverrun    FileStatus = 18
+    FileFatal            FileStatus = 19 // the file is not usable
+    FileBlockSequence    FileStatus = 20 // a block arrived out of order
+    FileUndefined        FileStatus = 255
+)
+
+func (s FileStatus) Err() error
+func (s FileStatus) String() string
+
 type FilePermissions uint16
+
+const (
+    PermWorldExecute FilePermissions = 0x0001
+    PermWorldWrite   FilePermissions = 0x0002
+    PermWorldRead    FilePermissions = 0x0004
+    PermGroupExecute FilePermissions = 0x0008
+    PermGroupWrite   FilePermissions = 0x0010
+    PermGroupRead    FilePermissions = 0x0020
+    PermOwnerExecute FilePermissions = 0x0040
+    PermOwnerWrite   FilePermissions = 0x0080
+    PermOwnerRead    FilePermissions = 0x0100
+)
+
+func (p FilePermissions) String() string
 ```
+
+`FileType`, `FileMode` and `FileStatus` each have a `String` method.
 
 `FileStatus` keeps the standard's numbering, gap and all, so a capture reads
 against IEEE 1815 table 4-8. `Err()` returns nil for `FileSuccess` and an error
@@ -600,6 +691,12 @@ func Pipe() (a, b Channel)
 field configuration; serving several concurrently needs a session per
 connection, which belongs above this layer and is not implemented.
 
+A server's `Connect` returns only a usable connection, `ErrClosed` once the
+channel is closed, or the context's error. A failed accept is waited out and
+retried, and a peer that fails the TLS handshake (bounded at 10 seconds) is
+dropped while the server waits for the next. Sessions treat any other connect
+error as fatal, so a server never hands them a passing one.
+
 `Pipe` returns two channels connected to each other in memory. This is what
 every integration test runs over and what the explorer's demo mode uses: a full
 master and outstation talking through the real link, transport and application
@@ -629,6 +726,10 @@ var NoRetry      = Retry{Min: 0, Max: 0, Factor: 1}
 
 `NoRetry` connects once and gives up, which is what tests and one-shot tools
 want.
+
+A `Min` of zero or less means no retry. A `Max` of zero or less caps the delay
+at `DefaultRetry.Max`, and a `Factor` below 1 is taken as 1 — a constant delay —
+so a zero-valued field never turns reconnection into a hot spin.
 
 The jitter matters more than it looks. A substation that loses a switch brings
 every master's connection down at the same instant; without jitter they all
@@ -870,6 +971,10 @@ type Config struct {
     MaxTxFragment int // default 2048
     MaxRxFragment int // default 2048
 
+    FileBlockSize        uint16                      // see File transfer; zero derives one from MaxRxFragment
+    FileCredentials      *FileCredentials            // non-nil sends AUTHENTICATE_FILE before opens and deletes
+    SecureAuthentication *SecureAuthenticationConfig // non-nil enables SAv5 challenge/reply
+
     UseLinkConfirms bool          // link-layer confirmation; normally off over TCP
     LinkRetries     int           // retransmissions of a confirmed frame
     LinkTimeout     time.Duration // default 1s; matters only with UseLinkConfirms
@@ -883,6 +988,22 @@ type Config struct {
 `KeepAlive` exists because an idle TCP connection is indistinguishable from a
 peer that has gone away: both are silent. Without a probe a master notices only
 when its next poll times out, which on a slow schedule can be minutes.
+
+```go
+type FileCredentials struct{ User, Password string }
+
+type SecureAuthenticationConfig struct {
+    User        uint16
+    UpdateKey   []byte // must match the outstation's locally provisioned key for User
+    KeyTimeout  time.Duration
+    MaxMessages uint32
+}
+```
+
+DNP3 file authentication sends the password on the wire, so protect the channel
+when the credentials need to stay confidential. Secure authentication is the
+symmetric SAv5 exchange only: remote update-key management and aggressive mode
+are not supported, and it is not a certified SAv5 profile.
 
 ## Reads
 
@@ -989,7 +1110,11 @@ operator a breaker operated when it did not.
 func (s *Session) ReadAttributes(ctx context.Context) ([]dnp3.Attribute, error)
 func (s *Session) ReadAttributeSet(ctx context.Context, set uint8) ([]dnp3.Attribute, error)
 func (s *Session) ReadAttribute(ctx context.Context, set, variation uint8) (dnp3.Attribute, error)
+func (s *Session) WriteAttribute(ctx context.Context, a dnp3.Attribute) error
 ```
+
+`WriteAttribute` writes one existing attribute. The outstation must list it as
+writable, and the value must keep the type the attribute already has.
 
 One request: the master asks for variation 254 and the outstation answers with
 one object header per attribute, the variation naming it and the range naming
@@ -1025,6 +1150,7 @@ func (s *Session) WriteFileBytes(ctx context.Context, name string, data []byte) 
 func (s *Session) ReadDirectory(ctx context.Context, name string) ([]dnp3.FileInfo, error)
 func (s *Session) FileInfo(ctx context.Context, name string) (dnp3.FileInfo, error)
 func (s *Session) DeleteFile(ctx context.Context, name string) error
+func (s *Session) AuthenticateFile(ctx context.Context, user, password string) (uint32, error)
 
 const MaxFileSize = 16 << 20 // the cap on reading a file into memory
 ```
@@ -1065,6 +1191,10 @@ if _, err := m.ReadFileBytes(ctx, "/config.xml"); err != nil {
 `Config.FileBlockSize` caps the block size the master asks for; zero derives one
 from `MaxRxFragment`. The outstation may answer with something smaller, and its
 answer wins.
+
+`AuthenticateFile` exchanges credentials for the key a later open or delete
+carries. With `Config.FileCredentials` set the session does this itself before
+every open and delete, so a caller rarely needs it directly.
 
 ## Time and configuration
 
@@ -1147,6 +1277,24 @@ a separate interface so existing handlers keep compiling. On the outstation
 side, give an output point a `CommandEventClass` (`Database.Configure`) to
 record them; the default is none.
 
+Two more optional interfaces work the same way:
+
+```go
+type FrozenAnalogHandler interface {
+    HandleFrozenAnalog(info HeaderInfo, values []dnp3.Indexed[dnp3.Analog])
+}
+
+type DatasetHandler interface {
+    HandleDataset(info HeaderInfo, data []byte)
+}
+```
+
+A handler without `FrozenAnalogHandler` receives frozen analogs (groups 31 and
+33) through `HandleAnalog`, mixed with the running values; implement it to tell
+them apart. `HandleDataset` receives each complete dataset object, including its
+encoded identifier, and interpreting the values against their prototype is the
+application's job.
+
 `HandleOctetString` receives groups 110 and 111: the point names, firmware
 versions and serial numbers a device reports as text rather than as
 measurements.
@@ -1197,11 +1345,16 @@ type Update struct {
     Counter       dnp3.Counter
     FrozenCounter dnp3.FrozenCounter
     Analog        dnp3.Analog
+    FrozenAnalog  dnp3.Analog
     BinaryOutput  dnp3.BinaryOutputStatus
     AnalogOutput  dnp3.AnalogOutputStatus
     OctetString   dnp3.OctetString
+    CommandEvent  dnp3.CommandEvent // for the two command event types
 }
 ```
+
+`ChannelHandler` implements `CommandEventHandler` and `FrozenAnalogHandler`, so
+both arrive as updates.
 
 This is what a terminal UI or a recorder consumes: the session goroutine stays
 responsive because it only ever does a non-blocking send, and the consumer reads
@@ -1218,11 +1371,12 @@ type Stats struct {
     TasksRun        uint64
     TasksSucceeded  uint64
     TasksFailed     uint64
-    ResponseTimeout uint64
-    FragmentsRx     uint64
-    Unsolicited     uint64
-    Connections     uint64
-    RestartsSeen    uint64
+    ResponseTimeout    uint64
+    FragmentsRx        uint64
+    FragmentsDiscarded uint64 // repeats and fragments that did not continue the series
+    Unsolicited        uint64
+    Connections        uint64
+    RestartsSeen       uint64
 }
 ```
 
@@ -1271,9 +1425,11 @@ out.Update(func(db *outstation.Database) {
 })
 ```
 
-`Database()` returns the database directly. It is **not safe for concurrent
-use** — prefer `Update` for modifications once the session is running. Reading or
-configuring it before `Run` starts is fine.
+`Database()` returns the database directly. Every method takes the database's
+own lock, so calling them from any goroutine is safe; prefer `Update` for
+modifications once the session is running, because it applies a batch of
+changes as one step on the session goroutine — a breaker and its alarm change
+together rather than in a torn read.
 
 `Restart()` makes the outstation report a restart to its master. It is what a
 device calls when it has genuinely restarted and what a simulator calls to
@@ -1299,13 +1455,93 @@ type Config struct {
 
     Unsolicited UnsolicitedConfig
 
+    Files FileConfig // see File transfer
+
+    Attributes         []dnp3.Attribute       // see Device attributes
+    WritableAttributes []AttributeID          // attributes that accept same-type writes
+    AttributeWrite     func(dnp3.Attribute) bool // may persist or reject a write
+
+    SelfAddress bool // answer the self address 0xFFFC, for discovery
+
+    Management     ManagementHandler                         // nil reports the operations unsupported
+    ActivateConfig func([]string) objects.ActivationResult   // applies named configuration files
+
+    SecureAuthentication *SecureAuthenticationConfig // non-nil enables SAv5 challenge/reply
+
+    TerminalWrite func(index uint16, data []byte) bool // master output to a virtual terminal; nil refuses
+    Datasets      []DatasetObject                      // prototypes, descriptors and present values
+    DatasetWrite  func(group, variation uint8, object []byte) bool
+
     UseLinkConfirms bool
     LinkRetries     int
     LinkTimeout     time.Duration // default 1s
 
+    Indications Indication // device indications asserted from the start; see SetIndication
+
     Log *slog.Logger // nil discards
 }
 ```
+
+### Extended services
+
+```go
+type AttributeID struct{ Set, Variation uint8 }
+
+type ManagementOperation uint8
+
+const (
+    InitializeData        ManagementOperation = 15
+    InitializeApplication ManagementOperation = 16
+    StartApplication      ManagementOperation = 17
+    StopApplication       ManagementOperation = 18
+    SaveConfiguration     ManagementOperation = 19
+    ActivateConfiguration ManagementOperation = 31
+)
+
+type ManagementHandler interface {
+    Manage(op ManagementOperation, payload []byte) bool
+}
+```
+
+`Manage` receives a copy of the request's whole object section. Returning false
+refuses the operation with PARAMETER_ERROR. With `Config.Management` nil the
+outstation reports the function codes unsupported. When
+`Config.ActivateConfig` is set, ACTIVATE_CONFIG goes to it instead, with the
+names the request carried, and the group 91 result it returns is the answer.
+
+```go
+type DatasetObject struct {
+    Group, Variation uint8
+    Index            uint16
+    Data             []byte // the object encoding, without its size prefix
+}
+
+func (db *Database) UpdateDataset(v DatasetObject, class dnp3.Class) error
+```
+
+`Config.Datasets` loads prototypes (group 85), descriptors (group 86) and present
+values (group 87) at startup. `UpdateDataset` replaces one later, and for a
+present value queues a group 88 event when `class` is an event class. The data is
+copied. Expanding prototypes and interpreting application-defined element types
+are the application's responsibility. `DatasetWrite` validates a master's write
+of a prototype-dependent object; nil refuses them.
+
+```go
+type SecureAuthenticationConfig struct {
+    Users               map[uint16][]byte // user number → 16- or 32-octet AES update key
+    ReplyTimeout        time.Duration
+    KeyTimeout          time.Duration
+    MaxMessages         uint32
+    StatisticsClass     dnp3.Class
+    StatisticsThreshold uint32
+    Authorize           func(user uint16, function uint8) bool // nil grants configured users everything
+}
+```
+
+The symmetric SAv5 challenge/reply path, separate from TLS. Update keys are
+provisioned locally. Remote user and update-key management and aggressive mode
+are not supported, and this is not a certified SAv5 profile. Security statistics
+are reported as group 121/122 points.
 
 ```go
 type UnsolicitedConfig struct {
@@ -1333,6 +1569,9 @@ type DatabaseConfig struct {
     Counter            int
     FrozenCounter      int
     Analog             int
+    FrozenAnalog       int
+    TimeAndInterval    int
+    VirtualTerminal    int
     BinaryOutputStatus int
     AnalogOutputStatus int
     OctetString        int
@@ -1366,6 +1605,27 @@ string's length changes the variation the outstation reports it in. That is
 legal, and masters must cope with it.
 
 ```go
+func (db *Database) UpdateFrozenAnalog(index uint16, v dnp3.Analog)
+func (db *Database) FreezeAnalogs()
+func (db *Database) UpdateTimeAndInterval(index uint16, v dnp3.TimeAndInterval) bool
+func (db *Database) UpdateVirtualTerminal(index uint16, v []byte)
+func (db *Database) RaiseBinaryCommandEvent(index uint16, state bool, status dnp3.CommandStatus, at time.Time)
+func (db *Database) RaiseAnalogCommandEvent(index uint16, value float64, commandVariation uint8, status dnp3.CommandStatus, at time.Time)
+```
+
+A frozen analog is a snapshot kept apart from the running input, with its own
+deadband; `FreezeAnalogs` snapshots every analog that has a frozen counterpart.
+Time-and-interval values generate no events, and `UpdateTimeAndInterval` reports
+false for an index the database does not have. `UpdateVirtualTerminal` queues
+terminal output as a group 113 event.
+
+The session raises command events itself when a control is operated, so the two
+`Raise` methods are for an application that operates outputs some other way.
+Each records an event only if the point has a `CommandEventClass`.
+`commandVariation` is the group 41 variation the command arrived in, which
+decides the event's width when the point does not name one.
+
+```go
 func (db *Database) Binary(index uint16) (dnp3.Binary, PointConfig, bool)
 func (db *Database) DoubleBit(index uint16) (dnp3.DoubleBitBinary, PointConfig, bool)
 func (db *Database) Counter(index uint16) (dnp3.Counter, PointConfig, bool)
@@ -1374,6 +1634,8 @@ func (db *Database) Analog(index uint16) (dnp3.Analog, PointConfig, bool)
 func (db *Database) BinaryOutputStatus(index uint16) (dnp3.BinaryOutputStatus, PointConfig, bool)
 func (db *Database) AnalogOutputStatus(index uint16) (dnp3.AnalogOutputStatus, PointConfig, bool)
 func (db *Database) OctetString(index uint16) (dnp3.OctetString, PointConfig, bool)
+func (db *Database) FrozenAnalog(index uint16) (dnp3.Analog, PointConfig, bool)
+func (db *Database) TimeAndInterval(index uint16) (dnp3.TimeAndInterval, bool)
 ```
 
 The bool reports whether the index exists.
@@ -1387,7 +1649,9 @@ func (db *Database) Counts() DatabaseConfig
 
 `Configure` is a no-op returning false for an index the database does not have,
 so a configuration file listing a removed point does not panic the outstation at
-startup. `AssignClass` sets the class of every point of a type, which is what
+startup. It also returns false, changing nothing, for an `EventVariation`
+the outstation has no encoding for, since every event the point raised would
+otherwise be impossible to report. `AssignClass` sets the class of every point of a type, which is what
 the ASSIGN_CLASS function code does. `FreezeCounters` copies every counter into
 its frozen counterpart.
 
@@ -1399,6 +1663,9 @@ type PointConfig struct {
     StaticVariation uint8      // used when reported in a class 0 or range read
     EventVariation  uint8      // used when the point's events are reported
     Deadband        float64    // ignored for binaries, which event on any change
+
+    CommandEventClass     dnp3.Class // output points only: class of the group 13/43 events; ClassNone records none
+    CommandEventVariation uint8      // zero mirrors the command: the timed variation of the command's width
 }
 ```
 
@@ -1478,16 +1745,21 @@ than answered with something else.
 
 Variation 255, "which attributes do you have", is answered with a single
 [attribute list](#attribute-lists) naming every variation the set holds —
-the derived ones and anything in `Config.Attributes` — none marked writable,
-since nothing here accepts a write. A set with nothing in it has no list either,
-and is refused with OBJECT_UNKNOWN.
+the derived ones and anything in `Config.Attributes` — each marked writable if
+it is listed in `Config.WritableAttributes`. A set with nothing in it has no
+list either, and is refused with OBJECT_UNKNOWN.
+
+A write to an attribute in `Config.WritableAttributes` is accepted when the
+value has the same type as the configured one, and `Config.AttributeWrite`, if
+set, may persist or reject it. Every other attribute is read-only.
 
 ## File transfer
 
 ```go
 type FileConfig struct {
-    Handler      FileHandler   // nil answers the file function codes with NO_FUNC_CODE_SUPPORT
-    MaxBlockSize uint16        // 0 → DefaultFileBlockSize (1024)
+    Handler      FileHandler       // nil answers the file function codes with NO_FUNC_CODE_SUPPORT
+    Authenticate FileAuthenticator // non-nil requires AUTHENTICATE_FILE before an open or delete
+    MaxBlockSize uint16            // 0 → DefaultFileBlockSize (1024)
     Timeout      time.Duration // 0 → DefaultFileTimeout (60s), closing an idle transfer
 }
 
@@ -1499,6 +1771,14 @@ type FileHandler interface {
     Delete(name string) dnp3.FileStatus
 }
 ```
+
+```go
+type FileAuthenticator func(user, password string) bool
+```
+
+`FileAuthenticator` checks the credentials a master sends. The session generates
+and tracks the key it hands back, so the authenticator only says yes or no — and
+must never log the password.
 
 Set `Config.Files.Handler` to serve files; leave it nil and the outstation
 answers the way a device without a filesystem does. Every method returns a
@@ -1608,8 +1888,11 @@ func NewEventBuffer(cfg EventBufferConfig) *EventBuffer
 
 func (b *EventBuffer) Add(e Event)
 func (b *EventBuffer) Select(mask dnp3.Class, limit int) []Event
+func (b *EventBuffer) SelectType(pt dnp3.PointType, limit int) []Event
 func (b *EventBuffer) Confirm() int
 func (b *EventBuffer) Unselect() int
+func (b *EventBuffer) Release(events []Event) int
+func (b *EventBuffer) Discard(events []Event) int
 func (b *EventBuffer) Count(mask dnp3.Class) int
 func (b *EventBuffer) Total() int
 func (b *EventBuffer) SelectedCount() int
@@ -1626,6 +1909,12 @@ events at transmission loses exactly the data a sequence-of-events record exists
 to preserve — and loses it silently, because the master has no way to know an
 event it never saw was sent. `Unselect` is what happens when a confirmation does
 not arrive: the events go back on the queue and are re-sent.
+
+`SelectType` selects by point type rather than class, for a read of one kind of
+event. `Release` returns some selected events to the queue — the ones that did
+not fit the fragment being sent. `Discard` removes selected events that can never
+be reported, because no encoding exists for them or one alone is larger than a
+fragment, and counts them as lost so the overflow indication tells the master.
 
 On overflow the **oldest** event is discarded, not the newest: after an overflow
 the master's picture is already incomplete, and the recent past is what an
@@ -1646,11 +1935,19 @@ type Event struct {
     Binary        dnp3.Binary
     DoubleBit     dnp3.DoubleBitBinary
     Counter       dnp3.Counter
-    FrozenCounter dnp3.FrozenCounter
-    Analog        dnp3.Analog
-    BinaryOutput  dnp3.BinaryOutputStatus
-    AnalogOutput  dnp3.AnalogOutputStatus
-    OctetString   dnp3.OctetString
+    FrozenCounter     dnp3.FrozenCounter
+    Dataset           []byte
+    SecurityStatistic uint32
+    FrozenAnalog      dnp3.Analog
+    Analog            dnp3.Analog
+    BinaryOutput      dnp3.BinaryOutputStatus
+    AnalogOutput      dnp3.AnalogOutputStatus
+    OctetString       dnp3.OctetString
+
+    // For TypeBinaryCommandEvent and TypeAnalogCommandEvent.
+    CommandStatus dnp3.CommandStatus
+    CommandState  bool    // the state a binary output was commanded to
+    CommandValue  float64 // the value an analog output was commanded to
 }
 ```
 
@@ -1666,14 +1963,27 @@ type Stats struct {
     FragmentsSent     uint64
     ConfirmsReceived  uint64
     ConfirmTimeouts   uint64
-    UnknownFunction   uint64
-    MalformedRequests uint64
-    Connections       uint64
+    UnknownFunction    uint64
+    RepeatedRequests   uint64 // a request repeated after a lost response, answered from the cache
+    IncompleteRequests uint64 // a multi-fragment request, which is refused
+    MalformedRequests  uint64
+    Connections        uint64
 
     CommandsExecuted    uint64
     CommandsRejected    uint64
     UnsolicitedSent     uint64
     UnsolicitedTimeouts uint64
+
+    AttributesRead uint64 // group 0 reads answered
+
+    FilesOpened        uint64 // see File transfer
+    FileBlocksSent     uint64
+    FileBlocksReceived uint64
+    FileErrors         uint64
+    FileTimeouts       uint64
+    FilesAborted       uint64
+
+    ScheduledFreezes uint64 // FREEZE_AT_TIME freezes performed
 }
 ```
 
@@ -1963,7 +2273,30 @@ func ParseFileDescriptor(buf []byte) (FileDescriptor, error)       // g70v7: wha
 func ParseFileAuth(buf []byte) (FileAuth, error)                   // g70v2
 ```
 
-Each has an `Append` counterpart. `FileTransport.Last` is the top bit of the
+```go
+const (
+    FileAuthSize            = 12 // g70v2
+    FileCommandSize         = 26 // g70v3
+    FileCommandStatusSize   = 13 // g70v4
+    FileTransportSize       = 8  // g70v5
+    FileTransportStatusSize = 9  // g70v6
+    FileDescriptorSize      = 20 // g70v7
+)
+```
+
+The fixed portion of each object, which is also where its variable part — a
+name, a password, a block of data — begins.
+
+```go
+func AppendFileCommand(dst []byte, c FileCommand) []byte
+func AppendFileCommandStatus(dst []byte, s FileCommandStatus) []byte
+func AppendFileTransport(dst []byte, t FileTransport) []byte
+func AppendFileTransportStatus(dst []byte, s FileTransportStatus) []byte
+func AppendFileDescriptor(dst []byte, d FileDescriptor) []byte
+func AppendFileAuth(dst []byte, a FileAuth) []byte
+```
+
+`FileTransport.Last` is the top bit of the
 block number on the wire, unpacked into a field, because it is the only thing
 that says a transfer has ended.
 
@@ -1975,6 +2308,114 @@ func DescriptorFor(info dnp3.FileInfo, requestID uint16) FileDescriptor
 Reading a directory is reading a file: what comes back is a run of descriptors
 laid end to end, each saying how long it is. That is why a descriptor carries a
 name offset at all — it is what makes the run walkable.
+
+## Attribute, command event and extended-service objects
+
+```go
+const AttributeHeaderSize = 2   // data type and length
+const MaxAttributeValue   = 255
+
+func ParseAttribute(set, variation uint8, buf []byte) (dnp3.Attribute, int, error)
+func AppendAttribute(dst []byte, a dnp3.Attribute) ([]byte, error)
+
+func StringAttribute(variation uint8, text string) dnp3.Attribute
+func IntAttribute(variation uint8, v int64) dnp3.Attribute
+func UintAttribute(variation uint8, v uint64) dnp3.Attribute
+func ListAttribute(items []dnp3.AttributeListItem) dnp3.Attribute
+```
+
+`ParseAttribute` returns the octets it consumed. `AppendAttribute` picks the
+plain or extended list form from the length, as described under
+[Attribute lists](#attribute-lists).
+
+```go
+func CommandEventSize(group, variation uint8) (int, bool)
+func ParseCommandEvent(group, variation uint8, buf []byte) (dnp3.CommandEvent, bool)
+func AppendCommandEvent(dst []byte, group, variation uint8, e dnp3.CommandEvent) []byte
+```
+
+Groups 13 and 43, whose encodings differ in ways the generated table does not
+capture: a binary command event packs the commanded state into the status
+octet.
+
+```go
+type DatasetElement struct {
+    Code, DataType, MaxLength uint8
+    Ancillary                 []byte
+}
+
+func ParseDatasetDescriptor(data []byte) ([]DatasetElement, error)
+func AppendDatasetDescriptor(dst []byte, elements []DatasetElement) ([]byte, error)
+
+type ActivationStatus struct {
+    Code uint8
+    Text string
+}
+
+type ActivationResult struct {
+    Delay    time.Duration
+    Statuses []ActivationStatus
+}
+
+func ParseActivationResult(data []byte) (ActivationResult, error)
+func AppendActivationResult(dst []byte, v ActivationResult) ([]byte, error)
+```
+
+Group 86 dataset descriptors and the group 91 result of ACTIVATE_CONFIG.
+
+```go
+type AuthChallenge struct {
+    Sequence          uint32
+    User              uint16
+    Algorithm, Reason uint8
+    Data              []byte
+}
+
+type AuthReply struct {
+    Sequence uint32
+    User     uint16
+    MAC      []byte
+}
+
+type AuthKeyStatus struct {
+    Sequence                         uint32
+    User                             uint16
+    WrapAlgorithm, Status, Algorithm uint8
+    Challenge, MAC                   []byte
+}
+
+type AuthKeyChange struct {
+    Sequence uint32
+    User     uint16
+    Wrapped  []byte
+}
+```
+
+```go
+func ParseAuthChallenge(data []byte) (AuthChallenge, error)  // g120v1
+func ParseAuthReply(data []byte) (AuthReply, error)          // g120v2
+func ParseAuthKeyStatus(data []byte) (AuthKeyStatus, error)  // g120v5
+func ParseAuthKeyChange(data []byte) (AuthKeyChange, error)  // g120v6
+
+func AppendAuthChallenge(dst []byte, v AuthChallenge) []byte
+func AppendAuthReply(dst []byte, v AuthReply) []byte
+func AppendAuthKeyStatus(dst []byte, v AuthKeyStatus) []byte
+func AppendAuthKeyChange(dst []byte, v AuthKeyChange) []byte
+```
+
+The group 120 objects of secure authentication.
+
+```go
+var (
+    ErrAttribute            // wraps dnp3.ErrMalformed
+    ErrAuthenticationObject // wraps dnp3.ErrMalformed
+    ErrFileObject           // wraps dnp3.ErrMalformed
+)
+```
+
+The errors the variable-length parsers return, so a caller can tell which kind
+of object was malformed and still classify it with `errors.Is(err,
+dnp3.ErrMalformed)`.
 
 ## Packed objects
 

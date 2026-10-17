@@ -202,6 +202,30 @@ func TestRegistryReopensAfterFullRelease(t *testing.T) {
 	}
 }
 
+// A bus closed directly, against the advice to release it, stayed registered
+// and was handed to the next Open already dead.
+func TestRegistryReplacesADirectlyClosedBus(t *testing.T) {
+	r := NewRegistry()
+
+	name := "serial /dev/ttyUSB0 9600/8N1"
+	first := r.Open(&fakeChannel{name: name}, Config{})
+	_ = first.Close()
+
+	ch := &fakeChannel{name: name}
+	second := r.Open(ch, Config{})
+	t.Cleanup(func() { _ = r.Release(second) })
+
+	if second == first || second.isClosed() {
+		t.Fatal("Open returned the bus that had already been closed")
+	}
+	if ch.wasClosed() {
+		t.Error("the channel the new bus needs was closed as though redundant")
+	}
+	if r.Len() != 1 {
+		t.Errorf("the registry holds %d buses, want 1", r.Len())
+	}
+}
+
 // Only the first Open's configuration takes effect; a later Open for the same
 // channel does not silently reconfigure a bus other callers depend on.
 func TestRegistryConfigIsFixedByTheFirstOpen(t *testing.T) {
