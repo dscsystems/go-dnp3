@@ -5,7 +5,7 @@ and outstation roles.
 
 > **Status: usable, API not yet stable.** A master and an outstation talk to
 > each other end to end over TCP, TLS, UDP, serial or an in-process pipe, with
-> or without link-layer confirmation. Three applications ship with it. What is
+> or without link-layer confirmation. Four applications ship with it. What is
 > and is not supported is set out honestly in the
 > [device profile](docs/device-profile.md), including the gaps.
 
@@ -154,7 +154,7 @@ no socket and no hardware:
 ```console
 $ dnp3-explorer -demo
 dnp3-explorer  demo (in-process outstation)  ● connected      up 1:36  13.4/s  12:04:29
- 1 Overview  2 Points  3 Events  4 Log  5 Help                            20 points
+ 1 Overview  2 Points  3 Events  4 Log  5 Files  6 Help                   20 points
 ────────────────────────────────────────────────────────────────────────────────────
  POINT ▲          VALUE TREND        QUALITY                AGE TIMESTAMP
  BI 0                ON ▁▁▁▁████████ ONLINE                 0s  12:04:29.375
@@ -253,6 +253,10 @@ Simulated plant
     AI   3  Transformer temperature  ramp 35..85 degC
     AI   4  Tap position  step 7..9
 
+  Analog outputs (setpoints)
+    AO   0  Voltage setpoint  11 kV  [10.8..11.2]
+    AO   4  Tap position setpoint  8  [7..9]
+
   Counters
     CT   0  Feeder 1 energy  12/s
     CT   1  Feeder 2 energy  8/s
@@ -303,7 +307,7 @@ dump of each frame.
 
 ```
 make check       # gofmt, vet and race-enabled tests
-make fuzz-short  # 30 seconds per fuzz target
+make fuzz-short  # 20 seconds per fuzz target
 make cover       # coverage.html
 make help        # everything else
 ```

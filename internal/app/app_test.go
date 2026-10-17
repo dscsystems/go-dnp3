@@ -893,3 +893,23 @@ func TestIndexListInARequestWithoutObjectData(t *testing.T) {
 		t.Errorf("second header is g%d, want g1", f.Objects[1].Group)
 	}
 }
+
+// A size-prefixed header with variation zero has no objects for its count to
+// describe. It used to parse, leaving a 32-bit count unchecked against the
+// data, and FreeFormatObjects sized an allocation from that count — eleven
+// octets from a peer were enough to exhaust memory.
+func TestSizePrefixedVariationZeroRejected(t *testing.T) {
+	frag := []byte{0xC0, 0x81, 0x00, 0x00, 0x57, 0x00, 0x59, 0xFF, 0xFF, 0xFF, 0xFF}
+	if _, err := ParseFragment(nil, frag); err == nil {
+		t.Fatal("ParseFragment accepted a size-prefixed header with variation zero")
+	}
+}
+
+func TestFreeFormatObjectsIgnoresInflatedCount(t *testing.T) {
+	h := ObjectHeader{Group: 87, Variation: 0, Qualifier: 0x59}
+	h.Range.Count = 0xFFFFFFFF
+	objs, err := FreeFormatObjects(h)
+	if err != nil || len(objs) != 0 {
+		t.Fatalf("got %d objects, err %v; want none", len(objs), err)
+	}
+}

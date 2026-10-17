@@ -246,8 +246,9 @@ thing to check when values look wrong.
 
 ## Interoperability
 
-Verified against opendnp3, in both directions, with
-container built from source (`make interop-build && make interop`):
+Verified against opendnp3, in both directions. The recorded run built
+opendnp3 natively rather than in the container `make interop-build` produces;
+[interop-results.md](interop-results.md) says how it differed:
 
 | Peer | Version | Our master → their outstation | Their master → our outstation |
 | --- | --- | --- | --- |

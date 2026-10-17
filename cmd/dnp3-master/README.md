@@ -164,10 +164,21 @@ to be an example; load these files into whatever database you like.
 
 ```console
 $ curl -s localhost:8080/status
-[{"name":"127.0.0.1:20000","target":"TCP 127.0.0.1:20000","connected":true,
-  "indications":"CLASS_2_EVENTS|CLASS_3_EVENTS",
-  "tasks_run":9,"tasks_succeeded":9,"tasks_failed":0,"response_timeouts":0,
-  "unsolicited":0,"restarts_seen":1,"connections":1}]
+[
+  {
+    "name": "127.0.0.1:20000",
+    "target": "TCP 127.0.0.1:20000",
+    "connected": true,
+    "indications": "CLASS_2_EVENTS|CLASS_3_EVENTS",
+    "tasks_run": 9,
+    "tasks_succeeded": 9,
+    "tasks_failed": 0,
+    "response_timeouts": 0,
+    "unsolicited": 0,
+    "restarts_seen": 1,
+    "connections": 1
+  }
+]
 ```
 
 **`GET /points`** — the latest value of every point. `?site=NAME` filters.
@@ -176,9 +187,19 @@ changed rather than map iteration order:
 
 ```console
 $ curl -s 'localhost:8080/points?site=substation-a'
-[{"site":"substation-a","type":"Analog","index":0,"value":"11.03",
-  "quality":"ONLINE","good":true,"timestamp":"2026-08-15T12:04:29.375Z",
-  "received":"2026-08-15T12:04:29.376Z","source":"event"}]
+[
+  {
+    "site": "substation-a",
+    "type": "Analog",
+    "index": 0,
+    "value": "11.03",
+    "quality": "ONLINE",
+    "good": true,
+    "timestamp": "2026-08-15T12:04:29.375Z",
+    "received": "2026-08-15T12:04:29.376Z",
+    "source": "event"
+  }
+]
 ```
 
 **`GET /healthz`** — liveness.

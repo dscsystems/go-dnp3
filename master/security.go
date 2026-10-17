@@ -171,7 +171,7 @@ func (s *Session) onAuthenticationResponse(w io.Writer, r stack.Received, f app.
 	mac := security.MAC(s.security.control, f.Raw, s.security.lastRequest)
 	reply, _ := app.FreeFormat(120, 2, objects.AppendAuthReply(nil, objects.AuthReply{Sequence: c.Sequence, User: s.cfg.SecureAuthentication.User, MAC: mac}))
 	fragment := app.BuildRequest(nil, app.Control{Fir: true, Fin: true, Seq: t.seq}, app.FuncAuthRequest, reply)
-	if err := s.stack.Send(w, fragment); err != nil {
+	if err := s.send(w, fragment); err != nil {
 		s.inflight = nil
 		s.completeTask(t, err)
 		return

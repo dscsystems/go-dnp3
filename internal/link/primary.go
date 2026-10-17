@@ -290,6 +290,10 @@ func (p *Primary) Retries() int { return p.retries }
 func (p *Primary) fail() (Frame, Action) {
 	p.state = priIdle
 	p.linkUp = false
+	// Flow control is the peer's answer about the exchange just abandoned.
+	// Left latched on an idle link, nothing would clear it, and every later
+	// Send would be refused rather than re-running the handshake.
+	p.dfc = false
 	p.pending = nil
 	p.retries = 0
 	return Frame{}, ActionFailed

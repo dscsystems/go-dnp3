@@ -169,7 +169,14 @@ func (db *Database) Counts() DatabaseConfig {
 // Configure sets the reporting configuration for one point. It is a no-op for
 // an index the database does not have, so a configuration file listing a point
 // that was removed does not panic the outstation at startup.
+//
+// It also refuses, returning false, an event variation the outstation has no
+// encoding for. Accepted, every event the point raised would be impossible to
+// report.
 func (db *Database) Configure(pt dnp3.PointType, index uint16, cfg PointConfig) bool {
+	if !eventVariationEncodable(pt, cfg.EventVariation) {
+		return false
+	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -197,6 +204,22 @@ func (db *Database) Configure(pt dnp3.PointType, index uint16, cfg PointConfig) 
 		return setConfig(db.octet, i, cfg)
 	}
 	return false
+}
+
+// eventVariationEncodable reports whether events of a point type can be
+// reported in the given variation; zero keeps the current one. Octet strings
+// and virtual terminal blocks take their variation from the value's length,
+// so there is no variation to check.
+func eventVariationEncodable(pt dnp3.PointType, v uint8) bool {
+	if v == 0 || pt == dnp3.TypeOctetString || pt == dnp3.TypeVirtualTerminal {
+		return true
+	}
+	d, ok := objects.Lookup(objects.GV(eventGroup(pt), v))
+	if !ok {
+		return false
+	}
+	size, ok := d.SizeOctets()
+	return ok && size > 0
 }
 
 func setConfig[T any](pts []point[T], i int, cfg PointConfig) bool {

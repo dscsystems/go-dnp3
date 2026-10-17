@@ -218,7 +218,7 @@ The outstation answers group 0 with a nameplate that says plainly what it is:
 ```
     252  manufacturer name            DSC Systems
     250  product name and model       dnp3-outstation (simulator)
-    242  software version             0.1.0-dev
+    242  software version             0.5.3
     248  serial number                SIM-0000-0001
     249  subset level and conformance 2
 ```

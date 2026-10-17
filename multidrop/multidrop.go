@@ -285,6 +285,13 @@ func (b *Bus) Stats() Stats {
 //
 // Every session on it sees its connection drop and its next connect report
 // [channel.ErrClosed], which both sessions treat as a clean shutdown.
+// isClosed reports whether the bus has been closed.
+func (b *Bus) isClosed() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.closed
+}
+
 func (b *Bus) Close() error {
 	b.mu.Lock()
 	if b.closed {
@@ -533,6 +540,11 @@ func (b *Bus) route(f link.Frame) {
 		if !c.push(out) {
 			b.bump(func(st *Stats) { st.FramesDropped++ })
 			b.log.Warn("station queue full; frame dropped", "station", c.st.addr)
+			// The session never sees this frame, so as far as it knows the
+			// exchange is still open. Ending its hold on the strength of a
+			// frame it did not receive would hand the line to another
+			// master mid-exchange; the hold lapses on its own instead.
+			continue
 		}
 		b.arb.observe(c, complete)
 	}
