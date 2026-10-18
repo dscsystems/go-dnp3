@@ -1127,6 +1127,13 @@ func (s *Session) onConfirm(h app.Header) {
 		return
 	}
 	s.awaitingConfirm = false
+	if s.pendingIndex >= len(s.pendingBodies) {
+		// The last fragment is confirmed, so the response is done now, not
+		// when advanceResponse next runs. A request in the same read as the
+		// confirm is handled before that, and would abandon the response,
+		// handing back events the master has just confirmed.
+		_ = s.finishResponse()
+	}
 }
 
 // onRead answers a read request.
