@@ -417,6 +417,10 @@ func TestDirectOperateNoReply(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
+	// The master's startup clears the restart indication, and the answer to
+	// that must be counted before the snapshot, not mistaken for an answer
+	// to the operate.
+	waitFor(t, 2*time.Second, func() bool { return out.Stats().ResponsesSent >= 1 })
 	before := out.Stats().ResponsesSent
 	if err := m.DirectOperateNoReply(ctx, master.LatchOn(1)); err != nil {
 		t.Fatalf("direct operate no reply: %v", err)
