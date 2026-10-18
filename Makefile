@@ -112,6 +112,20 @@ interop-clean:
 	-docker rm -f interop-opendnp3 2>/dev/null
 	-docker rmi go-dnp3-interop-opendnp3 2>/dev/null
 
+# ---------- dnp3c conformance ----------
+#
+# Step Function I/O's dnp3c runs the DNP Users Group's IED certification
+# procedures against our outstation (conformance/dnp3c). It needs Java 17 and
+# Maven, or Docker.
+
+.PHONY: dnp3c
+dnp3c: ## run dnp3c's 3.1r1 procedures (subset level 3) against our outstation
+	KEEP_GOING=1 ./conformance/dnp3c/run.sh 3.1r1
+
+.PHONY: dnp3c-27
+dnp3c-27: ## run dnp3c's 2.7 procedures (subset level 2) against our outstation
+	KEEP_GOING=1 ./conformance/dnp3c/run.sh 2.7
+
 .PHONY: clean
 clean:
 	rm -f coverage.out coverage.html
@@ -119,5 +133,5 @@ clean:
 
 .PHONY: help
 help:
-	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
+	@grep -hE '^[a-z0-9-]+:.*?## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'

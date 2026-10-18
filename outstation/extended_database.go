@@ -18,15 +18,24 @@ func (db *Database) UpdateFrozenAnalog(index uint16, v dnp3.Analog) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	if int(index) < len(db.frozenAnalog) {
-		db.setFrozenAnalog(index, v)
+		db.setFrozenAnalog(index, v, false)
 	}
 }
 
-func (db *Database) setFrozenAnalog(index uint16, v dnp3.Analog) {
+// setFrozenAnalog is setFrozen for a frozen analog: its deadband decides
+// whether a stored value reports, and a freeze always does.
+func (db *Database) setFrozenAnalog(index uint16, v dnp3.Analog, freeze bool) {
 	p := &db.frozenAnalog[index]
 	flagsChanged := p.value.Flags != v.Flags
 	p.value = v
-	if p.shouldReport(v.Value, flagsChanged) {
+	report := p.shouldReport(v.Value, flagsChanged)
+	if freeze && !report {
+		// The deadband measures from the value last reported, which this
+		// event now is.
+		p.reported = v.Value
+		report = true
+	}
+	if report {
 		db.raise(p.cfg, Event{Type: dnp3.TypeFrozenAnalog, Index: index,
 			Variation: p.cfg.EventVariation, FrozenAnalog: v, Time: v.Time})
 	}
@@ -43,7 +52,7 @@ func (db *Database) freezeAnalogsRange(start, stop uint16, at dnp3.Timestamp, cl
 	for i := int(start); i <= int(stop) && i < min(len(db.analog), len(db.frozenAnalog)); i++ {
 		v := db.analog[i].value
 		v.Time = at
-		db.setFrozenAnalog(uint16(i), v)
+		db.setFrozenAnalog(uint16(i), v, true)
 		if clear {
 			p := &db.analog[i]
 			v.Value = 0

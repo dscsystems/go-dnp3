@@ -1466,7 +1466,10 @@ type Config struct {
     ConfirmTimeout time.Duration // default 5s; wait for an application confirm before requeueing events
     SelectTimeout  time.Duration // default 5s; how long a select reservation stays valid
 
+    MaxControlsPerRequest int // zero means no cap; past it, controls are answered TOO_MANY_OPS
+
     Unsolicited UnsolicitedConfig
+    Clock       ClockConfig // when to ask for the time again; the zero value never does
 
     Files FileConfig // see File transfer
 
@@ -1568,12 +1571,26 @@ type UnsolicitedConfig struct {
 ```
 
 `Enabled` alone does not start unsolicited reporting: the master still has to
-enable the individual classes with ENABLE_UNSOLICITED. An unconfirmed response
-is re-sent unchanged up to `MaxRetries` times, one `ConfirmTimeout` apart. Then
+enable the individual classes with ENABLE_UNSOLICITED; with `Enabled` false,
+ENABLE and DISABLE_UNSOLICITED are answered NO_FUNC_CODE_SUPPORT. An
+unconfirmed response is re-sent, with the same objects and sequence number and
+the IIN as they are then, up to `MaxRetries` times, one `ConfirmTimeout` apart. Then
 its events go back in the queue for a poll to collect, and after one more
 `ConfirmTimeout` the outstation starts again with a fresh response — so on a
 dead link it sends `MaxRetries + 1` responses every `(MaxRetries + 2) ×
 ConfirmTimeout` while events are pending.
+
+```go
+type ClockConfig struct {
+    SyncInterval time.Duration // NEED_TIME again this long after each clock write; zero never
+    Holdover     time.Duration // then this much longer before timestamps are unsynchronized
+}
+```
+
+A clock drifts from the moment it is set. With a `SyncInterval`, the outstation
+asserts NEED_TIME that long after each write, and if the master has not set the
+clock again within the `Holdover` after that, reports its time as
+unsynchronized: relative-time events are then measured from g51v2.
 
 ## Database
 
@@ -1852,6 +1869,18 @@ type NopApplication struct{} // defaults for embedding; WriteAbsoluteTime accept
 The returned restart duration is reported back to the master in a group 52 time
 delay.
 
+```go
+type RestartSupport interface { // optional, on the Application
+    SupportsColdRestart() bool
+    SupportsWarmRestart() bool
+}
+```
+
+An Application that implements `RestartSupport` can refuse either restart: the
+request is answered NO_FUNC_CODE_SUPPORT and nothing restarts. It is asked on
+every request, so support can change while the outstation runs. Without it,
+both are supported.
+
 ## CommandHandler
 
 ```go
@@ -1865,6 +1894,19 @@ type CommandHandler interface {
 
 type RejectingCommandHandler struct{} // refuses everything with NOT_SUPPORTED
 ```
+
+```go
+type OutputPoints interface { // optional, on the CommandHandler
+    HasOutput(pt dnp3.PointType, index uint16) bool // TypeBinaryOutputStatus for g12, TypeAnalogOutputStatus for g41
+}
+```
+
+A command for an output the device does not have is answered NOT_SUPPORTED
+with PARAMETER_ERROR and never reaches the handler. A handler implementing
+`OutputPoints` says which outputs exist. Without it, the database's output
+status points stand for them (`BinaryOutputStatus` for g12,
+`AnalogOutputStatus` for g41); a database with none of the type leaves every
+command to the handler.
 
 **Select must not operate anything.** It reports whether the outstation *would*
 accept the command. Operate is called for OPERATE, DIRECT_OPERATE and

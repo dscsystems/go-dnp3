@@ -169,21 +169,33 @@ misparsing the rest of the fragment, but no codec turns them into values.
 | Item | Support |
 | --- | --- |
 | Static data reporting | Yes, per-point configurable variation |
+| Variations without flags | Used only for points whose flags are just ONLINE; any other point is reported in the matching variation with flags |
+| Packed variations | g1v1, g3v1 and g10v1 reported a bit (or two) per point |
+| Response order | Events first, then static data, whatever order the request named them in |
+| Reads of missing points | The points that exist are reported; a range or index past the last sets `PARAMETER_ERROR`, a type the device has none of sets `OBJECT_UNKNOWN` |
 | Event generation | On value or quality change; analogs and counters honour a deadband |
+| Freezes | Every frozen point raises an event, changed or not: the freeze is the news |
 | Deadband reference | The last **reported** value, not the last stored one |
 | Event classes | 1, 2, 3 assignable per point; class 0 for static data |
 | Event buffer | Configurable capacity, oldest discarded on overflow |
 | Event confirmation | Events are cleared only by an application confirm |
+| Class indications | IIN1.1–1.3 count only events not yet sent; the response carrying a class's last events clears its bit |
 | Confirm timeout | Selected events return to the queue and are re-sent |
-| Unsolicited reporting | Yes, with a null response first, hold time and retries |
-| Select-before-operate | Yes, with a configurable timeout |
+| A request during a confirmation wait | Ends the wait; the unconfirmed events return to the queue first |
+| Unsolicited reporting | Yes, with a null response first, hold time and retries; retries repeat the objects and sequence number with the current IIN |
+| Reads during an unsolicited confirmation wait | Deferred until the confirmation or its timeout; a later read replaces it, any other request discards it |
+| Unsolicited while a solicited response is in progress | Held until it is finished |
+| Unsolicited switched off (`Unsolicited.Enabled` false) | ENABLE and DISABLE_UNSOLICITED answered `NO_FUNC_CODE_SUPPORT` |
+| Select-before-operate | Yes, with a configurable timeout; a late operate is answered `TIMEOUT` |
 | Select matching | Raw object octets must match exactly |
+| Controls per request | Unlimited, or capped by `MaxControlsPerRequest`; those past the cap are answered `TOO_MANY_OPS` |
+| Commands to missing outputs | `NOT_SUPPORTED` and `PARAMETER_ERROR`, without reaching the handler. Which outputs exist is the `CommandHandler`'s to say through `OutputPoints`, or else the database's output status points' (with none of the type, every command goes to the handler) |
 | Multi-fragment responses | Yes; the first fragment carries the request's sequence number and each later one increments it |
 | Multi-fragment requests | No, see the known gaps |
-| Broadcast requests | Executed, not answered; `IIN1.BROADCAST` on the next response |
-| Clock | Set by a master; the outstation reports `NEED_TIME` until then |
+| Broadcast requests | Executed, not answered; `IIN1.BROADCAST` on the next response. Sent to 0xFFFE, that response asks for confirmation and the indication clears once it is confirmed; sent to 0xFFFD or 0xFFFF, it clears once reported |
+| Clock | Set by a master; the outstation reports `NEED_TIME` until then, and again `Clock.SyncInterval` after each write; `Clock.Holdover` after that, the clock is reported unsynchronized |
 | Clock procedures accepted | Direct write (g50v1) and the recorded-time procedure (RECORD_CURRENT_TIME then a g50v3 write) |
-| Cold and warm restart | Yes, answered with a g52v2 time delay |
+| Cold and warm restart | Yes, answered with a g52v2 time delay; an Application implementing `RestartSupport` can refuse either, with `NO_FUNC_CODE_SUPPORT` |
 
 Frozen analogs have independent storage and point configuration. Size
 `Database.FrozenAnalog`, configure `TypeFrozenAnalog`, and freeze running g30

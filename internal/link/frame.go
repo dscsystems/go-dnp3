@@ -44,15 +44,16 @@ const (
 
 // Reserved and broadcast addresses.
 const (
-	// BroadcastNoConfirm addresses every outstation and requests no
-	// application confirmation.
-	BroadcastNoConfirm uint16 = 0xFFFF
-	// BroadcastMandatoryConfirm addresses every outstation and requires an
-	// application confirmation.
+	// BroadcastOptionalConfirm addresses every outstation, leaving it to each
+	// whether the response reporting the broadcast asks for an application
+	// confirmation.
+	BroadcastOptionalConfirm uint16 = 0xFFFF
+	// BroadcastMandatoryConfirm addresses every outstation, and has the
+	// response reporting the broadcast ask for an application confirmation.
 	BroadcastMandatoryConfirm uint16 = 0xFFFE
-	// BroadcastOptionalConfirm addresses every outstation, leaving the
-	// confirmation to the outstation's discretion.
-	BroadcastOptionalConfirm uint16 = 0xFFFD
+	// BroadcastNoConfirm addresses every outstation, and has the response
+	// reporting the broadcast not ask for an application confirmation.
+	BroadcastNoConfirm uint16 = 0xFFFD
 	// SelfAddress lets a master address an outstation without knowing its
 	// configured address. Level 3.
 	SelfAddress uint16 = 0xFFFC
@@ -63,7 +64,7 @@ const (
 
 // IsBroadcast reports whether addr is one of the three broadcast addresses.
 func IsBroadcast(addr uint16) bool {
-	return addr >= BroadcastOptionalConfirm && addr <= BroadcastNoConfirm
+	return addr >= BroadcastNoConfirm && addr <= BroadcastOptionalConfirm
 }
 
 // IsReserved reports whether addr falls in the reserved range, which a

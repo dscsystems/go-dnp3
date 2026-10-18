@@ -505,7 +505,7 @@ func TestSelectBeforeOperate(t *testing.T) {
 		SelectTimeout: 5 * time.Second,
 	}, plant)
 
-	crob := crobHeader(3, dnp3.ControlLatchOn)
+	crob := crobHeader(1, dnp3.ControlLatchOn)
 
 	resp := h.request(app.FuncSelect, crob)
 	if got := commandStatus(t, resp); got != dnp3.CommandSuccess {
@@ -560,15 +560,28 @@ func TestOperateMustMatchSelect(t *testing.T) {
 	}
 }
 
-// Enable and disable unsolicited are accepted for the event classes.
+// Enable and disable unsolicited are accepted for the event classes by a
+// device that reports unsolicited, and refused by one configured not to: it
+// has nothing to turn on, and accepting would tell the master its events are
+// on their way.
 func TestUnsolicitedControlAccepted(t *testing.T) {
-	h := newHarness(t, outstation.Config{Database: smallDB()}, nil)
+	for _, enabled := range []bool{true, false} {
+		h := newHarness(t, outstation.Config{
+			Database:    smallDB(),
+			Unsolicited: outstation.UnsolicitedConfig{Enabled: enabled},
+		}, nil)
+		if enabled {
+			// The null unsolicited response comes first, and would otherwise
+			// be taken for the answer.
+			sendUnsolConfirm(h, h.await(0).Header.Control.Seq)
+		}
 
-	for _, fc := range []app.FuncCode{app.FuncEnableUnsolicited, app.FuncDisableUnsolicited} {
-		resp := h.request(fc,
-			app.ReadAllObjects(60, 2), app.ReadAllObjects(60, 3), app.ReadAllObjects(60, 4))
-		if resp.Header.IIN.HasAny(app.IINNoFuncCodeSupport | app.IINObjectUnknown) {
-			t.Errorf("%v was refused; IIN = %v", fc, resp.Header.IIN)
+		for _, fc := range []app.FuncCode{app.FuncEnableUnsolicited, app.FuncDisableUnsolicited} {
+			resp := h.request(fc,
+				app.ReadAllObjects(60, 2), app.ReadAllObjects(60, 3), app.ReadAllObjects(60, 4))
+			if !resp.Header.IIN.HasAny(app.IINNoFuncCodeSupport|app.IINObjectUnknown) != enabled {
+				t.Errorf("unsolicited enabled %v: %v answered with IIN = %v", enabled, fc, resp.Header.IIN)
+			}
 		}
 	}
 }
