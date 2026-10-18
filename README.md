@@ -109,6 +109,17 @@ function codes, unknown groups, broadcast handling, the restart handshake,
 event confirmation, select-before-operate. It is not a substitute for certified
 conformance testing, and nothing in this repository is a conformance claim.
 
+[`conformance/dnp3c/`](conformance/dnp3c/README.md) runs Step Function I/O's
+[dnp3c](https://github.com/stepfunc/dnp3c), an independent implementation of
+the IED certification procedures, against the outstation: revision 3.1r1 at
+subset level 3 and 2.7 at level 2. What it found, and how each was fixed, is
+listed there.
+
+```
+make dnp3c           # 3.1r1, subset level 3
+make dnp3c-27        # 2.7, subset level 2
+```
+
 ### Object codecs
 
 The ~113 group/variation encodings are generated from a single declarative

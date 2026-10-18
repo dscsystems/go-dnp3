@@ -6,3 +6,7 @@ coverage.html
 
 # Fuzz corpus entries the toolchain caches outside the repo. Crashers written
 # under testdata/fuzz ARE committed — they are regression tests.
+
+# dnp3c conformance runs: reports, logs and captures, and the plugin's build.
+/conformance/dnp3c/results/
+/conformance/dnp3c/plugin/target/

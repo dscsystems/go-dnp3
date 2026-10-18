@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The dnp3c integration plugin for go-dnp3's device under test.
+
+  dnp3c is a Scala library; the plugin has to run in its JVM. It holds no
+  test logic: each call goes to the Go device under test (../dut) over HTTP,
+  which does the work and the checks. See ../README.md.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.dscsystems.godnp3</groupId>
+    <artifactId>dnp3c-plugin</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.release>17</maven.compiler.release>
+        <!-- dnp3c's own Scala version: the plugin implements its trait -->
+        <scala.version>3.9.0</scala.version>
+        <dnp3c.version>0.2.0</dnp3c.version>
+        <scala-maven-plugin.version>4.10.0</scala-maven-plugin.version>
+        <!-- what exec runs: -Dconformance.revision=2.7 with outstation.subset.level = 2 -->
+        <conformance.revision>3.1r1</conformance.revision>
+        <conformance.config>../device.ini</conformance.config>
+        <conformance.run>all</conformance.run>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.scala-lang</groupId>
+            <artifactId>scala3-library_3</artifactId>
+            <version>${scala.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.stepfunc</groupId>
+            <artifactId>dnp3c</artifactId>
+            <version>${dnp3c.version}</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <sourceDirectory>src/main/scala</sourceDirectory>
+        <plugins>
+            <plugin>
+                <groupId>net.alchim31.maven</groupId>
+                <artifactId>scala-maven-plugin</artifactId>
+                <version>${scala-maven-plugin.version}</version>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>compile</goal>
+                        </goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <args>
+                        <arg>-feature</arg>
+                        <arg>-deprecation</arg>
+                    </args>
+                    <launchers>
+                        <launcher>
+                            <id>conformance</id>
+                            <mainClass>godnp3.conformance.Main</mainClass>
+                            <args>
+                                <arg>-rev</arg>
+                                <arg>${conformance.revision}</arg>
+                                <arg>-config</arg>
+                                <arg>${conformance.config}</arg>
+                                <arg>-run</arg>
+                                <arg>${conformance.run}</arg>
+                            </args>
+                        </launcher>
+                    </launchers>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
