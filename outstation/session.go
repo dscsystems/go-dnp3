@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/dscsystems/go-dnp3"
 	"github.com/dscsystems/go-dnp3/channel"
 	"github.com/dscsystems/go-dnp3/internal/app"
+	"github.com/dscsystems/go-dnp3/internal/link"
 	"github.com/dscsystems/go-dnp3/internal/stack"
 	"github.com/dscsystems/go-dnp3/objects"
 )
@@ -43,8 +45,18 @@ type Config struct {
 	// valid. Zero uses five seconds, which is the conventional default.
 	SelectTimeout time.Duration
 
+	// MaxControlsPerRequest caps the command objects one SELECT, OPERATE or
+	// DIRECT_OPERATE may carry, across all its headers. The ones past the cap
+	// are answered TOO_MANY_OPS and never reach the CommandHandler. Zero
+	// means no cap.
+	MaxControlsPerRequest int
+
 	// Unsolicited paces unsolicited reporting.
 	Unsolicited UnsolicitedConfig
+
+	// Clock says when a clock the master has set needs setting again. The zero
+	// value never asks again.
+	Clock ClockConfig
 
 	// Files parameterises file transfer. Without a handler the outstation
 	// answers the file function codes the way a device that has no files does.
@@ -122,6 +134,27 @@ func (c *Config) applyDefaults() {
 	}
 }
 
+// ClockConfig paces time synchronization.
+//
+// A clock drifts from the moment it is set. A device that knows how fast asks
+// the master for the time again before the drift matters, with NEED_TIME; if
+// the master does not answer, it stops vouching for the clock, and reports its
+// timestamps as unsynchronized. Without either, one clock write at power-up is
+// trusted forever.
+type ClockConfig struct {
+	// SyncInterval is how long after the master sets the clock the outstation
+	// asserts NEED_TIME again. Zero never does.
+	SyncInterval time.Duration
+
+	// Holdover is how much longer the clock is trusted once NEED_TIME is
+	// asserted: when it has passed without the master setting the clock,
+	// timestamps are reported as unsynchronized, and relative-time events are
+	// measured from the unsynchronized common time of occurrence, g51v2. Zero
+	// stops trusting the clock as soon as NEED_TIME is asserted. It applies
+	// only with a SyncInterval.
+	Holdover time.Duration
+}
+
 // Application is the hook an outstation implementation provides for the
 // behaviour the stack cannot decide on its own.
 //
@@ -141,6 +174,20 @@ type Application interface {
 	WarmRestart() time.Duration
 	// SupportsWriteTime reports whether the outstation accepts clock writes.
 	SupportsWriteTime() bool
+}
+
+// RestartSupport is implemented by an Application that can refuse the
+// restart function codes. An Application that does not implement it supports
+// both. It is asked on every request, so support can change while the
+// outstation runs.
+//
+// A restart the device does not support is answered NO_FUNC_CODE_SUPPORT and
+// not carried out. Reporting a restart that did not happen would have the
+// master throw away its picture of the device and poll it all again, for
+// nothing.
+type RestartSupport interface {
+	SupportsColdRestart() bool
+	SupportsWarmRestart() bool
 }
 
 // NopApplication is an Application with sensible defaults, for embedding.
@@ -239,8 +286,11 @@ type Session struct {
 	iin app.IIN
 
 	// synchronized tracks whether the master has set our clock, which decides
-	// the quality stamped on the timestamps we report.
+	// the quality stamped on the timestamps we report, and syncedAt is when it
+	// last did, by the host's monotonic clock: the application's clock is the
+	// one that was just set, and would measure the interval across the jump.
 	synchronized bool
+	syncedAt     time.Time
 
 	// unsolClasses is the mask of classes the master has enabled for
 	// unsolicited reporting. Unsolicited transmission itself is not
@@ -305,6 +355,15 @@ type Session struct {
 	// outstation with no master attached has nowhere to send.
 	unsol     unsolState
 	connected bool
+
+	// broadcastConfirm says the last broadcast was sent to the address that
+	// has the response reporting it ask for confirmation.
+	broadcastConfirm bool
+
+	// deferredRead is a read that arrived while an unsolicited response was
+	// awaiting confirmation, held until the confirmation or its timeout. Its
+	// Fragment is the session's own copy.
+	deferredRead *stack.Received
 
 	// linkDeadline is when an unacknowledged link frame should be retried.
 	linkDeadline time.Time
@@ -582,6 +641,7 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 	// Cached application replies belong to this connection, including file
 	// authentication keys and requests with device side effects.
 	s.lastReqValid = false
+	s.deferredRead = nil
 	s.unsol.reset()
 	s.applyRestart()
 	s.setServing(true)
@@ -607,8 +667,8 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 		s.log.Warn("initial unsolicited transmission failed", "err", err)
 	}
 
-	// The tick drives the confirm timeout, the select timeout and the
-	// unsolicited hold time, so it has to be short relative to all three.
+	// The tick drives the confirm timeouts and the unsolicited hold time, so
+	// it has to be short relative to them.
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -650,17 +710,25 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 				s.log.Warn("sending a queued response fragment failed", "err", err)
 				return
 			}
+			if err := s.resumeDeferredRead(conn); err != nil {
+				s.log.Warn("answering a deferred read failed", "err", err)
+				return
+			}
 
 		case <-ticker.C:
 			now := s.appl.Now()
 			s.checkLinkTimeout(conn)
 			s.checkConfirmTimeout()
-			s.checkSelectTimeout(now)
 			s.checkFileTimeout(now)
+			s.clockDue()
 			s.runFreezes(now)
 			s.expireSecurity()
 			if err := s.pollUnsolicited(conn, now); err != nil {
 				s.log.Warn("unsolicited transmission failed", "err", err)
+				return
+			}
+			if err := s.resumeDeferredRead(conn); err != nil {
+				s.log.Warn("answering a deferred read failed", "err", err)
 				return
 			}
 		}
@@ -729,7 +797,13 @@ func (s *Session) handle(w io.Writer, r stack.Received) error {
 }
 
 func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticated bool) error {
+	if s.deferRead(r) {
+		return nil
+	}
 	s.bump(func(st *Stats) { st.RequestsReceived++ })
+	// Whatever this request is answered with is stamped with the clock's
+	// quality as of now.
+	s.clockDue()
 
 	if s.cfg.SecureAuthentication != nil {
 		s.countSecurity(6)
@@ -805,6 +879,9 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 			return s.replayResponse(w, r, frag.Header)
 		}
 		s.rememberRequest(r, frag)
+		// A new request ends whatever response the last one was still owed:
+		// the master has moved on, and will not confirm it now.
+		s.abandonResponse()
 	}
 
 	if r.Broadcast {
@@ -812,6 +889,7 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 		// outstation answering at once would collide. The next response
 		// carries the broadcast indication instead.
 		s.iin = s.iin.Set(app.IINBroadcast)
+		s.broadcastConfirm = r.Dest == link.BroadcastMandatoryConfirm
 	}
 
 	// A request whose function code is meaningless without objects asked for
@@ -965,6 +1043,52 @@ func (s *Session) rejectMalformed(w io.Writer, r stack.Received, perr error) err
 	return s.respond(w, r, hdr, nil)
 }
 
+// deferRead holds a read back while an unsolicited response awaits its
+// confirmation, and reports whether it did.
+//
+// Answered at once, the read would be selecting events while the unsolicited
+// response still holds its own: two responses awaiting confirmation, and
+// either confirmation able to release the other's events. So the read waits,
+// and is answered once the confirmation arrives or times out (see
+// resumeDeferredRead). Only the latest read is kept, since a master that asks
+// again has given up on the first, and any other request discards it: the
+// master has moved on to something else, and that is answered at once.
+func (s *Session) deferRead(r stack.Received) bool {
+	if !s.unsol.awaiting || r.Broadcast {
+		return false
+	}
+	hdr, _, err := app.ParseHeader(r.Fragment)
+	if err != nil || hdr.IsResponse() || hdr.Func == app.FuncConfirm {
+		return false
+	}
+	if hdr.Func != app.FuncRead {
+		if s.deferredRead != nil {
+			s.log.Debug("a request discards the deferred read", "func", hdr.Func)
+			s.deferredRead = nil
+		}
+		return false
+	}
+	held := r
+	held.Fragment = append([]byte(nil), r.Fragment...)
+	s.deferredRead = &held
+	s.log.Debug("read deferred until the unsolicited response is confirmed", "seq", hdr.Control.Seq)
+	return true
+}
+
+// resumeDeferredRead answers the deferred read, once nothing unsolicited is
+// awaiting confirmation any more.
+func (s *Session) resumeDeferredRead(w io.Writer) error {
+	if s.deferredRead == nil || s.unsol.awaiting {
+		return nil
+	}
+	r := *s.deferredRead
+	s.deferredRead = nil
+	if err := s.handle(w, r); err != nil {
+		return err
+	}
+	return s.advanceResponse(w)
+}
+
 // handlesFunc reports whether handle dispatches a function code to something
 // other than its "not supported" default. It mirrors the switch in handle.
 func handlesFunc(f app.FuncCode) bool {
@@ -1021,17 +1145,26 @@ func (s *Session) onRead(w io.Writer, r stack.Received, frag app.Fragment) error
 	ctx := objects.Context{Synchronized: s.synchronized}
 	b := newResponseBuilder(s.cfg.MaxTxFragment, ctx)
 
+	// Events go first in the response, whatever order the request named them
+	// in, and the static data after them. A master applies a response in
+	// order, so the static values, which are newer than every event, have the
+	// last word; events after them would roll each point back to whatever it
+	// last changed from. The events are still selected in the request's
+	// order, and everything else is built once they have been.
 	var selected []Event
+	var later []func()
 
 	for _, h := range frag.Objects {
 		switch {
 		case h.Group == 60:
 			switch h.Variation {
 			case 1: // class 0: all static data
-				for _, pt := range staticTypes {
-					s.buildStaticRange(b, pt, 0, 0, 0xFFFF)
-				}
-				s.readDatasets(b, app.ReadAllObjects(87, 1))
+				later = append(later, func() {
+					for _, pt := range staticTypes {
+						s.buildStaticRange(b, pt, 0, 0, 0xFFFF)
+					}
+					s.readDatasets(b, app.ReadAllObjects(87, 1))
+				})
 			case 2, 3, 4: // event classes 1, 2 and 3
 				// A class read names how many events it wants when its range
 				// is a count; without one it wants every event in the class.
@@ -1054,6 +1187,13 @@ func (s *Session) onRead(w io.Writer, r stack.Received, frag app.Fragment) error
 				s.iin = s.iin.Set(app.IINObjectUnknown)
 				continue
 			}
+			if slices.Contains(staticTypes, pt) && typeCount(s.db.Counts(), pt) == 0 {
+				// The events of a type the device has no points of: there
+				// can never be any, and an empty answer would say there are
+				// none just now.
+				s.iin = s.iin.Set(app.IINObjectUnknown)
+				continue
+			}
 			limit, ok := eventReadLimit(h)
 			if !ok {
 				s.iin = s.iin.Set(app.IINParameterError)
@@ -1068,17 +1208,17 @@ func (s *Session) onRead(w io.Writer, r stack.Received, frag app.Fragment) error
 			selected = append(selected, evs...)
 
 		case h.Group == 50 && h.Variation == 1:
-			s.readCurrentTime(b, h)
+			later = append(later, func() { s.readCurrentTime(b, h) })
 		case h.Group == 80 && h.Variation == 1:
-			s.readIIN(b, h)
+			later = append(later, func() { s.readIIN(b, h) })
 		case h.Group == 50 && h.Variation == 4:
-			s.readTimeIntervals(b, h)
+			later = append(later, func() { s.readTimeIntervals(b, h) })
 		case h.Group >= 85 && h.Group <= 87:
-			s.readDatasets(b, h)
+			later = append(later, func() { s.readDatasets(b, h) })
 		case h.Group == 121:
-			s.readSecurityStatistics(b, h)
+			later = append(later, func() { s.readSecurityStatistics(b, h) })
 		case h.Group == 112:
-			s.readTerminals(b, h)
+			later = append(later, func() { s.readTerminals(b, h) })
 		case h.Group == 50 && h.Variation == 3:
 			// The second half of the LAN time-sync procedure: hand back the
 			// time the RECORD_CURRENT_TIME request arrived.
@@ -1086,11 +1226,14 @@ func (s *Session) onRead(w io.Writer, r stack.Received, frag app.Fragment) error
 				s.iin = s.iin.Set(app.IINParameterError)
 				continue
 			}
-			b.add(app.ObjectHeader{
-				Group: 50, Variation: 3,
-				Qualifier: app.MakeQualifier(app.PrefixNone, app.RangeCount8),
-				Range:     app.Range{Spec: app.RangeCount8, Count: 1},
-				Data:      objects.AppendTime48(nil, dnp3.Now(s.recordedTime)),
+			recorded := s.recordedTime
+			later = append(later, func() {
+				b.add(app.ObjectHeader{
+					Group: 50, Variation: 3,
+					Qualifier: app.MakeQualifier(app.PrefixNone, app.RangeCount8),
+					Range:     app.Range{Spec: app.RangeCount8, Count: 1},
+					Data:      objects.AppendTime48(nil, dnp3.Now(recorded)),
+				})
 			})
 
 		default:
@@ -1108,15 +1251,18 @@ func (s *Session) onRead(w io.Writer, r stack.Received, frag app.Fragment) error
 					continue
 				}
 			}
-			build := func(start, stop uint16) {
-				s.buildStaticRange(b, pt, h.Variation, start, stop)
-			}
-			if !forEachPointRun(h, build) {
-				// A count with no index prefix says how many points but not
-				// which. It has always been answered with every point, and
-				// still is.
-				build(0, 0xFFFF)
-			}
+			s.checkStaticRead(pt, h)
+			later = append(later, func() {
+				build := func(start, stop uint16) {
+					s.buildStaticRange(b, pt, h.Variation, start, stop)
+				}
+				if !forEachPointRun(h, build) {
+					// A count with no index prefix says how many points but
+					// not which. It has always been answered with every point,
+					// and still is.
+					build(0, 0xFFFF)
+				}
+			})
 		}
 	}
 
@@ -1125,6 +1271,9 @@ func (s *Session) onRead(w io.Writer, r stack.Received, frag app.Fragment) error
 		unsent := s.buildEvents(b, selected)
 		s.db.events.Discard(unsent)
 		hasEvents = len(unsent) < len(selected)
+	}
+	for _, build := range later {
+		build()
 	}
 	return s.sendFragments(w, r, frag.Header, b.done(), hasEvents)
 }
@@ -1177,8 +1326,7 @@ func (s *Session) onWrite(w io.Writer, r stack.Received, frag app.Fragment) erro
 			recorded := objects.ParseTime48(data)
 			elapsed := s.appl.Now().Sub(s.recordedTime)
 			if s.appl.WriteAbsoluteTime(recorded.Time.Add(elapsed)) {
-				s.synchronized = true
-				s.iin = s.iin.Clear(app.IINNeedTime)
+				s.clockSet()
 				s.recordedTime = time.Time{}
 				s.log.Debug("clock set by the recorded-time procedure",
 					"recorded_at", recorded.Time, "elapsed", elapsed)
@@ -1198,8 +1346,7 @@ func (s *Session) onWrite(w io.Writer, r stack.Received, frag app.Fragment) erro
 			}
 			ts := objects.ParseTime48(data)
 			if s.appl.WriteAbsoluteTime(ts.Time) {
-				s.synchronized = true
-				s.iin = s.iin.Clear(app.IINNeedTime)
+				s.clockSet()
 				s.log.Debug("clock set by master", "time", ts.Time)
 			} else {
 				s.iin = s.iin.Set(app.IINParameterError)
@@ -1327,6 +1474,19 @@ func (s *Session) onRecordCurrentTime(w io.Writer, r stack.Received, frag app.Fr
 // onRestart answers a restart request with how long the outstation expects to
 // be unavailable.
 func (s *Session) onRestart(w io.Writer, r stack.Received, frag app.Fragment) error {
+	if rs, ok := s.appl.(RestartSupport); ok {
+		supported := rs.SupportsWarmRestart()
+		if frag.Header.Func == app.FuncColdRestart {
+			supported = rs.SupportsColdRestart()
+		}
+		if !supported {
+			s.iin = s.iin.Set(app.IINNoFuncCodeSupport)
+			if r.Broadcast {
+				return nil
+			}
+			return s.respond(w, r, frag.Header, nil)
+		}
+	}
 	var d time.Duration
 	if now := s.appl.Now(); now.Before(s.restartUntil) {
 		// A restart already under way. Doing it again would restart what has
@@ -1367,6 +1527,16 @@ func (s *Session) onRestart(w io.Writer, r stack.Received, frag app.Fragment) er
 // onUnsolicitedControl records the enable or disable, answering truthfully
 // that the request was understood.
 func (s *Session) onUnsolicitedControl(w io.Writer, r stack.Received, frag app.Fragment) error {
+	if !s.cfg.Unsolicited.Enabled {
+		// A device configured without unsolicited responses has nothing to
+		// enable or disable, and accepting the request would tell the master
+		// its events are now on their way.
+		s.iin = s.iin.Set(app.IINNoFuncCodeSupport)
+		if r.Broadcast {
+			return nil
+		}
+		return s.respond(w, r, frag.Header, nil)
+	}
 	enable := frag.Header.Func == app.FuncEnableUnsolicited
 	for _, h := range frag.Objects {
 		if h.Group != 60 || h.Variation < 2 || h.Variation > 4 {
@@ -1534,18 +1704,6 @@ func (s *Session) sendFragments(w io.Writer, r stack.Received, req app.Header, b
 		return nil
 	}
 
-	if s.pendingIndex < len(s.pendingBodies) {
-		// A well-behaved master confirms (or lets confirm time out) before
-		// asking anything else, so this should not happen; abandon the
-		// response still in flight rather than silently losing track of
-		// whatever events it was holding.
-		s.log.Warn("a new response is replacing one still in flight")
-		if s.awaitingConfirm {
-			s.awaitingConfirm = false
-			s.db.events.Unselect()
-		}
-	}
-
 	s.pendingBodies = bodies
 	s.pendingIndex = 0
 	s.pendingDest = r.Source
@@ -1586,8 +1744,12 @@ func (s *Session) advanceResponse(w io.Writer) error {
 	i := s.pendingIndex
 	last := i == len(s.pendingBodies)-1
 	// Intermediate fragments must be confirmed or the master cannot pace the
-	// series; the final one only needs it when it carries events.
-	needConfirm := !last || s.pendingHasEvents
+	// series; the final one only needs it when it carries events, or reports a
+	// broadcast sent to the address that asks for one (0xFFFE). The broadcast
+	// indication then stays set until the confirmation says the response
+	// reporting it arrived.
+	needConfirm := !last || s.pendingHasEvents ||
+		(s.iin.Has(app.IINBroadcast) && s.broadcastConfirm)
 
 	ctrl := app.Control{
 		Fir: i == 0,
@@ -1624,6 +1786,31 @@ func (s *Session) advanceResponse(w io.Writer) error {
 	return s.finishResponse()
 }
 
+// abandonResponse gives up on a solicited response still in progress, because
+// a new request has arrived: fragments not yet sent are dropped, and the wait
+// for a confirmation ends.
+//
+// It has to run before the new request is acted on. The events the old
+// response carried go back to the queue here, and a read that selected its own
+// first would have them handed back too: put in its response, but never
+// confirmed away, so the master is sent them again on the next poll — and an
+// EVENT_BUFFER_OVERFLOW it reported is never cleared. Left waiting instead, the
+// new response would queue behind a confirmation the master is never going to
+// send, and the confirm timeout would then discard both.
+func (s *Session) abandonResponse() {
+	if len(s.pendingBodies) == 0 {
+		return
+	}
+	s.log.Debug("a new request abandons the response in progress",
+		"fragment", s.pendingIndex, "of", len(s.pendingBodies), "awaiting_confirm", s.awaitingConfirm)
+	if s.pendingHasEvents {
+		s.db.events.Unselect()
+	}
+	s.awaitingConfirm = false
+	s.pendingBodies = nil
+	s.pendingIndex = 0
+}
+
 // finishResponse closes out a response once every fragment has gone out and
 // none is still awaiting confirmation: only now is it safe to drop the
 // events it carried, however many trailing fragments they ended up spread
@@ -1650,6 +1837,31 @@ func (s *Session) finishResponse() error {
 	return nil
 }
 
+// clockSet records that the master has just set the clock.
+func (s *Session) clockSet() {
+	s.synchronized = true
+	s.syncedAt = time.Now()
+	s.iin = s.iin.Clear(app.IINNeedTime)
+}
+
+// clockDue reports whether the clock needs setting again, and expires the
+// synchronization once the holdover after that has passed too.
+func (s *Session) clockDue() bool {
+	if !s.synchronized {
+		return true
+	}
+	interval := s.cfg.Clock.SyncInterval
+	if interval <= 0 {
+		return false
+	}
+	since := time.Since(s.syncedAt)
+	if since >= interval+max(s.cfg.Clock.Holdover, 0) {
+		s.synchronized = false
+		s.log.Debug("the clock has not been set again; timestamps are now unsynchronized")
+	}
+	return since >= interval
+}
+
 // currentIIN assembles the indications to report, folding in the event state
 // that changes between responses.
 func (s *Session) currentIIN() app.IIN {
@@ -1668,7 +1880,7 @@ func (s *Session) currentIIN() app.IIN {
 	if s.db.events.Overflowed() {
 		iin = iin.Set(app.IINEventBufferOverflow)
 	}
-	if !s.synchronized {
+	if s.clockDue() {
 		iin = iin.Set(app.IINNeedTime)
 	}
 	return iin

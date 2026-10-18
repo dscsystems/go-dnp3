@@ -136,15 +136,24 @@ func (b *EventBuffer) Total() int {
 	return len(b.events)
 }
 
-// Classes returns the mask of classes that have events waiting, which is what
-// the internal indications report.
+// Classes returns the mask of classes that have events waiting to be
+// reported, which is what the internal indications report.
+//
+// An event already selected into a response is not waiting: the response
+// carrying it is the report. Counting it would set IIN1.1 on the very response
+// that empties class 1, and a master reading that as more to collect polls
+// again for nothing — or, polling on the bits alone, never sees them clear.
+// Should the confirmation not come, the event goes back to the queue and its
+// class is reported again.
 func (b *EventBuffer) Classes() dnp3.Class {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	var mask dnp3.Class
 	for i := range b.events {
-		mask |= b.events[i].Class
+		if !b.events[i].selected {
+			mask |= b.events[i].Class
+		}
 	}
 	return mask
 }

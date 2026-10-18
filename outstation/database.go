@@ -382,18 +382,25 @@ func (db *Database) UpdateFrozenCounter(index uint16, v dnp3.FrozenCounter) {
 	defer db.mu.Unlock()
 
 	if int(index) < len(db.frozen) {
-		db.setFrozen(int(index), v)
+		db.setFrozen(int(index), v, false)
 	}
 }
 
-// setFrozen stores a frozen counter value and raises an event if it changed.
-// It is shared by UpdateFrozenCounter and the freeze functions so the two
-// cannot disagree about when a frozen counter reports. The caller holds db.mu.
-func (db *Database) setFrozen(i int, v dnp3.FrozenCounter) {
+// setFrozen stores a frozen counter value and raises an event if it changed,
+// or whatever it is when freeze says a freeze produced it. It is shared by
+// UpdateFrozenCounter and the freeze functions so the two cannot disagree
+// about anything else. The caller holds db.mu.
+//
+// A freeze is itself the news. The master asked for a snapshot, and the event
+// is how it learns when the snapshot was taken: a counter that has not moved
+// since the last freeze is frozen again all the same, at a new time, and
+// leaving its event out would make it look as though that point was never
+// frozen at all.
+func (db *Database) setFrozen(i int, v dnp3.FrozenCounter, freeze bool) {
 	p := &db.frozen[i]
 	changed := p.value.Value != v.Value || p.value.Flags != v.Flags
 	p.value = v
-	if changed {
+	if changed || freeze {
 		db.raise(p.cfg, Event{
 			Type: dnp3.TypeFrozenCounter, Index: uint16(i),
 			Variation: p.cfg.EventVariation, FrozenCounter: v, Time: v.Time,
@@ -700,7 +707,7 @@ func (db *Database) freezeRange(start, stop uint16, at dnp3.Timestamp, clear boo
 	n := min(len(db.counter), len(db.frozen))
 	for i := int(start); i <= int(stop) && i < n; i++ {
 		c := db.counter[i].value
-		db.setFrozen(i, dnp3.FrozenCounter{Value: c.Value, Flags: c.Flags, Time: at})
+		db.setFrozen(i, dnp3.FrozenCounter{Value: c.Value, Flags: c.Flags, Time: at}, true)
 		if clear {
 			db.setCounter(uint16(i), dnp3.Counter{Value: 0, Flags: c.Flags, Time: at})
 		}

@@ -100,18 +100,11 @@ func (s *Session) buildStaticRange(b *responseBuilder, pt dnp3.PointType, variat
 		return
 	}
 
-	if variation != 0 {
-		// An explicit variation is the master's choice, and every point in the
-		// range is reported as what it asked for.
-		s.buildStaticRun(b, pt, variation, start, stop)
-		return
-	}
-
-	// Variation zero means "each point's own default" — the static variation
-	// its configuration set, which can differ from one point to the next. An
-	// object header carries exactly one variation, so points that disagree
-	// cannot share one: the range is reported as runs of consecutive points
-	// that agree, each under its own header.
+	// Each point is reported in the variation reportVariation picks for it,
+	// which can differ from one point to the next. An object header carries
+	// exactly one variation, so points that disagree cannot share one: the
+	// range is reported as runs of consecutive points that agree, each under
+	// its own header.
 	//
 	// Resolving the variation once from the first point and applying it to the
 	// rest reports every later point in a variation it did not ask for. For a
@@ -121,13 +114,13 @@ func (s *Session) buildStaticRange(b *responseBuilder, pt dnp3.PointType, variat
 	//
 	// The loop runs on int so a range ending at 0xFFFF cannot wrap.
 	for idx := int(start); idx <= int(stop); {
-		v, ok := s.staticVariation(pt, uint16(idx))
+		v, ok := s.reportVariation(pt, variation, uint16(idx))
 		if !ok {
 			return
 		}
 		end := idx
 		for end < int(stop) {
-			next, ok := s.staticVariation(pt, uint16(end+1))
+			next, ok := s.reportVariation(pt, variation, uint16(end+1))
 			if !ok || next != v {
 				break
 			}
@@ -191,17 +184,129 @@ func forEachPointRun(h app.ObjectHeader, fn func(start, stop uint16)) bool {
 	return true
 }
 
-// staticVariation returns the static variation a point is configured to be
-// reported in.
-func (s *Session) staticVariation(pt dnp3.PointType, index uint16) (uint8, bool) {
-	_, cfg, ok := s.pointConfig(pt, index)
-	return cfg.StaticVariation, ok
+// checkStaticRead sets the indication a read of static points earns when it
+// names points the device does not have: OBJECT_UNKNOWN when it has none of
+// the type at all, PARAMETER_ERROR when the range or the listed indexes reach
+// past the last one. The points that do exist are reported regardless; the
+// indication is what tells the master the rest were not left out by accident.
+func (s *Session) checkStaticRead(pt dnp3.PointType, h app.ObjectHeader) {
+	n := typeCount(s.db.Counts(), pt)
+	if n == 0 {
+		s.iin = s.iin.Set(app.IINObjectUnknown)
+		return
+	}
+	if namesBeyond(h, n) {
+		s.iin = s.iin.Set(app.IINParameterError)
+	}
+}
+
+// namesBeyond reports whether a request header names a point index of n or
+// more. All objects names only the points there are, and a count without an
+// index prefix names none in particular.
+func namesBeyond(h app.ObjectHeader, n int) bool {
+	spec := h.Range.Spec
+	switch {
+	case spec.IsStartStop():
+		return h.Range.Stop >= uint32(n) || h.Range.Start > h.Range.Stop
+	case spec.IsCount() && h.Qualifier.IndexPrefix().IsIndex():
+		width := h.Qualifier.IndexPrefix().Octets()
+		for off := 0; off+width <= len(h.Data); off += width {
+			if readPrefix(h.Data[off:], width) >= uint32(n) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// reportVariation returns the variation to report a static point in, for a
+// read that asked for requested: that, or for variation zero the one the
+// point is configured with.
+//
+// A variation without flags is only for a point whose flags are normal, which
+// is what leaving them out says. A point that is offline, or forced, or
+// restarting is reported in the matching variation with flags instead, or the
+// master would read its value as good.
+func (s *Session) reportVariation(pt dnp3.PointType, requested uint8, index uint16) (uint8, bool) {
+	v, flags, ok := s.staticPoint(pt, index)
+	if !ok {
+		return 0, false
+	}
+	if requested != 0 {
+		v = requested
+	}
+	if flagged, has := withFlags[pt][v]; has && flags != dnp3.Online {
+		v = flagged
+	}
+	return v, true
+}
+
+// withFlags maps each static variation without flags to the one that carries
+// the same value with them.
+var withFlags = map[dnp3.PointType]map[uint8]uint8{
+	dnp3.TypeBinary:             {1: 2},
+	dnp3.TypeDoubleBitBinary:    {1: 2},
+	dnp3.TypeBinaryOutputStatus: {1: 2},
+	dnp3.TypeCounter:            {5: 1, 6: 2},
+	dnp3.TypeFrozenCounter:      {9: 1, 10: 2},
+	dnp3.TypeAnalog:             {3: 1, 4: 2},
+	dnp3.TypeFrozenAnalog:       {5: 1, 6: 2},
+}
+
+// staticPoint returns the static variation a point is configured to be
+// reported in, and its flags.
+func (s *Session) staticPoint(pt dnp3.PointType, index uint16) (uint8, dnp3.Flags, bool) {
+	var flags dnp3.Flags
+	var cfg PointConfig
+	var ok bool
+	switch pt {
+	// A binary's flags octet carries its state in the top bit, and a double
+	// bit's in the top two; a value parsed off the wire keeps them there, and
+	// they say nothing about whether the point is normal.
+	case dnp3.TypeBinary:
+		var v dnp3.Binary
+		v, cfg, ok = s.db.Binary(index)
+		flags = v.Flags &^ dnp3.StateBit
+	case dnp3.TypeDoubleBitBinary:
+		var v dnp3.DoubleBitBinary
+		v, cfg, ok = s.db.DoubleBit(index)
+		flags = v.Flags & 0x3F
+	case dnp3.TypeCounter:
+		var v dnp3.Counter
+		v, cfg, ok = s.db.Counter(index)
+		flags = v.Flags
+	case dnp3.TypeFrozenCounter:
+		var v dnp3.FrozenCounter
+		v, cfg, ok = s.db.FrozenCounter(index)
+		flags = v.Flags
+	case dnp3.TypeFrozenAnalog:
+		var v dnp3.Analog
+		v, cfg, ok = s.db.FrozenAnalog(index)
+		flags = v.Flags
+	case dnp3.TypeAnalog:
+		var v dnp3.Analog
+		v, cfg, ok = s.db.Analog(index)
+		flags = v.Flags
+	case dnp3.TypeBinaryOutputStatus:
+		var v dnp3.BinaryOutputStatus
+		v, cfg, ok = s.db.BinaryOutputStatus(index)
+		flags = v.Flags &^ dnp3.StateBit
+	case dnp3.TypeAnalogOutputStatus:
+		var v dnp3.AnalogOutputStatus
+		v, cfg, ok = s.db.AnalogOutputStatus(index)
+		flags = v.Flags
+	}
+	return cfg.StaticVariation, flags, ok
 }
 
 // buildStaticRun reports points start through stop, all in one variation,
 // splitting across fragments as the space in each allows.
 func (s *Session) buildStaticRun(b *responseBuilder, pt dnp3.PointType, variation uint8, start, stop uint16) {
 	gv := staticGroupVar(pt, variation)
+	if bits := packedBits(gv); bits > 0 {
+		s.buildPackedRun(b, pt, gv, bits, start, stop)
+		return
+	}
 	d, ok := objects.Lookup(gv)
 	if !ok {
 		return
@@ -232,6 +337,61 @@ func (s *Session) buildStaticRun(b *responseBuilder, pt dnp3.PointType, variatio
 		data := make([]byte, 0, runLen*size)
 		for i := idx; i <= last; i++ {
 			data = s.encodeStatic(data, pt, gv, uint16(i), b.ctx)
+		}
+
+		b.add(rangeObjectHeader(gv, uint16(idx), uint16(last), data))
+		idx = last + 1
+	}
+}
+
+// packedBits returns how many bits a point takes in a bit-packed variation,
+// or zero for one that is not.
+func packedBits(gv objects.GroupVar) int {
+	switch gv {
+	case objects.GV(1, 1), objects.GV(10, 1):
+		return 1
+	case objects.GV(3, 1):
+		return 2
+	}
+	return 0
+}
+
+// buildPackedRun is buildStaticRun for a bit-packed variation, whose points
+// share octets: the unit of encoding is the range, not the object, so a run
+// is sized in bits.
+func (s *Session) buildPackedRun(b *responseBuilder, pt dnp3.PointType, gv objects.GroupVar, bits int, start, stop uint16) {
+	const headerOverhead = app.ObjectHeaderSize + 4 // worst-case 16-bit range
+	for idx := int(start); idx <= int(stop); {
+		capacity := (b.room() - headerOverhead) * 8 / bits
+		if capacity < 1 {
+			b.flush()
+			capacity = (b.room() - headerOverhead) * 8 / bits
+			if capacity < 1 {
+				return
+			}
+		}
+		last := min(idx+capacity-1, int(stop))
+
+		var data []byte
+		if pt == dnp3.TypeDoubleBitBinary {
+			values := make([]dnp3.DoubleBit, 0, last-idx+1)
+			for i := idx; i <= last; i++ {
+				v, _, _ := s.db.DoubleBit(uint16(i))
+				values = append(values, v.Value)
+			}
+			data = objects.AppendPackedDoubleBit(nil, values)
+		} else {
+			values := make([]bool, 0, last-idx+1)
+			for i := idx; i <= last; i++ {
+				if pt == dnp3.TypeBinaryOutputStatus {
+					v, _, _ := s.db.BinaryOutputStatus(uint16(i))
+					values = append(values, v.Value)
+				} else {
+					v, _, _ := s.db.Binary(uint16(i))
+					values = append(values, v.Value)
+				}
+			}
+			data = objects.AppendPackedBinary(nil, values)
 		}
 
 		b.add(rangeObjectHeader(gv, uint16(idx), uint16(last), data))
@@ -284,37 +444,6 @@ func (s *Session) encodeStatic(dst []byte, pt dnp3.PointType, gv objects.GroupVa
 		}
 	}
 	return dst
-}
-
-// pointConfig returns a point's configuration.
-func (s *Session) pointConfig(pt dnp3.PointType, index uint16) (any, PointConfig, bool) {
-	switch pt {
-	case dnp3.TypeBinary:
-		v, c, ok := s.db.Binary(index)
-		return v, c, ok
-	case dnp3.TypeDoubleBitBinary:
-		v, c, ok := s.db.DoubleBit(index)
-		return v, c, ok
-	case dnp3.TypeCounter:
-		v, c, ok := s.db.Counter(index)
-		return v, c, ok
-	case dnp3.TypeFrozenCounter:
-		v, c, ok := s.db.FrozenCounter(index)
-		return v, c, ok
-	case dnp3.TypeFrozenAnalog:
-		v, c, ok := s.db.FrozenAnalog(index)
-		return v, c, ok
-	case dnp3.TypeAnalog:
-		v, c, ok := s.db.Analog(index)
-		return v, c, ok
-	case dnp3.TypeBinaryOutputStatus:
-		v, c, ok := s.db.BinaryOutputStatus(index)
-		return v, c, ok
-	case dnp3.TypeAnalogOutputStatus:
-		v, c, ok := s.db.AnalogOutputStatus(index)
-		return v, c, ok
-	}
-	return nil, PointConfig{}, false
 }
 
 func typeCount(c DatabaseConfig, pt dnp3.PointType) int {

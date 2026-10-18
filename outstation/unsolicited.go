@@ -31,12 +31,14 @@ type unsolState struct {
 	// retries counts consecutive unconfirmed attempts.
 	retries int
 
-	// lastFrag is the exact fragment last transmitted, kept so a retry can
-	// repeat it octet for octet. A master tells a retransmission apart from
-	// new data purely by the sequence number, so a retry that keeps the
-	// sequence number — as it must — has to carry the same data too, or the
-	// difference is discarded as a duplicate and never delivered.
-	lastFrag []byte
+	// lastBody is the object data of the response last transmitted, kept so a
+	// retry can repeat it, and retained says there is one: a null response's
+	// body is empty. A master tells a retransmission apart from new data
+	// purely by the sequence number, so a retry that keeps the sequence
+	// number — as it must — has to carry the same data too, or the difference
+	// is discarded as a duplicate and never delivered.
+	lastBody []byte
+	retained bool
 
 	// nextAllowed is the earliest a further unsolicited response may be sent,
 	// which is how a device that has given up retrying backs off.
@@ -105,12 +107,19 @@ func (s *Session) pollUnsolicited(w io.Writer, now time.Time) error {
 		return s.onUnsolicitedTimeout(w, now)
 	}
 
+	// Nothing unsolicited goes out while a solicited response is in progress.
+	// The two would be awaiting confirmations at once, and the events a
+	// confirmation of one released could be the other's.
+	if len(s.pendingBodies) > 0 {
+		return nil
+	}
+
 	// A retry repeats the fragment the master did not confirm, exactly as it
 	// went out the first time. Building a fresh one from whatever is queued
 	// now would put events the master has never seen behind the sequence
 	// number of a transmission it has already seen, so it would match them as
 	// a duplicate, deliver none of them, and confirm them away regardless.
-	if s.unsol.retries > 0 && len(s.unsol.lastFrag) > 0 {
+	if s.unsol.retries > 0 && s.unsol.retained {
 		return s.retryUnsolicited(w, now)
 	}
 
@@ -185,6 +194,22 @@ func (s *Session) onUnsolicitedTimeout(w io.Writer, now time.Time) error {
 	s.unsol.retries++
 	s.bump(func(st *Stats) { st.UnsolicitedTimeouts++ })
 
+	if s.deferredRead != nil && s.unsol.nullConfirmed {
+		// A read has been waiting for this response to be confirmed. It is
+		// answered now instead of the retry, and its response carries the
+		// events this one did: sending them both ways would report them
+		// twice. The null response has no events for a read to take over,
+		// so it goes on being retried, after the read is answered.
+		requeued := s.db.events.Unselect()
+		s.log.Debug("unsolicited response unconfirmed; answering the deferred read instead of retrying",
+			"events_requeued", requeued)
+		s.unsol.retries = 0
+		s.unsol.retained = false
+		s.unsol.lastBody = nil
+		s.unsol.nextAllowed = now.Add(s.cfg.Unsolicited.ConfirmTimeout)
+		return nil
+	}
+
 	if s.unsol.retries > s.cfg.Unsolicited.MaxRetries {
 		// Only now do the events go back in the queue, for the master's next
 		// poll — or the next unsolicited response, one confirm timeout from
@@ -198,7 +223,8 @@ func (s *Session) onUnsolicitedTimeout(w io.Writer, now time.Time) error {
 			"retries", s.unsol.retries, "events_requeued", requeued,
 			"pause", s.cfg.Unsolicited.ConfirmTimeout)
 		s.unsol.retries = 0
-		s.unsol.lastFrag = nil
+		s.unsol.retained = false
+		s.unsol.lastBody = nil
 		s.unsol.nextAllowed = now.Add(s.cfg.Unsolicited.ConfirmTimeout)
 		return nil
 	}
@@ -208,9 +234,16 @@ func (s *Session) onUnsolicitedTimeout(w io.Writer, now time.Time) error {
 	return nil
 }
 
-// retryUnsolicited retransmits the unconfirmed response verbatim.
+// retryUnsolicited retransmits the unconfirmed response: the same sequence
+// number and the same objects.
+//
+// The internal indications are not repeated but taken afresh. They describe
+// the outstation now, not when the first attempt was made, and the master may
+// have changed them in the meantime: a retry still asserting the
+// DEVICE_RESTART the master has just cleared would tell it the outstation had
+// restarted again.
 func (s *Session) retryUnsolicited(w io.Writer, now time.Time) error {
-	if err := s.stack.Send(w, s.unsol.lastFrag); err != nil {
+	if err := s.stack.Send(w, s.unsolicitedFragment(s.unsol.lastBody)); err != nil {
 		// The events stay selected; the retry path keeps hold of them until
 		// the transmission is either confirmed or given up on.
 		return err
@@ -254,17 +287,7 @@ func (s *Session) sendUnsolicited(w io.Writer, events []Event, now time.Time, nu
 	// number it already had, because that is the only thing a master's
 	// duplicate detection matches on.
 	s.unsol.seq = (s.unsol.seq + 1) % app.SeqModulus
-	frag := app.AppendHeader(nil, app.Header{
-		Control: app.Control{
-			Fir: true, Fin: true, Con: true, Uns: true,
-			Seq: s.unsol.seq,
-		},
-		Func: app.FuncUnsolicitedResponse,
-		IIN:  s.currentIIN(),
-	})
-	frag = append(frag, body...)
-
-	if err := s.stack.Send(w, frag); err != nil {
+	if err := s.stack.Send(w, s.unsolicitedFragment(body)); err != nil {
 		// The events are still selected; the retry path requeues them.
 		return err
 	}
@@ -273,14 +296,29 @@ func (s *Session) sendUnsolicited(w io.Writer, events []Event, now time.Time, nu
 	s.unsol.awaitSeq = s.unsol.seq
 	s.unsol.deadline = now.Add(s.cfg.Unsolicited.ConfirmTimeout)
 	s.unsol.nullSent = s.unsol.nullSent || null
-	// Kept whole for a retry to repeat. frag is freshly allocated here and
-	// the body is copied into it, so holding the reference is enough.
-	s.unsol.lastFrag = frag
+	// Kept for a retry to repeat. The body is the builder's own, built for
+	// this response alone, so holding the reference is enough.
+	s.unsol.lastBody = body
+	s.unsol.retained = true
 
 	s.bump(func(st *Stats) { st.UnsolicitedSent++ })
 	s.log.Debug("unsolicited response sent",
 		"seq", s.unsol.seq, "events", len(events), "null", null)
 	return nil
+}
+
+// unsolicitedFragment is an unsolicited response carrying body, under the
+// current sequence number and with the indications as they are now.
+func (s *Session) unsolicitedFragment(body []byte) []byte {
+	frag := app.AppendHeader(nil, app.Header{
+		Control: app.Control{
+			Fir: true, Fin: true, Con: true, Uns: true,
+			Seq: s.unsol.seq,
+		},
+		Func: app.FuncUnsolicitedResponse,
+		IIN:  s.currentIIN(),
+	})
+	return append(frag, body...)
 }
 
 // onUnsolicitedConfirm handles a confirmation of an unsolicited response.
@@ -293,7 +331,8 @@ func (s *Session) onUnsolicitedConfirm(h app.Header) {
 
 	s.unsol.awaiting = false
 	s.unsol.retries = 0
-	s.unsol.lastFrag = nil
+	s.unsol.retained = false
+	s.unsol.lastBody = nil
 
 	if !s.unsol.nullConfirmed {
 		// The master has acknowledged our existence; data may now flow.

@@ -76,6 +76,21 @@ type CommandHandler interface {
 	OperateAnalog(index uint16, v AnalogOutput, op OperateType) dnp3.CommandStatus
 }
 
+// OutputPoints is implemented by a CommandHandler that says which outputs
+// the device has. A command for any other is refused with NOT_SUPPORTED and
+// PARAMETER_ERROR, and never reaches the handler.
+//
+// Without it, the database's output status points stand for the outputs: one
+// with four binary output statuses has four binary outputs. A database with no
+// output status of the type says nothing either way, and every command for it
+// goes to the handler.
+type OutputPoints interface {
+	// HasOutput reports whether the device has the output: pt is
+	// TypeBinaryOutputStatus for a CROB, TypeAnalogOutputStatus for an
+	// analog output.
+	HasOutput(pt dnp3.PointType, index uint16) bool
+}
+
 // RejectingCommandHandler refuses every command with NOT_SUPPORTED.
 //
 // It is the default, and it is deliberately a refusal rather than a success:
@@ -125,6 +140,11 @@ func (s *selection) clear() {
 // select-before-operate is that the operator confirms exactly what was
 // proposed.
 func (s *selection) matches(objectsRaw []byte, seq uint8, now time.Time) dnp3.CommandStatus {
+	// An expired selection is kept rather than cleared when its window
+	// closes, so the late operate can be told why it is refused: TIMEOUT says
+	// the select arrived and the operator was too slow, where NO_SELECT would
+	// send them looking for a select that went missing. Either way nothing
+	// operates.
 	switch {
 	case !s.active:
 		return dnp3.CommandNoSelect
@@ -232,6 +252,9 @@ func (s *Session) executeCommands(
 	var outcomes []commandOutcome
 
 	selecting := frag.Header.Func == app.FuncSelect
+	// controls counts the command objects across every header, for
+	// MaxControlsPerRequest.
+	controls := 0
 
 	for _, h := range frag.Objects {
 		// Pattern control (g12v2, with its g12v3 mask) operates a set of points
@@ -276,12 +299,20 @@ func (s *Session) executeCommands(
 			// A four-octet prefix can name an index no point has. Narrowing it
 			// to uint16 would wrap it onto one that does — a command for point
 			// 65541 operating point 5 — so it is refused here, before any
-			// handler sees it, the same way an unimplemented point is.
+			// handler sees it, the same way a point the device does not have
+			// is. Both are a parameter out of range as well as a refusal.
 			index := uint16(wide)
 			status := selectStatus
+			controls++
 			switch {
-			case wide > 0xFFFF:
+			case wide > 0xFFFF || !s.controlExists(h.Group, index):
 				status = dnp3.CommandNotSupported
+				s.iin = s.iin.Set(app.IINParameterError)
+			case s.cfg.MaxControlsPerRequest > 0 && controls > s.cfg.MaxControlsPerRequest:
+				// The controls past the limit are refused, and the ones within
+				// it carried out: TOO_MANY_OPS on each object says exactly
+				// which did not happen.
+				status = dnp3.CommandTooManyOps
 			case status.OK():
 				status = s.runCommand(h.Group, h.Variation, index, raw, selecting, opType)
 				if !selecting {
@@ -313,6 +344,20 @@ func (s *Session) executeCommands(
 	}
 
 	return body, outcomes
+}
+
+// controlExists reports whether the device has the output a command names,
+// as OutputPoints describes.
+func (s *Session) controlExists(group uint8, index uint16) bool {
+	pt := dnp3.TypeBinaryOutputStatus
+	if group == 41 {
+		pt = dnp3.TypeAnalogOutputStatus
+	}
+	if op, ok := s.cmds.(OutputPoints); ok {
+		return op.HasOutput(pt, index)
+	}
+	n := typeCount(s.db.Counts(), pt)
+	return n == 0 || int(index) < n
 }
 
 // runCommand decodes one command object and hands it to the handler.
@@ -392,19 +437,6 @@ func (s *Session) logCommands(fc app.FuncCode, opType OperateType, outcomes []co
 		s.log.Info("command",
 			"func", fc.String(), "operate", opType.String(),
 			"index", o.index, "status", o.status.String(), "result", level)
-	}
-}
-
-// checkSelectTimeout expires a stale selection.
-//
-// A reservation that outlives its window must not be operable: an operator who
-// selected a breaker, walked away, and came back minutes later should have to
-// select again rather than operate on a decision they no longer remember
-// making.
-func (s *Session) checkSelectTimeout(now time.Time) {
-	if s.sel.active && now.After(s.sel.expires) {
-		s.log.Debug("selection expired", "seq", s.sel.seq)
-		s.sel.clear()
 	}
 }
 

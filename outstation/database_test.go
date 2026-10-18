@@ -311,12 +311,20 @@ func TestFreezeRaisesFrozenCounterEvents(t *testing.T) {
 		t.Errorf("a freeze of two changed counters raised %d frozen counter events, want 2", got)
 	}
 
-	// A freeze that changes nothing reports nothing, exactly as an
-	// application update to the same value would.
+	// A freeze that changes no value is still a freeze, at a new time, and
+	// reports it: a master reading the events would otherwise take those
+	// points for never frozen. An application writing the same frozen value
+	// is not a freeze, and reports nothing.
 	before = buf.Count(dnp3.Class1)
 	db.FreezeCounters()
+	if got := buf.Count(dnp3.Class1) - before; got != 2 {
+		t.Errorf("a freeze that changed no frozen value raised %d events, want 2", got)
+	}
+	before = buf.Count(dnp3.Class1)
+	v, _, _ := db.FrozenCounter(0)
+	db.UpdateFrozenCounter(0, v)
 	if got := buf.Count(dnp3.Class1) - before; got != 0 {
-		t.Errorf("a freeze that changed no frozen value raised %d events", got)
+		t.Errorf("writing a frozen counter its own value raised %d events", got)
 	}
 }
 

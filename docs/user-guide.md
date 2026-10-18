@@ -882,6 +882,13 @@ On the outstation side, `Application.SupportsWriteTime` decides whether clock
 writes are accepted at all, and `WriteAbsoluteTime` can reject an individual
 one. A device with a GPS clock should refuse.
 
+A clock set once drifts from then on. `Config.Clock.SyncInterval` makes the
+outstation ask for the time again that long after each write, and
+`Config.Clock.Holdover` is how much longer it trusts its clock if the master
+does not answer; after that it reports its time as unsynchronized. The zero
+value trusts one write forever, which suits a device whose clock is
+disciplined by something else.
+
 ---
 
 ## Device attributes
