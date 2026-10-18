@@ -1,6 +1,7 @@
 package conformance
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
@@ -100,6 +101,44 @@ func TestClassBitClearsOnTheResponseThatEmptiesTheClass(t *testing.T) {
 	}
 	if resp.Header.IIN.Has(app.IINClass1Events) {
 		t.Errorf("IIN = %v: CLASS_1_EVENTS on the response carrying every class 1 event", resp.Header.IIN)
+	}
+}
+
+// 8.5.2.2.4, 8.26.2: a confirmation and the next request arriving together,
+// in one read from the connection, as a busy master's often do. The confirm
+// is acted on first, so the events it acknowledges are gone by the time the
+// request is answered.
+func TestConfirmAndRequestInOneReadConfirmsTheEvents(t *testing.T) {
+	h := newHarness(t, outstation.Config{Database: smallDB()}, nil)
+	h.out.Update(func(db *outstation.Database) {
+		db.UpdateBinary(0, dnp3.Binary{Value: true, Flags: dnp3.Online})
+	})
+	waitFor(t, func() bool { return h.out.Events().Total() > 0 })
+
+	resp := h.request(app.FuncRead, app.ReadAllObjects(60, 2))
+	if len(resp.Objects) == 0 || !resp.Header.Control.Con {
+		t.Fatalf("CON = %v, %d objects: want the event asking for confirmation",
+			resp.Header.Control.Con, len(resp.Objects))
+	}
+
+	var both bytes.Buffer
+	if err := h.stack.Send(&both, app.AppendHeader(nil, app.Header{
+		Control: app.Control{Fir: true, Fin: true, Seq: h.seq},
+		Func:    app.FuncConfirm,
+	})); err != nil {
+		t.Fatal(err)
+	}
+	h.seq = (h.seq + 1) % app.SeqModulus
+	if err := h.stack.Send(&both, app.BuildRequest(nil,
+		app.Control{Fir: true, Fin: true, Seq: h.seq}, app.FuncRead, app.ReadAllObjects(60, 2))); err != nil {
+		t.Fatal(err)
+	}
+	before := h.count()
+	if _, err := h.conn.Write(both.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if resp := h.await(before); len(resp.Objects) != 0 {
+		t.Errorf("%v: the confirmed event was reported again", groups(resp))
 	}
 }
 
