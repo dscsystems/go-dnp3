@@ -103,6 +103,21 @@ make interop         # our master against opendnp3 outstation
 make interop-reverse # opendnp3 master against our outstation
 ```
 
+A second set runs both directions against the reference implementations of
+[otfabric/dnp3-interop](https://github.com/otfabric/dnp3-interop) (opendnp3,
+Step Function I/O dnp3, dnp3py), from its published container images, with
+nothing to build. The expected values come from the fixture inside each image,
+and a scenario an image does not support is skipped:
+
+```
+make interop-otfabric                                  # images v0.5.1 from ghcr.io/otfabric
+OTFABRIC_TAG=v0.6.0 OTFABRIC_ADAPTERS=opendnp3 make interop-otfabric
+```
+
+The Step Function image is not published; build it in that repository
+(`make image-stepfunc`) and the suite picks it up, or the adapter is skipped.
+See [`interop/otfabric`](interop/otfabric/harness_test.go).
+
 `conformance/` drives an outstation with hand-built request fragments and checks
 what comes back, modelled on the DNP Users Group's Level 2 procedures: unknown
 function codes, unknown groups, broadcast handling, the restart handshake,

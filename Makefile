@@ -40,7 +40,7 @@ cover: ## produce coverage.html
 .PHONY: vet
 vet:
 	$(GO) vet $(PKGS)
-	$(GO) vet -tags interop ./interop/
+	$(GO) vet -tags interop ./interop/...
 
 .PHONY: fmt
 fmt:
@@ -102,6 +102,14 @@ interop-build: ## build the opendnp3 container
 .PHONY: interop
 interop: ## run our master against their outstations
 	$(GO) test -tags interop -v -timeout 10m ./interop/
+
+# The same two directions against the reference implementations of
+# github.com/otfabric/dnp3-interop (opendnp3, Step Function I/O dnp3, dnp3py),
+# from its published images: nothing to build. OTFABRIC_TAG, OTFABRIC_REGISTRY
+# and OTFABRIC_ADAPTERS select them; see interop/otfabric/harness_test.go.
+.PHONY: interop-otfabric
+interop-otfabric: ## run our master and outstation against the dnp3-interop images
+	$(GO) test -tags interop -v -count=1 -timeout 20m ./interop/otfabric/
 
 .PHONY: interop-reverse
 interop-reverse: ## drive their masters against our outstation
