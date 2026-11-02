@@ -28,8 +28,9 @@ type UDPConfig struct {
 	// LocalAddr is the address to bind. Empty binds an ephemeral port on all
 	// interfaces, which is what a master normally wants.
 	LocalAddr string
-	// RemoteAddr is where to send. Empty means reply to whoever writes first,
-	// which is what an outstation normally wants.
+	// RemoteAddr is where to send. Empty means reply to wherever the last
+	// datagram came from, which is what an outstation normally wants: each
+	// request is answered to the endpoint that sent it.
 	RemoteAddr string
 }
 
@@ -160,13 +161,15 @@ func (u *udpConn) Read(p []byte) (int, error) {
 			return 0, err
 		}
 
-		// Learn the peer from the first datagram, so an outstation can answer
-		// a master it was not configured with.
-		u.ch.mu.Lock()
-		if u.ch.remote == nil {
+		// Without a configured peer, answer whoever sent the latest datagram,
+		// as an unconnected socket naturally would. Keeping the first sender
+		// for good left a master that came back on a new source port, or a
+		// second master, waiting for answers that went to the first one.
+		if n > 0 && u.ch.cfg.RemoteAddr == "" {
+			u.ch.mu.Lock()
 			u.ch.remote = addr
+			u.ch.mu.Unlock()
 		}
-		u.ch.mu.Unlock()
 
 		u.pending = u.rbuf[:n] // an empty datagram loops round for the next
 	}
