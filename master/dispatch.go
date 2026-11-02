@@ -1,6 +1,9 @@
 package master
 
 import (
+	"encoding/binary"
+	"math"
+
 	"github.com/dscsystems/go-dnp3"
 	"github.com/dscsystems/go-dnp3/internal/app"
 	"github.com/dscsystems/go-dnp3/objects"
@@ -51,7 +54,14 @@ func (s *Session) dispatch(h app.ObjectHeader, ctx objects.Context) {
 	}
 
 	d, ok := objects.Lookup(gv)
-	if !ok || d.Measurement == dnp3.TypeUnknown {
+	if !ok {
+		return
+	}
+	if d.Measurement == dnp3.TypeUnknown {
+		// Objects that are not measurements still carry data a master may
+		// have asked for. Each goes to an optional handler, so one that does
+		// not care is not made to implement it.
+		s.dispatchNonMeasurement(h, d, HeaderInfo{GV: gv, Kind: d.Kind})
 		return
 	}
 
@@ -263,4 +273,81 @@ func readPrefix(buf []byte, width int) uint32 {
 		return uint32(buf[0]) | uint32(buf[1])<<8 | uint32(buf[2])<<16 | uint32(buf[3])<<24
 	}
 	return 0
+}
+
+// dispatchNonMeasurement delivers the objects whose descriptor has no
+// measurement type: time-and-interval (g50v4), analog deadbands (g34) and
+// security statistics (g121, g122). Anything else of that kind is still
+// dropped, as before.
+func (s *Session) dispatchNonMeasurement(h app.ObjectHeader, d objects.Descriptor, info HeaderInfo) {
+	size, ok := d.SizeOctets()
+	if !ok || size == 0 {
+		return
+	}
+	prefixLen := 0
+	if p := h.Qualifier.IndexPrefix(); p.IsIndex() {
+		prefixLen = p.Octets()
+	}
+
+	switch {
+	case h.Group == 50 && h.Variation == 4:
+		handler, ok := s.handler.(TimeAndIntervalHandler)
+		if !ok {
+			return
+		}
+		vals := decodeRun(h, size, prefixLen, objects.Context{},
+			func(b []byte, _ objects.Context) dnp3.TimeAndInterval {
+				return dnp3.TimeAndInterval{
+					Time:     objects.ParseTime48(b),
+					Interval: binary.LittleEndian.Uint32(b[6:10]),
+					Units:    b[10],
+				}
+			})
+		if len(vals) > 0 {
+			handler.HandleTimeAndInterval(info, vals)
+		}
+
+	case h.Group == 34:
+		handler, ok := s.handler.(DeadbandHandler)
+		if !ok {
+			return
+		}
+		variation := h.Variation
+		vals := decodeRun(h, size, prefixLen, objects.Context{},
+			func(b []byte, _ objects.Context) float64 {
+				switch variation {
+				case 1:
+					return float64(binary.LittleEndian.Uint16(b))
+				case 2:
+					return float64(binary.LittleEndian.Uint32(b))
+				default:
+					return float64(math.Float32frombits(binary.LittleEndian.Uint32(b)))
+				}
+			})
+		if len(vals) > 0 {
+			handler.HandleDeadband(info, vals)
+		}
+
+	case h.Group == 121 || h.Group == 122:
+		handler, ok := s.handler.(SecurityStatisticHandler)
+		if !ok {
+			return
+		}
+		withTime := h.Group == 122 && h.Variation == 2
+		vals := decodeRun(h, size, prefixLen, objects.Context{},
+			func(b []byte, _ objects.Context) SecurityStatistic {
+				v := SecurityStatistic{
+					Flags:       dnp3.Flags(b[0]),
+					Association: binary.LittleEndian.Uint16(b[1:3]),
+					Value:       binary.LittleEndian.Uint32(b[3:7]),
+				}
+				if withTime {
+					v.Time = objects.ParseTime48(b[7:])
+				}
+				return v
+			})
+		if len(vals) > 0 {
+			handler.HandleSecurityStatistic(info, vals)
+		}
+	}
 }

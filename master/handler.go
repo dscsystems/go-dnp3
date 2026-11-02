@@ -86,6 +86,40 @@ type FrozenAnalogHandler interface {
 	HandleFrozenAnalog(info HeaderInfo, values []dnp3.Indexed[dnp3.Analog])
 }
 
+// TimeAndIntervalHandler receives group 50 variation 4 objects: the indexed
+// time-and-interval values an outstation reports for its schedules. Like the
+// other optional handlers it is a separate interface, so adding it did not
+// break existing handlers; a handler that does not implement it never sees
+// them.
+type TimeAndIntervalHandler interface {
+	HandleTimeAndInterval(info HeaderInfo, values []dnp3.Indexed[dnp3.TimeAndInterval])
+}
+
+// DeadbandHandler receives group 34 objects, the analog input deadbands. The
+// three variations carry a 16-bit, a 32-bit and a floating-point value; all
+// are delivered as a float64, which holds each of them exactly.
+type DeadbandHandler interface {
+	HandleDeadband(info HeaderInfo, values []dnp3.Indexed[float64])
+}
+
+// SecurityStatistic is one group 121 or group 122 object: a secure
+// authentication statistic and the association it counts for.
+type SecurityStatistic struct {
+	Flags dnp3.Flags
+	// Association identifies the master-outstation association the
+	// statistic belongs to.
+	Association uint16
+	Value       uint32
+	// Time is set only for group 122 variation 2.
+	Time dnp3.Timestamp
+}
+
+// SecurityStatisticHandler receives group 121 (static) and group 122 (event)
+// security statistics.
+type SecurityStatisticHandler interface {
+	HandleSecurityStatistic(info HeaderInfo, values []dnp3.Indexed[SecurityStatistic])
+}
+
 // NopHandler discards everything. Embed it to implement only the methods you
 // care about.
 type NopHandler struct{}

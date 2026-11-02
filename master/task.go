@@ -199,17 +199,31 @@ func newRangeScanTask(group, variation uint8, start, stop uint16) *task {
 }
 
 // newRestartTask asks the outstation to restart.
-func newRestartTask(mode dnp3.RestartMode) *task {
+//
+// delayMillis, when not nil, receives the delay the outstation announces in
+// its group 52 answer; it is left alone when the response carries none.
+func newRestartTask(mode dnp3.RestartMode, delayMillis *uint32) *task {
 	fc := app.FuncColdRestart
 	if mode == dnp3.WarmRestart {
 		fc = app.FuncWarmRestart
 	}
-	return &task{
+	t := &task{
 		name:     "restart-" + mode.String(),
 		funcCode: fc,
 		priority: priorityCommand,
 		build:    func(*app.Builder) error { return nil },
 	}
+	if delayMillis != nil {
+		t.onFragment = func(frag app.Fragment) {
+			for _, h := range frag.Objects {
+				if h.Group == 52 && len(h.Data) >= 2 {
+					*delayMillis = objects.ParseTimeDelay(h.Variation, h.Data)
+					return
+				}
+			}
+		}
+	}
+	return t
 }
 
 // newWriteTimeTask sets the outstation's clock.
