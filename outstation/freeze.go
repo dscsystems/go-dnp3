@@ -1,10 +1,13 @@
 package outstation
 
 import (
+	"context"
+	"io"
 	"slices"
 	"time"
 
 	"github.com/dscsystems/go-dnp3"
+	"github.com/dscsystems/go-dnp3/channel"
 	"github.com/dscsystems/go-dnp3/internal/app"
 	"github.com/dscsystems/go-dnp3/objects"
 )
@@ -30,12 +33,15 @@ type freezeSchedule struct {
 // headers naming what to freeze. A request with no counter headers freezes
 // every counter, as an immediate freeze does.
 //
-// A time already past is refused with PARAMETER_ERROR when nothing repeats,
-// since there is no moment left to freeze at; with an interval it is moved on
-// to the next multiple that has not passed.
+// A time of zero with no interval asks for the freeze at once, and it is
+// performed before the response is sent. Any other time already past is
+// refused with PARAMETER_ERROR when nothing repeats, since there is no moment
+// left to freeze at; with an interval it is moved on to the next multiple that
+// has not passed.
 func (s *Session) onFreezeAtTime(frag app.Fragment) {
 	var (
 		haveTime     bool
+		immediate    bool
 		first        time.Time
 		interval     time.Duration
 		ranges       [][2]uint16
@@ -56,6 +62,7 @@ func (s *Session) onFreezeAtTime(frag app.Fragment) {
 			ms := uint32(d[6]) | uint32(d[7])<<8 | uint32(d[8])<<16 | uint32(d[9])<<24
 			interval = time.Duration(ms) * time.Millisecond
 			haveTime = true
+			immediate = ms == 0 && d[0]|d[1]|d[2]|d[3]|d[4]|d[5] == 0
 
 		case h.Group == 30:
 			named = true
@@ -88,6 +95,10 @@ func (s *Session) onFreezeAtTime(frag app.Fragment) {
 	}
 
 	now := s.appl.Now()
+	if immediate {
+		s.freezeNow(freezeSchedule{next: now, ranges: ranges, analogRanges: analogRanges})
+		return
+	}
 	next := first
 	if next.Before(now) {
 		if interval <= 0 {
@@ -128,20 +139,7 @@ func (s *Session) runFreezes(now time.Time) {
 			continue
 		}
 
-		// The frozen values carry the moment they were scheduled for, which is
-		// what a master that asked for a freeze at 12:00:00 means by the time
-		// of the frozen value, however late the tick that ran it.
-		at := dnp3.Unsynchronized(f.next)
-		if s.synchronized {
-			at = dnp3.Now(f.next)
-		}
-		for _, r := range f.ranges {
-			s.db.freezeCountersRange(r[0], r[1], at)
-		}
-		for _, r := range f.analogRanges {
-			s.db.freezeAnalogsRange(r[0], r[1], at, false)
-		}
-		s.bump(func(st *Stats) { st.ScheduledFreezes++ })
+		s.freezeNow(f)
 
 		if f.interval <= 0 {
 			continue // one-shot: done
@@ -151,4 +149,58 @@ func (s *Session) runFreezes(now time.Time) {
 		kept = append(kept, f)
 	}
 	s.freezes = kept
+}
+
+// freezeNow performs one scheduled freeze.
+func (s *Session) freezeNow(f freezeSchedule) {
+	// The frozen values carry the moment they were scheduled for, which is
+	// what a master that asked for a freeze at 12:00:00 means by the time of
+	// the frozen value, however late the tick that ran it.
+	at := dnp3.Unsynchronized(f.next)
+	if s.synchronized {
+		at = dnp3.Now(f.next)
+	}
+	for _, r := range f.ranges {
+		s.db.freezeCountersRange(r[0], r[1], at)
+	}
+	for _, r := range f.analogRanges {
+		s.db.freezeAnalogsRange(r[0], r[1], at, false)
+	}
+	s.bump(func(st *Stats) { st.ScheduledFreezes++ })
+}
+
+// freezeTick is how often the freeze schedule is checked while no master is
+// connected. While one is, the session's own tick does it.
+const freezeTick = 50 * time.Millisecond
+
+// connect waits for a connection while keeping the freeze schedule running.
+//
+// A device's freeze schedule is its own, not the master's: a freeze that falls
+// due while the link is down must still happen at its time, or the frozen
+// value would be the counter's value at the next reconnection instead.
+func (s *Session) connect(ctx context.Context, ch channel.Channel) (io.ReadWriteCloser, error) {
+	if len(s.freezes) == 0 {
+		return ch.Connect(ctx)
+	}
+
+	type result struct {
+		conn io.ReadWriteCloser
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		conn, err := ch.Connect(ctx)
+		done <- result{conn, err}
+	}()
+
+	ticker := time.NewTicker(freezeTick)
+	defer ticker.Stop()
+	for {
+		select {
+		case r := <-done:
+			return r.conn, r.err
+		case <-ticker.C:
+			s.runFreezes(s.appl.Now())
+		}
+	}
 }

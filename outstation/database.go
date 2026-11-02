@@ -704,10 +704,13 @@ func (db *Database) freezeRange(start, stop uint16, at dnp3.Timestamp, clear boo
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	n := min(len(db.counter), len(db.frozen))
-	for i := int(start); i <= int(stop) && i < n; i++ {
+	// The two bounds are separate: a counter with no frozen counter of the
+	// same index has nothing to freeze into, but FREEZE_CLEAR still clears it.
+	for i := int(start); i <= int(stop) && i < len(db.counter); i++ {
 		c := db.counter[i].value
-		db.setFrozen(i, dnp3.FrozenCounter{Value: c.Value, Flags: c.Flags, Time: at}, true)
+		if i < len(db.frozen) {
+			db.setFrozen(i, dnp3.FrozenCounter{Value: c.Value, Flags: c.Flags, Time: at}, true)
+		}
 		if clear {
 			db.setCounter(uint16(i), dnp3.Counter{Value: 0, Flags: c.Flags, Time: at})
 		}

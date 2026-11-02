@@ -1,11 +1,16 @@
 package conformance
 
 import (
+	"context"
+	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/dscsystems/go-dnp3"
+	"github.com/dscsystems/go-dnp3/channel"
 	"github.com/dscsystems/go-dnp3/internal/app"
+	"github.com/dscsystems/go-dnp3/internal/stack"
 	"github.com/dscsystems/go-dnp3/objects"
 	"github.com/dscsystems/go-dnp3/outstation"
 )
@@ -134,5 +139,106 @@ func TestFreezeAtTimeWithoutATimeIsRefused(t *testing.T) {
 	resp := h.request(app.FuncFreezeAtTime, app.ReadAllObjects(20, 0))
 	if !resp.Header.IIN.Has(app.IINParameterError) {
 		t.Errorf("IIN = %v, want PARAMETER_ERROR", resp.Header.IIN)
+	}
+}
+
+// FREEZE_CLEAR clears every counter it names, including one with no frozen
+// counter of the same index to freeze into.
+func TestFreezeClearClearsCountersWithoutAFrozenCounter(t *testing.T) {
+	db := smallDB()
+	db.Counter, db.FrozenCounter = 3, 2
+	h := newHarness(t, outstation.Config{Database: db}, nil)
+	h.out.Update(func(d *outstation.Database) {
+		for i := range 3 {
+			d.UpdateCounter(uint16(i), dnp3.Counter{Value: uint32(100 * (i + 1)), Flags: dnp3.Online})
+		}
+	})
+	waitFor(t, func() bool {
+		c, _, _ := h.out.Database().Counter(2)
+		return c.Value == 300
+	})
+
+	resp := h.request(app.FuncFreezeClear, app.ReadAllObjects(20, 0))
+	if resp.Header.IIN.Has(app.IINParameterError) || resp.Header.IIN.Has(app.IINNoFuncCodeSupport) {
+		t.Fatalf("IIN = %v", resp.Header.IIN)
+	}
+	for i := range uint16(3) {
+		if c, _, _ := h.out.Database().Counter(i); c.Value != 0 {
+			t.Errorf("counter[%d] = %d after FREEZE_CLEAR, want 0", i, c.Value)
+		}
+	}
+	if got := frozen(h, 1); got != 200 {
+		t.Errorf("frozen[1] = %d, want 200", got)
+	}
+}
+
+// A FREEZE_AT_TIME time of zero with no interval freezes at once.
+func TestFreezeAtTimeZeroFreezesImmediately(t *testing.T) {
+	h := freezeHarness(t)
+
+	resp := h.request(app.FuncFreezeAtTime, freezeAt(time.UnixMilli(0), 0), app.ReadAllObjects(20, 0))
+	if resp.Header.IIN.Has(app.IINParameterError) {
+		t.Fatalf("IIN = %v, a time of zero is a freeze now", resp.Header.IIN)
+	}
+	// Performed before the response, so a READ straight after sees it.
+	for i := range uint16(3) {
+		if got, want := frozen(h, i), uint32(100*(i+1)); got != want {
+			t.Errorf("frozen[%d] = %d, want %d", i, got, want)
+		}
+	}
+	if got := h.out.Stats().ScheduledFreezes; got != 1 {
+		t.Errorf("ScheduledFreezes = %d, want 1", got)
+	}
+}
+
+// oneConnection is a channel that connects once and then, like a listener no
+// master dials again, waits until it is cancelled.
+type oneConnection struct {
+	channel.Channel
+	used atomic.Bool
+}
+
+func (c *oneConnection) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
+	if !c.used.Swap(true) {
+		return c.Channel.Connect(ctx)
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// A scheduled freeze happens at its time whether or not a master is
+// connected, and takes the counter's value at that time.
+func TestFreezeAtTimeRunsWhileNoMasterIsConnected(t *testing.T) {
+	db := smallDB()
+	db.Counter, db.FrozenCounter = 1, 1
+	out := outstation.New(outstation.Config{LocalAddr: outstationAddr, RemoteAddr: masterAddr, Database: db}, nil, nil)
+	out.Update(func(d *outstation.Database) {
+		d.UpdateCounter(0, dnp3.Counter{Value: 42, Flags: dnp3.Online})
+	})
+
+	mch, och := channel.Pipe()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = out.Run(ctx, &oneConnection{Channel: och}) }()
+	t.Cleanup(func() { cancel(); _ = mch.Close(); _ = och.Close(); <-done })
+
+	conn, err := mch.Connect(ctx)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	go func() { _, _ = io.Copy(io.Discard, conn) }()
+
+	st := stack.New(stack.Config{LocalAddr: masterAddr, RemoteAddr: outstationAddr, IsMaster: true})
+	frag := app.BuildRequest(nil, app.Control{Fir: true, Fin: true}, app.FuncFreezeAtTime,
+		freezeAt(time.Now().Add(300*time.Millisecond), 0), app.ReadAllObjects(20, 0))
+	if err := st.Send(conn, frag); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	waitFor(t, func() bool { return out.Stats().ResponsesSent >= 1 })
+	_ = conn.Close()
+
+	waitFor(t, func() bool { return out.Stats().ScheduledFreezes == 1 })
+	if f, _, _ := out.Database().FrozenCounter(0); f.Value != 42 {
+		t.Errorf("frozen[0] = %d, want 42", f.Value)
 	}
 }
