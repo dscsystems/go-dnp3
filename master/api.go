@@ -67,6 +67,16 @@ func (s *Session) ScanRange(ctx context.Context, group, variation uint8, start, 
 	return s.run(ctx, newRangeScanTask(group, variation, start, stop))
 }
 
+// ScanAll reads every object of one group and variation, with the
+// all-objects qualifier (0x06). Pass variation zero for the outstation's
+// default.
+//
+// Unlike [Session.ScanRange] it needs no knowledge of how many points the
+// outstation has, which is what a master discovering a device wants.
+func (s *Session) ScanAll(ctx context.Context, group, variation uint8) error {
+	return s.run(ctx, newAllObjectsScanTask(group, variation))
+}
+
 // AddPeriodicScan schedules a recurring class poll.
 //
 // It returns as soon as the scan is queued; the poll then runs for the life of
@@ -205,6 +215,20 @@ func (s *Session) runChecked(ctx context.Context, what string, t *task) error {
 // (group 21) to collect the result.
 func (s *Session) FreezeCounters(ctx context.Context, clear bool) error {
 	return s.runChecked(ctx, "freeze", newFreezeTask(clear))
+}
+
+// FreezeCountersNoReply is [Session.FreezeCounters] with the no-response
+// function codes, IMMED_FREEZE_NR and FREEZE_CLEAR_NR. Nothing comes back, so
+// this returns as soon as the request is on the wire; it is meant above all
+// for broadcasts, which no outstation answers.
+func (s *Session) FreezeCountersNoReply(ctx context.Context, clear bool) error {
+	t := newFreezeTask(clear)
+	t.funcCode, t.name = app.FuncImmedFreezeNR, t.name+"-nr"
+	if clear {
+		t.funcCode = app.FuncFreezeClearNR
+	}
+	t.noResponse = true
+	return s.run(ctx, t)
 }
 
 // FreezeAtTime asks the outstation to freeze every counter at a time, and
