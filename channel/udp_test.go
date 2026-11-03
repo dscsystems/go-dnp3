@@ -204,3 +204,85 @@ func TestUDPMessageFramesShareADatagram(t *testing.T) {
 		t.Fatalf("second datagram = %q, %v; want the write outside the message alone", buf[:n], err)
 	}
 }
+
+// An outstation without a configured peer answers each request to the
+// endpoint it came from, not to whichever master it heard first.
+func TestUDPRepliesToTheLatestSender(t *testing.T) {
+	server := UDPChannel(UDPConfig{LocalAddr: "127.0.0.1:0"})
+	t.Cleanup(func() { _ = server.Close() })
+	sc, err := server.Connect(t.Context())
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	addr := ServerAddr(server).String()
+
+	exchange := func(name string) {
+		t.Helper()
+		client := UDPChannel(UDPConfig{LocalAddr: "127.0.0.1:0", RemoteAddr: addr})
+		t.Cleanup(func() { _ = client.Close() })
+		cc, err := client.Connect(t.Context())
+		if err != nil {
+			t.Fatalf("%s: bind: %v", name, err)
+		}
+		if _, err := cc.Write([]byte{0x05, 0x64}); err != nil {
+			t.Fatalf("%s: write: %v", name, err)
+		}
+		buf := make([]byte, 64)
+		setDeadline(t, sc, 3*time.Second)
+		if _, err := sc.Read(buf); err != nil {
+			t.Fatalf("%s: server read: %v", name, err)
+		}
+		if _, err := sc.Write([]byte(name)); err != nil {
+			t.Fatalf("%s: reply: %v", name, err)
+		}
+		setDeadline(t, cc, time.Second)
+		n, err := cc.Read(buf)
+		if err != nil {
+			t.Fatalf("%s: the reply did not come back to the sender: %v", name, err)
+		}
+		if string(buf[:n]) != name {
+			t.Fatalf("%s: got %q", name, buf[:n])
+		}
+	}
+
+	exchange("first")
+	exchange("second")
+}
+
+// A configured peer is not replaced by a datagram from somewhere else.
+func TestUDPConfiguredPeerIsKept(t *testing.T) {
+	peer, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = peer.Close() })
+
+	c := UDPChannel(UDPConfig{LocalAddr: "127.0.0.1:0", RemoteAddr: peer.LocalAddr().String()})
+	t.Cleanup(func() { _ = c.Close() })
+	conn, err := c.Connect(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stranger, err := net.DialUDP("udp", nil, ServerAddr(c).(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = stranger.Close() })
+	if _, err := stranger.Write([]byte{0x05, 0x64}); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 64)
+	setDeadline(t, conn, 3*time.Second)
+	if _, err := conn.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := conn.Write([]byte("hi")); err != nil {
+		t.Fatal(err)
+	}
+	_ = peer.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if n, _, err := peer.ReadFromUDP(buf); err != nil || string(buf[:n]) != "hi" {
+		t.Fatalf("the configured peer did not get the reply: %q %v", buf[:n], err)
+	}
+}
