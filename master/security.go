@@ -163,7 +163,9 @@ func (s *Session) onAuthenticationResponse(w io.Writer, r stack.Received, f app.
 		return
 	}
 	c, err := objects.ParseAuthChallenge(data)
-	if err != nil || !s.securityReady() || c.Algorithm != 4 || c.Reason != 1 || (c.User != 0 && c.User != s.cfg.SecureAuthentication.User) || len(c.Data) != 32 {
+	// The outstation chooses the challenge length; four octets is the
+	// minimum (IEEE 1815-2012 A.45.1).
+	if err != nil || !s.securityReady() || c.Algorithm != 4 || c.Reason != 1 || (c.User != 0 && c.User != s.cfg.SecureAuthentication.User) || len(c.Data) < 4 {
 		s.inflight = nil
 		s.completeTask(t, security.ErrAuthentication)
 		return
