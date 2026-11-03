@@ -206,7 +206,7 @@ func TestUnsolicitedTaskFunctionCodes(t *testing.T) {
 }
 
 func TestRestartTaskFunctionCodes(t *testing.T) {
-	cold := buildRequest(t, newRestartTask(dnp3.ColdRestart), 0)
+	cold := buildRequest(t, newRestartTask(dnp3.ColdRestart, nil), 0)
 	if cold.Header.Func != app.FuncColdRestart {
 		t.Errorf("cold restart func = %v", cold.Header.Func)
 	}
@@ -214,7 +214,7 @@ func TestRestartTaskFunctionCodes(t *testing.T) {
 		t.Errorf("a restart request carries %d objects, want none", len(cold.Objects))
 	}
 
-	warm := buildRequest(t, newRestartTask(dnp3.WarmRestart), 0)
+	warm := buildRequest(t, newRestartTask(dnp3.WarmRestart, nil), 0)
 	if warm.Header.Func != app.FuncWarmRestart {
 		t.Errorf("warm restart func = %v", warm.Header.Func)
 	}

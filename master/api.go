@@ -96,8 +96,21 @@ func (s *Session) AddPeriodicScan(ctx context.Context, period time.Duration, mas
 // The outstation answers with how long it expects to be unavailable before it
 // actually restarts, so a successful return means the request was accepted,
 // not that the device is back.
+//
+// [Session.RestartWithDelay] also returns that delay.
 func (s *Session) Restart(ctx context.Context, mode dnp3.RestartMode) error {
-	return s.run(ctx, newRestartTask(mode))
+	return s.run(ctx, newRestartTask(mode, nil))
+}
+
+// RestartWithDelay is [Session.Restart], returning the delay the outstation
+// announced: how long after its answer it expects to be available again. A
+// response without a group 52 object returns a zero delay.
+func (s *Session) RestartWithDelay(ctx context.Context, mode dnp3.RestartMode) (time.Duration, error) {
+	var delayMillis uint32
+	if err := s.run(ctx, newRestartTask(mode, &delayMillis)); err != nil {
+		return 0, err
+	}
+	return time.Duration(delayMillis) * time.Millisecond, nil
 }
 
 // WriteTime sets the outstation's clock.
