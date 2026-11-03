@@ -602,7 +602,7 @@ func (s *Session) Run(ctx context.Context, ch channel.Channel) error {
 			return nil //nolint:nilerr // cancellation is a clean shutdown
 		}
 
-		conn, err := ch.Connect(ctx)
+		conn, err := s.connect(ctx, ch)
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, channel.ErrClosed) {
 				return nil //nolint:nilerr // cancellation is a clean shutdown
