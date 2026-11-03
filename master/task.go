@@ -198,6 +198,18 @@ func newRangeScanTask(group, variation uint8, start, stop uint16) *task {
 	}
 }
 
+// newAllObjectsScanTask reads every object of one group and variation.
+func newAllObjectsScanTask(group, variation uint8) *task {
+	return &task{
+		name:     "scan-all",
+		funcCode: app.FuncRead,
+		priority: priorityPoll,
+		build: func(b *app.Builder) error {
+			return b.AddObject(app.ReadAllObjects(group, variation))
+		},
+	}
+}
+
 // newRestartTask asks the outstation to restart.
 func newRestartTask(mode dnp3.RestartMode) *task {
 	fc := app.FuncColdRestart

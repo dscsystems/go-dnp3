@@ -84,6 +84,17 @@ func (s *Session) ReadFileBytes(ctx context.Context, name string) ([]byte, error
 // an outstation deciding whether it has room for a firmware image asks before
 // the first block, not after the last.
 func (s *Session) WriteFile(ctx context.Context, name string, src io.Reader, size uint32) error {
+	return s.writeFile(ctx, name, src, size, dnp3.FileModeWrite)
+}
+
+// AppendFile is [Session.WriteFile] for a file opened in append mode: the
+// size octets read from src are added at the end of the named file instead of
+// replacing it.
+func (s *Session) AppendFile(ctx context.Context, name string, src io.Reader, size uint32) error {
+	return s.writeFile(ctx, name, src, size, dnp3.FileModeAppend)
+}
+
+func (s *Session) writeFile(ctx context.Context, name string, src io.Reader, size uint32, mode dnp3.FileMode) error {
 	if name == "" {
 		return fmt.Errorf("master: %w: empty file name", dnp3.ErrBadConfig)
 	}
@@ -116,7 +127,7 @@ func (s *Session) WriteFile(ctx context.Context, name string, src io.Reader, siz
 		})
 	}
 
-	return s.runTransfer(ctx, t, newFileOpenTask(t, dnp3.FileModeWrite, s.fileBlockSize(), writeStep))
+	return s.runTransfer(ctx, t, newFileOpenTask(t, mode, s.fileBlockSize(), writeStep))
 }
 
 // WriteFileBytes writes data to the named file on the outstation.
