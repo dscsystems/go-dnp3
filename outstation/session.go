@@ -3,6 +3,7 @@ package outstation
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -1220,6 +1221,8 @@ func (s *Session) onRead(w io.Writer, r stack.Received, frag app.Fragment) error
 			later = append(later, func() { s.readIIN(b, h) })
 		case h.Group == 50 && h.Variation == 4:
 			later = append(later, func() { s.readTimeIntervals(b, h) })
+		case h.Group == 34:
+			later = append(later, func() { s.readDeadbands(b, h) })
 		case h.Group >= 85 && h.Group <= 87:
 			later = append(later, func() { s.readDatasets(b, h) })
 		case h.Group == 121:
@@ -1427,6 +1430,49 @@ func (s *Session) writeDeadbands(h app.ObjectHeader) {
 		cfg.Deadband = value
 		s.db.Configure(dnp3.TypeAnalog, index, cfg)
 		s.log.Debug("deadband written", "index", index, "value", value)
+	}
+}
+
+// readDeadbands answers a READ of group 34 with the analog deadbands, so a
+// master can read back what it wrote. Variation zero is answered with
+// variation 3, the floating-point form, which carries a fractional deadband
+// without loss.
+func (s *Session) readDeadbands(b *responseBuilder, h app.ObjectHeader) {
+	variation := h.Variation
+	if variation == 0 {
+		variation = 3
+	}
+	if variation > 3 {
+		s.iin = s.iin.Set(app.IINObjectUnknown)
+		return
+	}
+	n := s.db.Counts().Analog
+	if !forEachPointRun(h, func(start, stop uint16) {
+		if int(start) >= n {
+			return
+		}
+		stop = min(stop, uint16(n-1))
+		var data []byte
+		for i := int(start); i <= int(stop); i++ {
+			_, cfg, _ := s.db.Analog(uint16(i))
+			data = appendDeadband(data, variation, cfg.Deadband)
+		}
+		b.add(rangeObjectHeader(objects.GV(34, variation), start, stop, data))
+	}) {
+		s.iin = s.iin.Set(app.IINParameterError)
+	}
+}
+
+// appendDeadband encodes one group 34 value, saturating at the range of the
+// integer variations.
+func appendDeadband(dst []byte, variation uint8, v float64) []byte {
+	switch variation {
+	case 1:
+		return binary.LittleEndian.AppendUint16(dst, uint16(math.Round(min(max(v, 0), math.MaxUint16))))
+	case 2:
+		return binary.LittleEndian.AppendUint32(dst, uint32(math.Round(min(max(v, 0), math.MaxUint32))))
+	default:
+		return binary.LittleEndian.AppendUint32(dst, math.Float32bits(float32(v)))
 	}
 }
 
