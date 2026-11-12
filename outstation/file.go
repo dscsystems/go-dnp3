@@ -702,9 +702,11 @@ func (s *Session) onGetFileInfo(w io.Writer, r stack.Received, frag app.Fragment
 		})
 	}
 
-	// The name reported is the handler's, not the path that was asked for: a
-	// descriptor names the file the way a directory listing does, and the
-	// master already knows what it requested.
+	// The answer carries the name of the request, not the handler's: IEEE
+	// 1815-2012 4.4.18 fills in the filename offset, file name size, request
+	// ID and file name octets "with the same data as in the request". A
+	// directory listing names its entries by their base names (5.3.6).
+	info.Name = req.Name
 	return s.respondFile(w, r, frag.Header, 7,
 		objects.AppendFileDescriptor(nil, objects.DescriptorFor(info, req.RequestID)))
 }
