@@ -260,8 +260,17 @@ func (s *Session) Run(ctx context.Context, ch channel.Channel) error {
 		s.security = masterSecurity{}
 		s.startupSequence()
 
-		s.connectionOpened(conn)
-		end := s.serve(ctx, conn)
+		var end ending
+		if s.connectionOpened(conn) {
+			end = s.serve(ctx, conn)
+		} else {
+			end = ending{reason: "refused by the security policy"}
+			// Redialling at once would refuse again at once; pace it.
+			select {
+			case <-ctx.Done():
+			case <-time.After(refusedRedialDelay):
+			}
+		}
 
 		s.setConnected(false)
 		_ = conn.Close()
@@ -270,6 +279,10 @@ func (s *Session) Run(ctx context.Context, ch channel.Channel) error {
 		s.log.Info("disconnected")
 	}
 }
+
+// refusedRedialDelay paces reconnection after the security policy refused a
+// connection, which would otherwise be redialled and refused in a tight loop.
+const refusedRedialDelay = 5 * time.Second
 
 func (s *Session) setConnected(v bool) {
 	s.mu.Lock()
@@ -627,6 +640,7 @@ func (s *Session) failInflight(err error) {
 // onFragment routes an incoming fragment.
 func (s *Session) onFragment(w io.Writer, r stack.Received) {
 	s.bump(func(st *Stats) { st.FragmentsRx++ })
+	s.sec.SawLinkSource(r.Source)
 
 	frag, err := app.ParseFragment(nil, r.Fragment)
 	if err != nil {

@@ -34,10 +34,10 @@ func (s *Session) writeStalled() ending {
 	return ending{reason: "write timed out"}
 }
 
-func (s *Session) connectionOpened(conn io.ReadWriteCloser) {
-	if em := s.sec.Connected(conn); em != nil {
-		em.Emit(secevent.Event{Kind: secevent.KindConnConnected, Detail: "connection opened"})
-	}
+// connectionOpened reports a new connection, and returns false when the
+// policy refuses it.
+func (s *Session) connectionOpened(conn io.ReadWriteCloser) bool {
+	return s.sec.Connected(conn, secevent.KindConnConnected)
 }
 
 func (s *Session) connectionClosed(end ending) {

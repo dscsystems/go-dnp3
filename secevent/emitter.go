@@ -24,6 +24,7 @@ type Emitter struct {
 	connID    uint64
 	peer      PeerInfo
 	maxRaw    int
+	policy    *Policy
 }
 
 // NewEmitter returns an emitter for one endpoint in the given role
@@ -75,6 +76,14 @@ func (em *Emitter) Peer() PeerInfo {
 		return PeerInfo{}
 	}
 	return em.peer
+}
+
+// Policy returns the policy the emitter was opened from, or nil.
+func (em *Emitter) Policy() *Policy {
+	if em == nil {
+		return nil
+	}
+	return em.policy
 }
 
 // Dispatcher returns the dispatcher events go to.

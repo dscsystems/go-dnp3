@@ -651,7 +651,11 @@ func (s *Session) Run(ctx context.Context, ch channel.Channel) error {
 		s.log.Info("connected", "channel", ch.String())
 
 		s.stack.Reset()
-		s.connectionOpened(conn)
+		if !s.connectionOpened(conn) {
+			_ = conn.Close()
+			s.connectionClosed(ending{reason: "refused by the security policy"})
+			continue
+		}
 		end := s.serve(ctx, conn)
 		_ = conn.Close()
 		s.connectionClosed(end)
@@ -912,6 +916,7 @@ func (s *Session) checkConfirmTimeout() {
 
 // handle dispatches one request fragment.
 func (s *Session) handle(w io.Writer, r stack.Received) error {
+	s.sec.SawLinkSource(r.Source)
 	return s.handleAuthenticated(w, r, false)
 }
 

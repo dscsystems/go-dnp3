@@ -2,9 +2,12 @@ package secevent
 
 import (
 	"fmt"
+	"net"
+	"net/netip"
 	"time"
 
 	"github.com/dscsystems/go-dnp3"
+	"github.com/dscsystems/go-dnp3/netpeer"
 )
 
 // DefaultMaxRaw is how many octets of an offending frame an event keeps.
@@ -38,7 +41,37 @@ type Policy struct {
 	// time writes and the other state-changing operations reported even when
 	// they succeed. Errors and attacks are still reported.
 	DisableAudit bool
+
+	// DisableMACLookup stops the session looking up the peer's MAC address
+	// when a connection opens. Lookup is on by default: it costs one read of
+	// the kernel neighbour table per connection and never delays or refuses
+	// a connection unless PeerBindings says to.
+	DisableMACLookup bool
+	// Resolver replaces the platform's neighbour table, for instance with a
+	// switch's forwarding table. Nil uses netpeer.DefaultResolver.
+	Resolver netpeer.Resolver
+	// MACCache remembers each IP's MAC, link address and certificate, so a
+	// change is noticed. Nil uses netpeer.DefaultCache, shared process-wide.
+	MACCache *netpeer.Cache
+	// MACLookupTimeout bounds the lookup. Zero uses 200ms.
+	MACLookupTimeout time.Duration
+	// MACRecheckInterval looks the MAC up again this often while a
+	// connection is open, to catch a change behind a live session. Zero, the
+	// default, does not.
+	MACRecheckInterval time.Duration
+	// DisconnectOnMACChange closes a connection whose peer's MAC changed
+	// while it was open. It needs MACRecheckInterval.
+	DisconnectOnMACChange bool
+
+	// PeerBindings pins IP addresses to MAC addresses. A connection from a
+	// pinned IP with another MAC, or none, is reported.
+	PeerBindings map[netip.Addr]net.HardwareAddr
+	// RejectBindingMismatch closes such a connection as soon as it opens.
+	RejectBindingMismatch bool
 }
+
+// DefaultMACLookupTimeout bounds a MAC lookup when the policy does not.
+const DefaultMACLookupTimeout = 200 * time.Millisecond
 
 // DefaultPolicy returns a report-only policy delivering to sink.
 func DefaultPolicy(sink Sink) *Policy {
@@ -59,6 +92,14 @@ func (p *Policy) Valid() error {
 	if p.QueueSize < 0 || p.MaxAggregates < 0 {
 		return fmt.Errorf("%w: secevent: negative queue or aggregate bound", dnp3.ErrBadConfig)
 	}
+	if p.DisconnectOnMACChange && p.MACRecheckInterval <= 0 {
+		return fmt.Errorf("%w: secevent: DisconnectOnMACChange needs MACRecheckInterval", dnp3.ErrBadConfig)
+	}
+	for ip, mac := range p.PeerBindings {
+		if !ip.IsValid() || len(mac) == 0 {
+			return fmt.Errorf("%w: secevent: PeerBindings entry %v=%v is incomplete", dnp3.ErrBadConfig, ip, mac)
+		}
+	}
 	return nil
 }
 
@@ -75,12 +116,16 @@ func (p *Policy) Open(role string) (*Emitter, func()) {
 		maxRaw = DefaultMaxRaw
 	}
 	if p.Dispatcher != nil {
-		return NewEmitter(p.Dispatcher, role, maxRaw), func() {}
+		em := NewEmitter(p.Dispatcher, role, maxRaw)
+		em.policy = p
+		return em, func() {}
 	}
 	d := NewDispatcher(p.Sink, DispatcherOptions{
 		QueueSize: p.QueueSize, AggregateWindow: p.AggregateWindow, MaxAggregates: p.MaxAggregates,
 	})
-	return NewEmitter(d, role, maxRaw), func() { _ = d.Close() }
+	em := NewEmitter(d, role, maxRaw)
+	em.policy = p
+	return em, func() { _ = d.Close() }
 }
 
 // Audit reports whether audit-trail events are wanted.

@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dscsystems/go-dnp3/netpeer"
 	"github.com/dscsystems/go-dnp3/secevent"
 )
 
@@ -22,6 +23,11 @@ type Hub struct {
 	done   func()
 	cur    atomic.Pointer[secevent.Emitter]
 	since  time.Time
+
+	// linkSeen says the connection's first DNP3 source has been noted, and
+	// stopRecheck ends the connection's MAC re-check, if one runs.
+	linkSeen    bool
+	stopRecheck chan struct{}
 }
 
 // Start opens the policy's emitter for a session in role and attaches it to
@@ -47,19 +53,42 @@ func (h *Hub) Enabled() bool { return h.base != nil }
 // Audit reports whether audit-trail events are wanted.
 func (h *Hub) Audit() bool { return h.base != nil && h.policy.Audit() }
 
-// Connected binds a new connection: later events carry its identity.
-func (h *Hub) Connected(conn io.ReadWriteCloser) *secevent.Emitter {
+// Connected binds a new connection: later events carry its identity. It
+// looks the peer's MAC up and checks it against history and the pinned
+// bindings, reporting what it finds, and returns false when the policy says
+// the connection must be refused. Event kind opened is emitted first.
+func (h *Hub) Connected(conn io.ReadWriteCloser, opened secevent.Kind) bool {
 	if h.base == nil {
-		return nil
+		return true
 	}
-	em := h.base.ForConn(secevent.NextConnID(), secevent.PeerOf(conn))
+	peer := secevent.PeerOf(conn)
+	res, looked := h.lookup(&peer)
+	em := h.base.ForConn(secevent.NextConnID(), peer)
 	h.cur.Store(em)
 	h.since = time.Now()
-	return em
+	h.linkSeen = false
+
+	detail := "connection opened"
+	if peer.MAC != nil {
+		detail += " from MAC " + peer.MAC.String() + " (" + peer.MACSource.String() + ")"
+	}
+	em.Emit(secevent.Event{Kind: opened, Detail: detail})
+	if !h.identify(em, peer, res, looked) {
+		return false
+	}
+	if h.policy.MACRecheckInterval > 0 && peersOwnMAC(res.Source) {
+		h.stopRecheck = make(chan struct{})
+		go h.recheck(em, conn, peer.RemoteAddr.Addr(), peer.MAC, h.stopRecheck)
+	}
+	return true
 }
 
 // Disconnected unbinds the connection and returns how long it lasted.
 func (h *Hub) Disconnected() time.Duration {
+	if h.stopRecheck != nil {
+		close(h.stopRecheck)
+		h.stopRecheck = nil
+	}
 	h.cur.Store(nil)
 	if h.since.IsZero() {
 		return 0
@@ -94,3 +123,9 @@ func (h *Hub) Peer() (secevent.PeerInfo, bool) {
 
 // Stats returns the dispatcher's counters.
 func (h *Hub) Stats() secevent.Stats { return h.base.Dispatcher().Stats() }
+
+// peersOwnMAC reports whether a MAC from this source is the peer's own rather
+// than a router's.
+func peersOwnMAC(s netpeer.Source) bool {
+	return s == netpeer.SourceNeighbor || s == netpeer.SourceStatic || s == netpeer.SourceCustom
+}
