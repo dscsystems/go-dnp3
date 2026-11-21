@@ -71,6 +71,51 @@ type Stack struct {
 	// rxFrame is a separate buffer for link-layer replies, so answering an
 	// inbound frame cannot overwrite a fragment mid-transmission.
 	rxFrame []byte
+
+	// observe, when set, is told about frames dropped or otherwise worth
+	// reporting; admit, when set, decides whether a primary frame may be
+	// served, and reports a refusal itself. Both are nil unless security reporting is on.
+	observe func(Observation)
+	admit   func(link.Header) bool
+}
+
+// ObsKind says what an [Observation] is about.
+type ObsKind uint8
+
+// Observation kinds.
+const (
+	// ObsParser: the parser discarded input; Parser holds the deltas.
+	ObsParser ObsKind = iota + 1
+	// ObsForeignDest: a frame for another station.
+	ObsForeignDest
+	// ObsWrongDir: a frame whose DIR bit matches our own role.
+	ObsWrongDir
+	// ObsInvalidSource: a frame from an address no station may hold.
+	ObsInvalidSource
+	// ObsUnexpectedSource: a reply from a station we are not talking to.
+	ObsUnexpectedSource
+	// ObsSecondary: the secondary station noted something; Note says what.
+	ObsSecondary
+	// ObsTransport: reassembly discarded something; Discard says what.
+	ObsTransport
+	// ObsBroadcast: user data to a broadcast address.
+	ObsBroadcast
+	// ObsSelfAddress: a frame to the self address.
+	ObsSelfAddress
+)
+
+// Observation is something the stack saw that security reporting may want.
+type Observation struct {
+	Kind    ObsKind
+	Header  link.Header
+	Note    link.Note
+	Discard transport.DiscardReason
+	Parser  link.Stats // deltas, for ObsParser
+}
+
+// SetObserver installs the security reporting hooks. Either may be nil.
+func (s *Stack) SetObserver(observe func(Observation), admit func(link.Header) bool) {
+	s.observe, s.admit = observe, admit
 }
 
 // New returns a stack for one connection.
@@ -277,6 +322,20 @@ type Received struct {
 // they are produced, and an acknowledgement of our own confirmed frame
 // releases the next segment.
 func (s *Stack) Receive(w io.Writer, data []byte, fn func(Received)) error {
+	if s.observe != nil {
+		before := s.parser.Stats()
+		defer func() {
+			after := s.parser.Stats()
+			if after.BytesDiscarded != before.BytesDiscarded {
+				s.observe(Observation{Kind: ObsParser, Parser: link.Stats{
+					BytesDiscarded:  after.BytesDiscarded - before.BytesDiscarded,
+					HeaderCRCErrors: after.HeaderCRCErrors - before.HeaderCRCErrors,
+					BodyCRCErrors:   after.BodyCRCErrors - before.BodyCRCErrors,
+					BadLength:       after.BadLength - before.BadLength,
+				}})
+			}
+		}()
+	}
 	for len(data) > 0 {
 		n, werr := s.parser.Write(data)
 		data = data[n:]
@@ -308,6 +367,7 @@ func (s *Stack) drain(w io.Writer, fn func(Received)) error {
 		}
 
 		if !s.addressedToUs(f.Header.Dest) {
+			s.note(ObsForeignDest, f.Header)
 			continue
 		}
 
@@ -317,6 +377,7 @@ func (s *Stack) drain(w io.Writer, fn func(Received)) error {
 		// would let a master process another master's primary frame, or an
 		// outstation an outstation's.
 		if f.Header.Control.Dir == s.cfg.IsMaster {
+			s.note(ObsWrongDir, f.Header)
 			continue
 		}
 
@@ -330,11 +391,21 @@ func (s *Stack) drain(w io.Writer, fn func(Received)) error {
 		// exactly what an operator wants the decoder to show them, so it is
 		// dropped where the protocol is acted on, not where it is read.
 		if !link.IsValidSource(f.Header.Src) {
+			s.note(ObsInvalidSource, f.Header)
 			continue
 		}
 
 		if f.Header.Control.Prm {
+			// Refused before the secondary station sees it, so a refused
+			// station cannot reset the link state or move the frame count
+			// bit for the one that is allowed.
+			if s.admit != nil && !s.admit(f.Header) {
+				continue
+			}
 			res := s.sec.OnFrame(f)
+			if s.observe != nil && res.Note != link.NoteNone {
+				s.observe(Observation{Kind: ObsSecondary, Header: f.Header, Note: res.Note})
+			}
 			if res.Reply != nil {
 				// A separate buffer from the transmit path: answering an
 				// inbound frame must not disturb a fragment in flight.
@@ -362,6 +433,7 @@ func (s *Stack) drain(w io.Writer, fn func(Received)) error {
 			// be acknowledged, since the ACK comes from an address the primary
 			// was not sent to.
 			if s.dest != link.SelfAddress || !link.IsValidSource(f.Header.Src) {
+				s.note(ObsUnexpectedSource, f.Header)
 				continue
 			}
 			s.dest = f.Header.Src
@@ -389,6 +461,19 @@ func (s *Stack) drain(w io.Writer, fn func(Received)) error {
 // fragment.
 func (s *Stack) deliver(f link.Frame, payload []byte, fn func(Received)) {
 	res := s.reasm.Accept(payload)
+	if s.observe != nil {
+		if res.Discarded != transport.DiscardNone {
+			s.observe(Observation{Kind: ObsTransport, Header: f.Header, Discard: res.Discarded})
+		}
+		if res.Complete() {
+			switch {
+			case link.IsBroadcast(f.Header.Dest):
+				s.note(ObsBroadcast, f.Header)
+			case f.Header.Dest == link.SelfAddress:
+				s.note(ObsSelfAddress, f.Header)
+			}
+		}
+	}
 	if !res.Complete() {
 		return
 	}
@@ -398,6 +483,12 @@ func (s *Stack) deliver(f link.Frame, payload []byte, fn func(Received)) {
 		Dest:      f.Header.Dest,
 		Broadcast: link.IsBroadcast(f.Header.Dest),
 	})
+}
+
+func (s *Stack) note(k ObsKind, h link.Header) {
+	if s.observe != nil {
+		s.observe(Observation{Kind: k, Header: h})
+	}
 }
 
 // addressedToUs reports whether a frame is ours to process.

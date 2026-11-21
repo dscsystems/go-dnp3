@@ -230,6 +230,7 @@ func (s *Session) Run(ctx context.Context, ch channel.Channel) error {
 		return err
 	}
 	s.sec.Start(s.cfg.Security, "master", ch)
+	s.sec.Observe(s.stack, false)
 	defer s.sec.Stop()
 
 	// Cancelling the context is how Run is asked to stop, and a closed channel

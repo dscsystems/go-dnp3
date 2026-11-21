@@ -86,6 +86,62 @@ type Policy struct {
 	// CertExpiryWarning reports a certificate, the peer's or our own, that
 	// expires within this long. Zero uses 30 days; negative turns it off.
 	CertExpiryWarning time.Duration
+
+	// LinkTopology says whether the link is shared with other stations,
+	// which decides whether a frame for another station is worth reporting.
+	// The default takes it from the transport: serial is a shared bus,
+	// TCP, TLS and UDP are point to point.
+	LinkTopology LinkTopology
+	// AllowedMasters lists the link addresses an outstation serves. A
+	// primary frame from any other source is reported as
+	// link.unexpected_master. Nil, the default, checks nothing: the
+	// outstation answers whichever master addresses it.
+	AllowedMasters []uint16
+	// RejectUnexpectedMaster drops such a frame before the link layer acts
+	// on it, so it can neither be answered nor reset the link state.
+	RejectUnexpectedMaster bool
+}
+
+// LinkTopology says whether a link is shared with other stations.
+type LinkTopology uint8
+
+// Link topologies.
+const (
+	// TopologyAuto: serial is a shared bus, everything else point to point.
+	TopologyAuto LinkTopology = iota
+	// PointToPoint: only our peer and we are on the link, so a frame for
+	// another station is unusual.
+	PointToPoint
+	// SharedBus: other stations share the link, so frames for them are
+	// ordinary.
+	SharedBus
+)
+
+// SharedLink reports whether a link over transport ("serial", "tcp", ...)
+// carries other stations' traffic under this policy.
+func (p *Policy) SharedLink(transport string) bool {
+	if p != nil {
+		switch p.LinkTopology {
+		case PointToPoint:
+			return false
+		case SharedBus:
+			return true
+		}
+	}
+	return transport == "serial" || transport == "multidrop"
+}
+
+// MasterAllowed reports whether AllowedMasters admits a link source.
+func (p *Policy) MasterAllowed(src uint16) bool {
+	if p == nil || p.AllowedMasters == nil {
+		return true
+	}
+	for _, a := range p.AllowedMasters {
+		if a == src {
+			return true
+		}
+	}
+	return false
 }
 
 // Rate is N events per period.
@@ -169,6 +225,12 @@ func (p *Policy) Valid() error {
 		if !pre.IsValid() {
 			return fmt.Errorf("%w: secevent: AllowedPeers holds an invalid prefix", dnp3.ErrBadConfig)
 		}
+	}
+	if p.LinkTopology > SharedBus {
+		return fmt.Errorf("%w: secevent: unknown LinkTopology %d", dnp3.ErrBadConfig, p.LinkTopology)
+	}
+	if p.RejectUnexpectedMaster && p.AllowedMasters == nil {
+		return fmt.Errorf("%w: secevent: RejectUnexpectedMaster needs AllowedMasters", dnp3.ErrBadConfig)
 	}
 	for ip, mac := range p.PeerBindings {
 		if !ip.IsValid() || len(mac) == 0 {

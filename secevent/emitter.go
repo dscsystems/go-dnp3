@@ -78,6 +78,14 @@ func (em *Emitter) Peer() PeerInfo {
 	return em.peer
 }
 
+// Transport returns the transport events are stamped with.
+func (em *Emitter) Transport() string {
+	if em == nil {
+		return ""
+	}
+	return em.transport
+}
+
 // Policy returns the policy the emitter was opened from, or nil.
 func (em *Emitter) Policy() *Policy {
 	if em == nil {
