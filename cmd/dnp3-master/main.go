@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/dscsystems/go-dnp3"
+	"github.com/dscsystems/go-dnp3/cmd/internal/secflags"
 	"github.com/dscsystems/go-dnp3/master"
 )
 
@@ -61,10 +62,26 @@ func main2() error {
 		verbose    = flag.Bool("v", false, "log protocol activity")
 		quiet      = flag.Bool("q", false, "log nothing but errors")
 	)
+	writeTimeout := flag.Duration("write-timeout", 0, "close a connection whose outstation stops reading for `duration`")
+	sec := secflags.Register(flag.CommandLine, false)
 	flag.Usage = usage
 	flag.Parse()
 
 	log := newLogger(*verbose, *quiet)
+
+	policy, closeEvents, err := sec.Policy()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := closeEvents(); err != nil {
+			log.Error("closing the security event stream", "err", err)
+		}
+	}()
+	tune := func(c *master.Config) {
+		c.Security = policy
+		c.WriteTimeout = *writeTimeout
+	}
 
 	// The operate subcommand takes over entirely: it connects, issues one
 	// control, reports the outcome and exits.
@@ -72,7 +89,7 @@ func main2() error {
 		if args[0] != "operate" {
 			return fmt.Errorf("unknown command %q; see -help", args[0])
 		}
-		return operate(args[1:], *host, *serialDev, *baud, *local, *remote, *timeout, log)
+		return operate(args[1:], *host, *serialDev, *baud, *local, *remote, *timeout, log, tune)
 	}
 
 	cfg, err := buildConfig(*configPath, *host, *serialDev, *baud,
@@ -116,7 +133,7 @@ func main2() error {
 	}
 	fmt.Println("Press Ctrl-C to stop.")
 
-	if err := run(ctx, cfg, rec, snap, log, *listen); err != nil {
+	if err := run(ctx, cfg, rec, snap, log, *listen, tune); err != nil {
 		return err
 	}
 
@@ -160,7 +177,7 @@ func buildConfig(path, host, serialDev string, baud, local, remote int,
 
 // operate issues a single control and reports the outcome.
 func operate(args []string, host, serialDev string, baud, local, remote int,
-	timeout time.Duration, log *slog.Logger) error {
+	timeout time.Duration, log *slog.Logger, tune func(*master.Config)) error {
 
 	if len(args) < 2 {
 		return errors.New("usage: dnp3-master -host HOST operate <control> <index> [value]")
@@ -210,14 +227,16 @@ func operate(args []string, host, serialDev string, baud, local, remote int,
 	// about a socket that objected to being shut.
 	defer func() { _ = ch.Close() }()
 
-	sess := master.New(master.Config{
+	mcfg := master.Config{
 		LocalAddr:       uint16(local),
 		RemoteAddr:      uint16(remote),
 		ResponseTimeout: timeout,
 		// No integrity poll: this connects to issue one control and leave, and
 		// polling a device first would be noise on the wire and in its log.
 		Log: log,
-	}, nil)
+	}
+	tune(&mcfg)
+	sess := master.New(mcfg, nil)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -294,6 +313,11 @@ Output:
   -record DIR      write values.csv and events.csv into DIR
   -listen ADDR     serve live values over HTTP
   -v / -q          more or less logging
+
+Security events (see docs/security.md):
+  -events json|FILE  report events as JSON lines, to stderr or appended to FILE
+  -events-min SEV    only events at or above info, notice, warning, alert, critical
+  -write-timeout D   close a connection whose outstation stops reading for D
 
 Controls (operate connects, issues one control, and exits):
   latch-on N       latch a binary output on

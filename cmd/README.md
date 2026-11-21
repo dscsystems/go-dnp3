@@ -24,5 +24,10 @@ explorer, `yaml.v3` for the configuration files in `dnp3-master` and
 `dnp3-outstation`. Nothing in `cmd/` is imported by any importable package, so
 none of it lands in your build.
 
+`dnp3-outstation` and `dnp3-master` take `-events json` to print
+[security events](../docs/security.md). The outstation also takes policy
+flags (`-allow-peer`, `-allowed-master`, `-read-only`, `-flood-action`) that
+make it a hardened device to test a master against.
+
 See the [user guide](../docs/user-guide.md) for building your own, and the
 [API reference](../docs/api.md) for the details.

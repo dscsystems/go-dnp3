@@ -1328,6 +1328,31 @@ For metrics, poll `Stats()` on either session. The fields worth alarming on:
 | `outstation.Stats.MalformedRequests` | something on the wire is wrong |
 | `outstation.Stats.CommandsRejected` | controls are being refused |
 
+### Security events
+
+Logs and counters tell you that something went wrong. Security events tell
+you what, from where, and whether it looks hostile. Set `Config.Security` on
+either session, and each connection from an unexpected address, refused
+certificate, changed MAC, malformed or replayed request, control, restart,
+authentication failure and flood arrives as a typed event:
+
+```go
+out := outstation.New(outstation.Config{
+    // ...
+    IdleTimeout:  2 * time.Minute, // free the slot from a silent client
+    WriteTimeout: 10 * time.Second,
+    Security: &secevent.Policy{
+        Sink:         secevent.JSONLinesSink(eventsFile),
+        AllowedPeers: []netip.Prefix{netip.MustParsePrefix("10.0.4.0/24")},
+    },
+}, appl, cmds)
+```
+
+A policy only reports unless you ask it to refuse something. Refusing covers
+unlisted peers, other master addresses, functions a read-only device should
+never run, and floods. See the [security guide](security.md) for the policy,
+the MAC address caveats, deployment advice and the full event catalogue.
+
 ---
 
 ## Troubleshooting
@@ -1395,6 +1420,8 @@ Something is touching `Database()` from outside the session goroutine after
 - Self-address (0xFFFC) discovery is opt-in with outstation `Config.SelfAddress`.
   Broadcast is received and executed but never answered; authentication-enabled
   outstations refuse unauthenticated critical broadcasts.
+- Turn on security events (`Config.Security`) and the outstation's
+  `IdleTimeout` and `WriteTimeout`. See the [security guide](security.md).
 - Use TLS with mutual authentication for anything that leaves a locked cabinet.
   TLS and DNP3 Secure Authentication are separate features; the latter currently
   implements symmetric key exchange and critical-request challenge/reply.
@@ -1413,5 +1440,6 @@ Something is touching `Database()` from outside the session goroutine after
 ## See also
 
 - [API reference](api.md) — every exported type and function
+- [Security events](security.md) — reporting, policy and deployment guidance
 - [Device profile](device-profile.md) — supported features and known gaps
 - [`SKILL.md`](../SKILL.md) — condensed reference for AI coding agents

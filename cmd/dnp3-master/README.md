@@ -42,8 +42,16 @@ dnp3-master [flags] operate <control> <index> [value]
 | `-record DIR` | — | write `values.csv` and `events.csv` into `DIR` |
 | `-listen ADDR` | — | serve the live values over HTTP |
 | `-v` / `-q` | — | debug logging / errors only |
+| `-events json\|FILE` | off | report [security events](../../docs/security.md) as JSON lines, to stderr or appended to `FILE` |
+| `-events-min SEV` | `info` | only events at or above `info`, `notice`, `warning`, `alert` or `critical` |
+| `-write-timeout DUR` | off | close a connection whose outstation stops reading for `DUR` |
 
 One of `-config`, `-host` or `-serial` is required.
+
+Every site shares one security event stream, so `-events` writes a single
+ordered log for the whole poller. The events a master reports include
+outstation restarts, configuration-corrupt and local-control indications,
+unsolicited responses while disabled, and refused requests.
 
 ## What it does on connect
 

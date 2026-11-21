@@ -39,6 +39,8 @@ test cheap — see [Verify your work](#verify-your-work).
 | `…/multidrop` | one channel shared by several sessions: multi-drop serial, serial gateways |
 | `…/decoder` | structured traces for logs and tooling |
 | `…/objects` | group/variation codecs, object descriptor table |
+| `…/secevent` | security events: `Policy`, sinks, `Dispatcher`, kind catalogue |
+| `…/netpeer` | peer MAC lookup and MAC/IP history (any `net.Conn`) |
 
 `internal/*` is not importable. Module requires Go 1.26. **Licence is GPLv3+** —
 anything linking it must be GPL too; say so if the user's context implies
@@ -347,6 +349,27 @@ d.Feed(buf, func(tr decoder.Trace) {
 decoder.DecodeFrame(nil, oneFrame) // one-shot, no session state
 ```
 
+**Report security events** — `Config.Security` on master, outstation or
+`multidrop.Config`. Nil means off and costs nothing. A policy only reports
+unless a `Reject*`, `Functions`, `CommandGuard` or `FloodAction` field says
+to refuse. The kind strings (`conn.unexpected`, `cmd.operate_mismatch`, …)
+are stable API. The catalogue is `docs/security.md` §10.
+
+```go
+Security: &secevent.Policy{
+	Sink:         secevent.JSONLinesSink(f), // or SlogSink, NewChannelSink, MultiSink, FilterSink
+	AllowedPeers: []netip.Prefix{netip.MustParsePrefix("10.0.4.0/24")},
+	Functions:    &secevent.FunctionPolicy{ReadOnly: true, AllowTimeWrite: true},
+},
+```
+
+Many sessions, one stream: `d := secevent.NewDispatcher(sink,
+secevent.DispatcherOptions{})`, then `Policy{Dispatcher: d}` in each, and
+`d.Close()` after every `Run` has returned. App-side events go through
+`sess.ReportCyberEvent(secevent.Event{Kind: ...})`. Outstation timeouts
+(`IdleTimeout`, `FrameAssemblyTimeout`, `WriteTimeout`) are separate config
+fields, all off by default.
+
 ---
 
 ## Does not exist — do not invent it
@@ -376,6 +399,10 @@ unimplemented rather than writing a call that will not compile.
 - **File transfer is implemented** (group 70) — read, write, list, delete, and
   `AUTHENTICATE_FILE` when `Files.Authenticate` is set — and an outstation
   serves **one transfer at a time**.
+- **The library is not an IDS.** Security events are what one endpoint
+  observes. There is no cross-device correlation, no baselining and no
+  packet capture. The MAC is a hint, not authentication: it is only the
+  peer's own on a directly attached subnet.
 - **No multi-master TCP server.** `TCPServer`/`TLSServer` serve one connection at
   a time; concurrent sessions would need a session per connection, which is not
   implemented.

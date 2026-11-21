@@ -34,6 +34,7 @@ res, err = m.DirectOperate(ctx, master.AnalogOutputFloat32(7, 13.75))
 | [User guide](docs/user-guide.md) | How to build a master, an outstation, or a decoder with this. Start here. |
 | [API reference](docs/api.md) | Every exported type and function, package by package. |
 | [Device profile](docs/device-profile.md) | What is supported, in the shape a vendor ships — including the known gaps. |
+| [Security events](docs/security.md) | Reporting attacks and anomalies to a SIEM, the policy that can refuse them, and deployment guidance. |
 | [`SKILL.md`](SKILL.md) | The same ground, condensed for AI coding agents. |
 
 ## Why
@@ -157,6 +158,12 @@ Targeting IEEE 1815 conformance **Level 2, then Level 3**, with Level 4 features
 staged after that. Transports: TCP, TLS, serial and UDP. A symmetric Secure
 Authentication v5 subset is available independently of TLS; see the
 [device profile](docs/device-profile.md) for its supported exchanges and limits.
+
+Both roles can report security events, typed and stable enough to forward
+to a SIEM. These cover unexpected peers, TLS refusals, MAC changes, malformed
+and replayed traffic, controls and restarts, authentication failures and
+floods. Optional policies refuse some of these as well. See
+[security events](docs/security.md).
 
 ## Commands
 
@@ -292,6 +299,10 @@ The fault injections matter as much as the simulation: `-inject
 event-storm=500`, `-inject restart-after=5m`, `-inject offline-every=30s`.
 Those are the conditions a master's error handling is usually wrong about and
 the hardest to arrange with real equipment.
+
+`-events json` prints its security events as JSON lines, and the policy flags
+let it act as a hardened device: `-allow-peer`, `-allowed-master`,
+`-read-only`, `-flood-action throttle`.
 
 `dnp3-decode` takes hex from arguments, a file or a pipe and renders the layer
 tree. It reads Wireshark hex-dump exports directly — the offset column and
