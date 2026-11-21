@@ -2,10 +2,12 @@ package multidrop
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/dscsystems/go-dnp3"
 	"github.com/dscsystems/go-dnp3/channel"
 	"github.com/dscsystems/go-dnp3/internal/link"
 	"github.com/dscsystems/go-dnp3/secevent"
@@ -85,5 +87,16 @@ func TestBusReportsLineEvents(t *testing.T) {
 	}
 	if e := ev.wait(t, secevent.KindLinkCRCError); e.Severity != secevent.Notice {
 		t.Errorf("CRC error severity %v on a bus", e.Severity)
+	}
+}
+
+// An invalid policy fails closed: no station can be added.
+func TestBusRefusesStationsOnInvalidPolicy(t *testing.T) {
+	a, _ := channel.Pipe()
+	b := New(a, Config{Security: &secevent.Policy{RejectUnexpectedMaster: true}})
+	t.Cleanup(func() { _ = b.Close() })
+	_, err := b.Add(Station{LocalAddr: 1, RemoteAddr: 10})
+	if !errors.Is(err, dnp3.ErrBadConfig) {
+		t.Fatalf("Add = %v, want ErrBadConfig", err)
 	}
 }

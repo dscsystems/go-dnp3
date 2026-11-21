@@ -5,6 +5,7 @@ package sechub
 
 import (
 	"io"
+	"net/netip"
 	"sync/atomic"
 	"time"
 
@@ -93,6 +94,11 @@ func (h *Hub) Connected(conn io.ReadWriteCloser, opened secevent.Kind) bool {
 	em.Emit(secevent.Event{Kind: opened, Detail: detail})
 	if !h.identify(em, peer, res, looked) {
 		return false
+	}
+	if c, ok := conn.(peerChecker); ok && !peer.RemoteAddr.IsValid() {
+		// A UDP outstation learns its master from the first datagram, after
+		// this. Check that peer when it arrives, before it is served.
+		c.SetPeerCheck(func(ap netip.AddrPort) bool { return h.admitLearned(em, peer, ap) })
 	}
 	if h.policy.MACRecheckInterval > 0 && peersOwnMAC(res.Source) {
 		h.stopRecheck = make(chan struct{})

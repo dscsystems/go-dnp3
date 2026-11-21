@@ -23,7 +23,6 @@ import (
 	"github.com/dscsystems/go-dnp3"
 	"github.com/dscsystems/go-dnp3/master"
 	"github.com/dscsystems/go-dnp3/objects"
-	"github.com/dscsystems/go-dnp3/secevent"
 )
 
 // The concurrency rule this whole file is built around: the DNP3 session runs
@@ -353,7 +352,7 @@ func (m *Model) applySessionMsg(msg tea.Msg) tea.Cmd {
 	case logMsg:
 		m.addLog(msg.level, msg.text)
 	case secEventMsg:
-		m.addSecEvent(secevent.Event(msg))
+		m.addSecEvent(msg.device, msg.event)
 	}
 	return nil
 }

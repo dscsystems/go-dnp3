@@ -167,7 +167,7 @@ func (c *tlsClient) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 		}
 		c.sec.dialFailed(c.addr, c.attempt, err)
 		if _, isTLS := secevent.ClassifyTLS(err); isTLS {
-			c.sec.tlsFailed(nil, err)
+			c.sec.tlsFailed(nil, c.addr, err)
 		}
 		if c.retry.Min <= 0 {
 			return nil, err
@@ -286,7 +286,7 @@ func (s *tlsServer) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		s.sec.tlsFailed(raw, err)
+		s.sec.tlsFailed(raw, "", err)
 	}
 }
 

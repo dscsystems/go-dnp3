@@ -175,3 +175,41 @@ func (h *Hub) recheck(em *secevent.Emitter, conn io.Closer, ip netip.Addr, mac n
 		}
 	}
 }
+
+// peerChecker is a connection that learns its peer after it opens: a UDP
+// socket answering whoever writes first.
+type peerChecker interface {
+	SetPeerCheck(func(netip.AddrPort) bool)
+}
+
+// admitLearned applies the allowlist and the identity checks to a peer the
+// connection opened by em has just learned. It runs on the connection's
+// reading goroutine and reports whether the peer may be served.
+func (h *Hub) admitLearned(em *secevent.Emitter, peer secevent.PeerInfo, ap netip.AddrPort) bool {
+	p := h.policy
+	peer.RemoteAddr = ap
+	if peer.Network == "" {
+		peer.Network = "udp"
+	}
+	ip := ap.Addr()
+	known := em.ForConn(em.ConnID(), peer)
+	if !p.PeerAllowed(ip) {
+		ev := secevent.Event{Kind: secevent.KindConnUnexpected,
+			Detail: fmt.Sprintf("%s is not in AllowedPeers", ip)}
+		if p.RejectUnlisted {
+			ev.Action = secevent.Rejected
+			known.Emit(ev)
+			return false
+		}
+		known.Emit(ev)
+	}
+	res, looked := h.lookup(&peer)
+	known = em.ForConn(em.ConnID(), peer)
+	if !h.identify(known, peer, res, looked) {
+		return false
+	}
+	// Later events on this connection name the peer; unless it has
+	// already ended.
+	h.cur.CompareAndSwap(em, known)
+	return true
+}

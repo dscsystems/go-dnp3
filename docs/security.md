@@ -52,7 +52,8 @@ p := &secevent.Policy{Dispatcher: d}
 `Policy.Valid` checks a policy for contradictions, for example
 `RejectUnexpectedMaster` without `AllowedMasters`. The library refuses an invalid
 policy: a session's `Run` returns an error wrapping `dnp3.ErrBadConfig`,
-and a multidrop bus logs the problem and runs without reporting.
+and a multidrop bus logs the problem and its `Add` refuses every station
+with the same error. Neither runs without the protections it was asked for.
 
 A session also offers:
 
@@ -91,7 +92,11 @@ An `Event` has these parts:
 - `Value` holds a short machine-readable detail, such as a sub-reason, a
   clock delta or a command description. `Detail` is a one-line English
   explanation, `Err` is the underlying error, and `Raw` holds up to
-  `MaxRaw` octets (default 64) of the offending frame.
+  `MaxRaw` octets (default 64) of the offending frame. `Raw` is never kept
+  for a fragment that may carry a secret: file open, delete and
+  authenticate requests, SAv5 requests and responses, any g120 object and
+  g70 variations 2 to 4. A fragment too malformed to parse is dropped too if
+  it looks like one.
 - `Count` and `FirstSeen`, for repeats that were aggregated.
 
 The JSON form, from `JSONLinesSink` or `json.Marshal`, has stable snake_case
@@ -130,6 +135,8 @@ sink:
   so a drop is never silent.
 - **Sink panics.** A sink that panics is recovered and reported as
   `meta.sink_panic`.
+- **Close.** Every event `Submit` accepted is delivered before `Close`
+  returns; one submitted after `Close` began is refused, never lost silently.
 - **Synchronous delivery.** `SyncSink(s)` makes the dispatcher call `s` on
   the emitting goroutine instead. Use it for tests, or for a sink that only
   appends to memory.
@@ -146,7 +153,8 @@ sink:
 | `SinkFunc(f)` | Any function. |
 
 A sink is called from one goroutine at a time. A slow sink delays later
-events, not the protocol.
+events, not the protocol. A sink may call `SecurityStats` or
+`Dispatcher.Stats`.
 
 ## 3. The policy
 
@@ -160,9 +168,9 @@ policy that sets any of them takes effect even without a sink.
 
 | Setting | What it does |
 |---------|--------------|
-| `RejectUnlisted` (with `AllowedPeers`) | Closes connections from unlisted addresses at once, before TLS. |
+| `RejectUnlisted` (with `AllowedPeers`) | Closes connections from unlisted addresses at once, before TLS. On a UDP channel without a configured peer, the first sender is checked before it is learned: refused senders are dropped and the channel waits for another. |
 | `RejectOverRate` | Closes connections over `AcceptRate` / `GlobalAcceptRate`. |
-| `RejectBindingMismatch` (with `PeerBindings`) | Closes a connection whose MAC is not the pinned one. |
+| `RejectBindingMismatch` (with `PeerBindings`) | Closes a connection whose MAC is not the pinned one. A UDP peer learned from its first datagram is checked the same way. |
 | `DisconnectOnMACChange` (with `MACRecheckInterval`) | Closes a connection whose peer's MAC changed while it was open. |
 | `RejectUnexpectedMaster` (with `AllowedMasters`) | Drops link frames from other master addresses before the link layer acts on them. |
 | `Functions` | Refuses application functions outright. See [Refusing functions](#refusing-functions). |
@@ -288,7 +296,10 @@ reported. Refusing them would break the link or SAv5 itself.
 
 A master counts frames, octets and unsolicited responses. It cannot refuse
 what an outstation sends without losing data, so at a master `Throttled`
-only reports, while `Disconnected` still drops the connection.
+only reports, while `Disconnected` still drops the connection. Frame and
+octet counts at an outstation behave the same way. An event's `Action` is
+always what was done, so a flood that was only reported says `Observed`
+whatever `FloodAction` is.
 
 `ConfirmWithheldAfter` is the number of confirmations in a row that may time
 out before `dos.confirm_withheld`. The default is 3.

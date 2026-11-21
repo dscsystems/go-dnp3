@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -270,4 +271,89 @@ func TestPeerOfReadsAddresses(t *testing.T) {
 	if p.Network != "tcp" || p.RemoteAddr.String() != l.Addr().String() || p.ConnectedAt.IsZero() {
 		t.Fatalf("peer = %+v", p)
 	}
+}
+
+// A sink may read the dispatcher's statistics without deadlocking it.
+func TestSinkMayReadStats(t *testing.T) {
+	for _, syncMode := range []bool{false, true} {
+		var d *Dispatcher
+		seen := make(chan uint64, 4)
+		var sink Sink = SinkFunc(func(Event) { seen <- d.Stats().Delivered })
+		if syncMode {
+			sink = SyncSink(sink)
+		}
+		d = NewDispatcher(sink, DispatcherOptions{AggregateWindow: -1})
+		d.Submit(Event{Kind: KindConnClosed})
+		select {
+		case n := <-seen:
+			if n != 1 {
+				t.Errorf("sync=%v: Delivered = %d inside the sink, want 1", syncMode, n)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("sync=%v: the sink never returned: deadlock", syncMode)
+		}
+		closed := make(chan struct{})
+		go func() { _ = d.Close(); close(closed) }()
+		select {
+		case <-closed:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("sync=%v: Close hung", syncMode)
+		}
+	}
+}
+
+// Every event Submit accepts is delivered, even when Close races it.
+func TestSubmitRacingCloseLosesNothing(t *testing.T) {
+	for range 50 {
+		var delivered atomic.Int64
+		d := NewDispatcher(SinkFunc(func(Event) { delivered.Add(1) }),
+			DispatcherOptions{AggregateWindow: -1, QueueSize: 4096})
+		var accepted atomic.Int64
+		var wg sync.WaitGroup
+		for range 8 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for range 100 {
+					if d.Submit(Event{Kind: KindConnClosed}) {
+						accepted.Add(1)
+					}
+				}
+			}()
+		}
+		_ = d.Close()
+		wg.Wait()
+		if a, n := accepted.Load(), delivered.Load(); a != n {
+			t.Fatalf("accepted %d events, delivered %d", a, n)
+		}
+	}
+}
+
+func TestSecretBearingFragments(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  []byte
+		want bool
+	}{
+		{"class 0 read", []byte{0xC0, 0x01, 0x3C, 0x01, 0x06}, false},
+		{"authenticate file", []byte{0xC0, 0x1D, 0x46, 0x02, 0x5B, 0x01}, true},
+		{"open file", []byte{0xC0, 0x19, 0x46, 0x03, 0x5B, 0x01}, true},
+		{"response with a file key", []byte{0xC0, 0x81, 0x00, 0x00, 0x46, 0x04, 0x5B, 0x01, 0x01, 0x00}, true},
+		{"SAv5 challenge reply", []byte{0xC0, 0x20, 0x78, 0x02, 0x5B, 0x01}, true},
+		{"truncated g120 header", []byte{0xC0, 0x02, 0x78, 0x06, 0x17}, true},
+		{"truncated, nothing secret", []byte{0xC0, 0x02, 0x01, 0x02, 0x17}, false},
+	} {
+		if got := secretBearing(tc.raw); got != tc.want {
+			t.Errorf("%s: secretBearing = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+
+	d := NewDispatcher(SyncSink(SinkFunc(func(e Event) {
+		if e.Raw != nil {
+			t.Errorf("%s kept the raw octets", e.Kind)
+		}
+	})), DispatcherOptions{})
+	defer d.Close()
+	NewEmitter(d, "outstation", DefaultMaxRaw).Emit(Event{Kind: KindAuthFileFailed,
+		Raw: []byte{0xC0, 0x1D, 0x46, 0x02, 0x5B, 0x01, 'g', 'u', 'e', 's', 's'}})
 }

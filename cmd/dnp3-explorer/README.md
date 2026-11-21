@@ -228,7 +228,7 @@ they were looking at rather than something they have to reconstruct.
 | Points, Overview | `dnp3-points-<stamp>.csv` | `type,index,value,quality,timestamp,timestamp_quality,received,updates,events,source` |
 | Events | `dnp3-events-<stamp>.csv` | `received,type,index,value,quality,timestamp,class,source` |
 | Log | `dnp3-log-<stamp>.csv` | `time,level,message` |
-| Security | `dnp3-security-<stamp>.csv` | `time,severity,kind,action,count,detail` |
+| Security | `dnp3-security-<stamp>.csv` | `time,device,severity,kind,action,count,detail` |
 
 `source` is the group and variation the value arrived under, e.g. `g30v5`.
 

@@ -179,3 +179,17 @@ func TestMasterOctetFlood(t *testing.T) {
 		t.Errorf("event %+v", e)
 	}
 }
+
+// A master cannot throttle what it is sent, so the event must not say it did.
+func TestMasterThrottleOnlyReports(t *testing.T) {
+	o, log := startMaster(t, master.Config{Security: &secevent.Policy{
+		FloodAction: secevent.Throttled,
+		Limits:      secevent.Limits{Unsolicited: secevent.Rate{N: 1, Per: time.Hour}},
+	}})
+	for i := range byte(3) {
+		o.send(0xF0|i, 0x82, 0x00, 0x00)
+	}
+	if e := log.wait(t, secevent.KindFloodUnsolicited); e.Action != secevent.Observed {
+		t.Errorf("action %v, want Observed: the responses were processed", e.Action)
+	}
+}

@@ -257,3 +257,26 @@ func TestTLSApplicationCheckRefuses(t *testing.T) {
 		t.Error("the check saw no certificate")
 	}
 }
+
+// A client refusing the server's certificate keeps the certificate's
+// identity and the address it dialled on the event.
+func TestTLSClientRefusalKeepsCertificate(t *testing.T) {
+	addr, _, _, _, _ := tlsServerWithLog(t)
+	_, otherCA, _, _, otherCert, otherKey := certs(t)
+	client, err := TLSClient(addr, TLSConfig{CertFile: otherCert, KeyFile: otherKey, CAFile: otherCA, ServerName: "localhost"}, NoRetry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := attach(t, client, &secevent.Policy{CertExpiryWarning: -1})
+	if c, err := client.Connect(t.Context()); err == nil {
+		_ = c.Close()
+		t.Fatal("connected to a server signed by another authority")
+	}
+	e := log.wait(t, secevent.KindTLSCertRejected)
+	if e.Peer.TLS == nil || e.Peer.TLS.FingerprintSHA256 == "" || e.Peer.TLS.Issuer == "" {
+		t.Errorf("certificate lost: %+v", e.Peer.TLS)
+	}
+	if e.Peer.RemoteAddr.String() != addr {
+		t.Errorf("peer address %v, want %s", e.Peer.RemoteAddr, addr)
+	}
+}

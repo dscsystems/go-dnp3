@@ -106,6 +106,8 @@ type Config struct {
 	// no station on the bus, frames dropped for a station that stopped
 	// reading, and the line connecting and dropping. Nil reports nothing.
 	// Each session on the bus reports its own events under its own policy.
+	// An invalid policy is not ignored: Add refuses every station, so the
+	// bus never serves without the rules it was configured with.
 	Security *secevent.Policy
 }
 
@@ -237,6 +239,8 @@ type Bus struct {
 	em      *secevent.Emitter
 	connEm  *secevent.Emitter
 	secDone func()
+	// secErr is why the security policy could not be used; Add reports it.
+	secErr error
 }
 
 // New returns a bus over ch.
@@ -276,6 +280,9 @@ func (b *Bus) Add(s Station) (channel.Channel, error) {
 
 	if b.closed {
 		return nil, channel.ErrClosed
+	}
+	if b.secErr != nil {
+		return nil, fmt.Errorf("multidrop: security policy: %w", b.secErr)
 	}
 	for _, existing := range b.stations {
 		if existing.addr.conflicts(s) {

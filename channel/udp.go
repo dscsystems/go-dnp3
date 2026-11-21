@@ -153,6 +153,12 @@ type udpConn struct {
 	rbuf    []byte
 	pending []byte
 
+	// check, when set, decides whether a peer this connection is about to
+	// learn may be served; refused remembers the ones it turned away, so a
+	// refused peer costs one check rather than one per datagram.
+	check   func(netip.AddrPort) bool
+	refused map[netip.AddrPort]bool
+
 	// wbuf gathers the frames of a message between BeginMessage and
 	// EndMessage.
 	wmu      sync.Mutex
@@ -178,7 +184,15 @@ func (u *udpConn) Read(p []byte) (int, error) {
 		}
 
 		// Learn the peer from the first datagram, so an outstation can answer
-		// a master it was not configured with.
+		// a master it was not configured with — once the session's policy,
+		// if it has one, has accepted it.
+		u.ch.mu.Lock()
+		learning := u.ch.remote == nil
+		u.ch.mu.Unlock()
+		if learning && !u.admitPeer(unmap(addr.AddrPort())) {
+			u.ch.dropped.Add(1)
+			continue
+		}
 		u.ch.mu.Lock()
 		if u.ch.remote == nil {
 			u.ch.remote = addr
@@ -201,6 +215,31 @@ func (u *udpConn) Read(p []byte) (int, error) {
 	n := copy(p, u.pending)
 	u.pending = u.pending[n:]
 	return n, nil
+}
+
+// SetPeerCheck installs a check run on the peer this connection learns from
+// its first datagram, before anything from it is delivered. A session's
+// security policy uses it to apply its allowlist and MAC pinning to a peer
+// it could not know when the connection opened. It is called on the reading
+// goroutine.
+func (u *udpConn) SetPeerCheck(check func(netip.AddrPort) bool) { u.check = check }
+
+// admitPeer runs the peer check, remembering refusals.
+func (u *udpConn) admitPeer(ap netip.AddrPort) bool {
+	if u.check == nil {
+		return true
+	}
+	if u.refused[ap] {
+		return false
+	}
+	if u.check(ap) {
+		return true
+	}
+	if u.refused == nil || len(u.refused) >= 256 {
+		u.refused = map[netip.AddrPort]bool{}
+	}
+	u.refused[ap] = true
+	return false
 }
 
 // sameUDPAddr compares two UDP addresses by IP and port, treating an

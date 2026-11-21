@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/dscsystems/go-dnp3/internal/app"
+	"github.com/dscsystems/go-dnp3/internal/sechub"
 	"github.com/dscsystems/go-dnp3/internal/stack"
 	"github.com/dscsystems/go-dnp3/secevent"
 )
@@ -56,7 +57,7 @@ func (s *Session) flooded(r stack.Received, frag app.Fragment) bool {
 	if !ok {
 		return false
 	}
-	return s.sec.Flood(k, rate, 1, false, appEvent("", r, &frag.Header)) != secevent.Observed
+	return s.sec.Flood(k, rate, 1, sechub.Refusable, appEvent("", r, &frag.Header)) != secevent.Observed
 }
 
 // commandFlooded counts one control against the command rate, and reports
@@ -67,7 +68,7 @@ func (s *Session) commandFlooded(group, variation uint8, index uint16) bool {
 	}
 	e := s.commandEvent("", group, variation, uint32(index), 0)
 	e.Fields &^= secevent.HasCommandStatus
-	return s.sec.Flood(secevent.KindFloodCommands, s.cfg.Security.EffectiveLimits().Commands, 1, false, e) != secevent.Observed
+	return s.sec.Flood(secevent.KindFloodCommands, s.cfg.Security.EffectiveLimits().Commands, 1, sechub.Refusable, e) != secevent.Observed
 }
 
 // checkBacklog reports a receive queue that has stayed full: the peer sends

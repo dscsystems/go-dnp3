@@ -53,25 +53,41 @@ func (h *Hub) Over(key string, r secevent.Rate) bool {
 	return over
 }
 
+// FloodMode says what a caller can do about traffic over a flood limit.
+type FloodMode uint8
+
+const (
+	// Refusable traffic can be throttled or disconnected, as the policy says.
+	Refusable FloodMode = iota
+	// Unrefusable traffic was already processed, or cannot be refused
+	// without losing data: Throttled only reports, Disconnected still drops.
+	Unrefusable
+	// ReportOnly traffic is never acted on: refusing it would break the link
+	// or authentication itself.
+	ReportOnly
+)
+
 // Flood counts n occurrences of flood class k against rate r. Over the
-// rate, it reports the flood once and returns the policy's action for this
+// rate, it reports the flood once and returns the action taken for this
 // occurrence: Throttled (refuse it) or Disconnected (drop the connection,
-// see Drop). Within the rate, or for a class that is only ever reported
-// (reportOnly), it returns Observed: carry on. A caller that cannot refuse
-// one occurrence treats Throttled as Observed.
-func (h *Hub) Flood(k secevent.Kind, r secevent.Rate, n int, reportOnly bool, e secevent.Event) secevent.Action {
-	return h.flood(string(k), k, r, n, reportOnly, e)
+// see Drop). Within the rate, or when mode rules the policy's action out, it
+// returns Observed: carry on. The event records the action actually taken.
+func (h *Hub) Flood(k secevent.Kind, r secevent.Rate, n int, mode FloodMode, e secevent.Event) secevent.Action {
+	return h.flood(string(k), k, r, n, mode, e)
 }
 
 // flood is Flood with the rate detector named by key, for a kind fed by
 // more than one limit.
-func (h *Hub) flood(key string, k secevent.Kind, r secevent.Rate, n int, reportOnly bool, e secevent.Event) secevent.Action {
+func (h *Hub) flood(key string, k secevent.Kind, r secevent.Rate, n int, mode FloodMode, e secevent.Event) secevent.Action {
 	over, first := h.limit(key, r, n)
 	if !over {
 		return secevent.Observed
 	}
 	action := h.policy.Flood()
-	if reportOnly {
+	switch {
+	case mode == ReportOnly:
+		action = secevent.Observed
+	case mode == Unrefusable && action == secevent.Throttled:
 		action = secevent.Observed
 	}
 	if first {

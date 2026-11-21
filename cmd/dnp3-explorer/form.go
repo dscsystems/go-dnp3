@@ -169,6 +169,7 @@ func (m *Model) forgetDevice() {
 	m.points = map[pointKey]*pointState{}
 	m.pointsOrder = nil
 	m.events = nil
+	m.security, m.secAlerts = nil, 0
 	m.iin = ""
 	m.stats = master.Stats{}
 	for i := range m.cursor {

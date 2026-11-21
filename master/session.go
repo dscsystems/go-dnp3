@@ -880,9 +880,9 @@ func (s *Session) onUnsolicited(w io.Writer, r stack.Received, frag app.Fragment
 
 	if s.sec.Enabled() {
 		// A master cannot refuse an unsolicited response without losing the
-		// data in it, so Throttled only reports; Disconnected drops the
-		// connection once this read is done.
-		s.sec.Flood(secevent.KindFloodUnsolicited, s.cfg.Security.EffectiveLimits().Unsolicited, 1, false,
+		// data in it: Unrefusable, so Throttled only reports, and
+		// Disconnected drops the connection once this read is done.
+		s.sec.Flood(secevent.KindFloodUnsolicited, s.cfg.Security.EffectiveLimits().Unsolicited, 1, sechub.Unrefusable,
 			respEvent("", r, frag.Header))
 	}
 

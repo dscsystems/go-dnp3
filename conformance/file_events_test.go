@@ -1,6 +1,9 @@
 package conformance
 
 import (
+	"bytes"
+	"encoding/binary"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -74,4 +77,32 @@ func TestFileWriteDeniedAndAuthFailure(t *testing.T) {
 		t.Errorf("denied write answered %v", st.Status)
 	}
 	ev.find(t, secevent.KindAccessFunctionBlocked, func(e secevent.Event) bool { return e.FileName == "x" })
+
+	// Neither the password nor the key may reach a sink, in any event or in
+	// its serialised form.
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	for _, e := range ev.events {
+		js, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for what, secret := range map[string][]byte{"password": []byte("guess"), "key": keyOctets(auth.Key)} {
+			if len(secret) > 0 && (bytes.Contains(e.Raw, secret) || bytes.Contains(js, secret) ||
+				strings.Contains(e.Detail+e.Value, string(secret))) {
+				t.Errorf("%s event carries the %s: %s", e.Kind, what, js)
+			}
+		}
+		if e.Raw != nil {
+			t.Errorf("%s event kept the octets of a credential-bearing request", e.Kind)
+		}
+	}
+}
+
+// keyOctets is the authentication key as it travels on the wire.
+func keyOctets(k uint32) []byte {
+	if k == 0 {
+		return nil
+	}
+	return binary.LittleEndian.AppendUint32(nil, k)
 }

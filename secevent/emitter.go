@@ -139,11 +139,19 @@ func (em *Emitter) Stamp(e Event) Event {
 	if e.ConnID == 0 {
 		e.ConnID = em.connID
 	}
-	if e.Peer.IsZero() {
+	if e.Peer.addressless() {
+		// Keep a certificate the event carries — a TLS refusal names the
+		// peer's — and take the rest from the connection.
+		tls := e.Peer.TLS
 		e.Peer = em.peer
+		if tls != nil {
+			e.Peer.TLS = tls
+		}
 	}
 	switch {
-	case em.maxRaw < 0:
+	case em.maxRaw < 0 || (e.Raw != nil && secretBearing(e.Raw)):
+		// Never keep octets that may hold a password or a key, whatever
+		// the event: a sink is a log, and logs travel.
 		e.Raw = nil
 	case e.Raw != nil:
 		n := min(len(e.Raw), em.maxRaw)

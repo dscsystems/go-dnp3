@@ -12,10 +12,17 @@ import (
 
 func TestSecurityScreen(t *testing.T) {
 	m := testModel()
-	m.applySessionMsg(secEventMsg(secevent.Event{Time: time.Now(), Kind: secevent.KindRemoteRestart,
-		Severity: secevent.Warning, Detail: "the outstation restarted"}))
-	m.applySessionMsg(secEventMsg(secevent.Event{Time: time.Now(), Kind: secevent.KindSeqResponseRepeat,
-		Severity: secevent.Info, Count: 3, Detail: "response repeated"}))
+	dev := m.conn.target()
+	m.applySessionMsg(secEventMsg{dev, secevent.Event{Time: time.Now(), Kind: secevent.KindRemoteRestart,
+		Severity: secevent.Warning, Detail: "the outstation restarted"}})
+	m.applySessionMsg(secEventMsg{dev, secevent.Event{Time: time.Now(), Kind: secevent.KindSeqResponseRepeat,
+		Severity: secevent.Info, Count: 3, Detail: "response repeated"}})
+	// A late event from the session for a device no longer selected.
+	m.applySessionMsg(secEventMsg{"elsewhere:20000", secevent.Event{Kind: secevent.KindRemoteRestart,
+		Severity: secevent.Alert, Detail: "from the old device"}})
+	if len(m.security) != 2 {
+		t.Fatalf("%d rows, want 2: the straggler was filed", len(m.security))
+	}
 
 	m = press(m, "6")
 	if m.screen != ScreenSecurity {
@@ -49,7 +56,7 @@ func TestSecurityScreen(t *testing.T) {
 // The policy the explorer builds reports and never refuses.
 func TestSecurityPolicyOnlyReports(t *testing.T) {
 	c := &connection{msgs: make(chan tea.Msg, 1)}
-	p := securityPolicy(c)
+	p := securityPolicy(c, "dev:20000")
 	if err := p.Valid(); err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +64,18 @@ func TestSecurityPolicyOnlyReports(t *testing.T) {
 		t.Errorf("policy refuses something: %+v", p)
 	}
 	p.Sink.HandleEvent(secevent.Event{Kind: secevent.KindRemoteRestart})
-	if msg, ok := (<-c.msgs).(secEventMsg); !ok || msg.Kind != secevent.KindRemoteRestart {
+	if msg, ok := (<-c.msgs).(secEventMsg); !ok || msg.event.Kind != secevent.KindRemoteRestart || msg.device != "dev:20000" {
 		t.Errorf("sink delivered %v", msg)
+	}
+}
+
+// Switching to another device forgets the previous one's security events.
+func TestSecurityForgottenWithDevice(t *testing.T) {
+	m := testModel()
+	m.applySessionMsg(secEventMsg{m.conn.target(), secevent.Event{Kind: secevent.KindRemoteRestart,
+		Severity: secevent.Warning}})
+	m.forgetDevice()
+	if len(m.security) != 0 || m.secAlerts != 0 {
+		t.Errorf("after forgetDevice: %d rows, %d alerts", len(m.security), m.secAlerts)
 	}
 }

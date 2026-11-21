@@ -71,9 +71,9 @@ func (m *Model) export() tea.Cmd {
 
 	case ScreenSecurity:
 		name = "dnp3-security-" + stamp + ".csv"
-		rows = append(rows, []string{"time", "severity", "kind", "action", "count", "detail"})
+		rows = append(rows, []string{"time", "device", "severity", "kind", "action", "count", "detail"})
 		for _, r := range m.visibleSecurity() {
-			rows = append(rows, []string{r.At.Format(time.RFC3339Nano), r.Severity.String(),
+			rows = append(rows, []string{r.At.Format(time.RFC3339Nano), r.Device, r.Severity.String(),
 				string(r.Kind), r.Action.String(), fmt.Sprint(max(r.Count, 1)), r.Text})
 		}
 

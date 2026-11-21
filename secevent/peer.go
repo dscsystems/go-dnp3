@@ -84,7 +84,11 @@ type TLSPeer struct {
 }
 
 // IsZero reports whether nothing is known about the peer.
-func (p PeerInfo) IsZero() bool {
+func (p PeerInfo) IsZero() bool { return p.addressless() && p.TLS == nil }
+
+// addressless reports whether the peer has no address, port or MAC, though
+// it may have a certificate: what a failed TLS dial knows.
+func (p PeerInfo) addressless() bool {
 	return p.Network == "" && !p.RemoteAddr.IsValid() && p.SerialPort == "" && p.MAC == nil
 }
 

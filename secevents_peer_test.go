@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dscsystems/go-dnp3/channel"
+	"github.com/dscsystems/go-dnp3/internal/link"
 	"github.com/dscsystems/go-dnp3/master"
 	"github.com/dscsystems/go-dnp3/netpeer"
 	"github.com/dscsystems/go-dnp3/outstation"
@@ -135,5 +136,74 @@ func TestSecurityEventsLinkAddressChange(t *testing.T) {
 	e := log.wait(t, secevent.KindPeerLinkAddrChanged)
 	if e.LinkSrc != 2 {
 		t.Fatalf("link addr changed = %+v", e)
+	}
+}
+
+// A UDP outstation with no configured master learns it from the first
+// datagram. The pinning and the allowlist apply to that peer before it is
+// served, not only to peers known when the session started.
+func TestSecurityEventsUDPLearnedPeerIsChecked(t *testing.T) {
+	cases := []struct {
+		name string
+		set  func(*secevent.Policy)
+		want secevent.Kind
+	}{
+		{"mac pinning", func(p *secevent.Policy) {
+			p.Resolver = &switchTable{mac: mac2}
+			p.PeerBindings = map[netip.Addr]net.HardwareAddr{netip.MustParseAddr("127.0.0.1"): mac1}
+			p.RejectBindingMismatch = true
+		}, secevent.KindConnUnexpectedMAC},
+		{"allowlist", func(p *secevent.Policy) {
+			p.AllowedPeers = []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
+			p.RejectUnlisted = true
+		}, secevent.KindConnUnexpected},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			log := newEventLog()
+			pol := log.policy()
+			pol.MACCache = netpeer.NewCache(0, 0)
+			tc.set(pol)
+			addr := runOutstationOn(t, outstation.Config{LocalAddr: 10, RemoteAddr: 1, Security: pol},
+				channel.UDPChannel(channel.UDPConfig{LocalAddr: "127.0.0.1:0"}))
+
+			c, err := net.Dial("udp", addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			if _, err := c.Write(linkFrame(t, fromMaster(link.FuncRequestLinkStatus), 10, 1, nil)); err != nil {
+				t.Fatal(err)
+			}
+			if e := log.wait(t, tc.want); e.Action != secevent.Rejected || e.Peer.RemoteAddr.String() != c.LocalAddr().String() {
+				t.Fatalf("event = %+v", e)
+			}
+			_ = c.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+			if n, err := c.Read(make([]byte, 64)); err == nil {
+				t.Fatalf("the refused peer was answered (%d octets)", n)
+			}
+		})
+	}
+}
+
+// A peer the policy accepts is still learned and answered.
+func TestSecurityEventsUDPLearnedPeerAccepted(t *testing.T) {
+	log := newEventLog()
+	pol := log.policy()
+	pol.AllowedPeers = []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
+	pol.RejectUnlisted = true
+	addr := runOutstationOn(t, outstation.Config{LocalAddr: 10, RemoteAddr: 1, Security: pol},
+		channel.UDPChannel(channel.UDPConfig{LocalAddr: "127.0.0.1:0"}))
+	c, err := net.Dial("udp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.Write(linkFrame(t, fromMaster(link.FuncRequestLinkStatus), 10, 1, nil)); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := c.Read(make([]byte, 64)); err != nil {
+		t.Fatalf("the allowed peer got no link status: %v", err)
 	}
 }

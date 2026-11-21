@@ -65,15 +65,26 @@ type Dispatcher struct {
 	dropped atomic.Uint64
 	closing chan struct{}
 	done    chan struct{}
-	once    sync.Once
 
-	// mu guards everything below. In asynchronous mode only the dispatcher
-	// goroutine and Stats take it.
-	mu       sync.Mutex
-	aggs     map[aggKey]*list.Element
-	order    *list.List // of *aggregate, oldest first
-	stats    Stats
-	panicked bool
+	// admit orders Submit against Close: a submitter holds it shared while
+	// it checks closed and queues, Close holds it exclusively to set closed.
+	// So every event Submit accepted is in the queue before the worker
+	// drains it for the last time.
+	admit  sync.RWMutex
+	closed bool
+
+	// deliverMu serialises every step that may call the sink, and guards
+	// out and panicked. It is taken before mu, and the sink is called with
+	// it held but mu released, so a sink may call Stats.
+	deliverMu sync.Mutex
+	out       []Event
+	panicked  bool
+
+	// mu guards the aggregation state and the counters.
+	mu    sync.Mutex
+	aggs  map[aggKey]*list.Element
+	order *list.List // of *aggregate, oldest first
+	stats Stats
 }
 
 type aggKey struct {
@@ -125,15 +136,13 @@ func (d *Dispatcher) Submit(e Event) bool {
 	if d == nil {
 		return false
 	}
-	select {
-	case <-d.closing:
+	d.admit.RLock()
+	defer d.admit.RUnlock()
+	if d.closed {
 		return false
-	default:
 	}
 	if d.sync {
-		d.mu.Lock()
-		d.process(e, time.Now())
-		d.mu.Unlock()
+		d.step(func() { d.process(e, time.Now()) })
 		return true
 	}
 	select {
@@ -145,13 +154,33 @@ func (d *Dispatcher) Submit(e Event) bool {
 	}
 }
 
+// step runs f on the aggregation state, then hands the sink whatever f
+// queued for delivery, in order.
+func (d *Dispatcher) step(f func()) {
+	d.deliverMu.Lock()
+	defer d.deliverMu.Unlock()
+	d.mu.Lock()
+	f()
+	d.mu.Unlock()
+	for i := range d.out {
+		d.call(d.out[i])
+	}
+	clear(d.out)
+	d.out = d.out[:0]
+}
+
 // Close flushes queued and aggregated events to the sink and stops the
 // dispatcher. Events submitted afterwards are dropped.
 func (d *Dispatcher) Close() error {
 	if d == nil {
 		return nil
 	}
-	d.once.Do(func() { close(d.closing) })
+	d.admit.Lock()
+	if !d.closed {
+		d.closed = true
+		close(d.closing)
+	}
+	d.admit.Unlock()
 	<-d.done
 	return nil
 }
@@ -167,29 +196,29 @@ func (d *Dispatcher) run() {
 	for {
 		select {
 		case e := <-d.q:
-			d.mu.Lock()
-			d.process(e, time.Now())
-			d.mu.Unlock()
+			d.step(func() { d.process(e, time.Now()) })
 		case now := <-t.C:
-			d.mu.Lock()
-			d.noteDrops(now)
-			d.flushExpired(now, false)
-			d.mu.Unlock()
+			d.step(func() {
+				d.noteDrops(now)
+				d.flushExpired(now, false)
+			})
 		case <-d.closing:
-			d.mu.Lock()
+			// No Submit is mid-send once closing is closed, so this drain
+			// sees every event that was accepted.
 			for {
 				select {
 				case e := <-d.q:
-					d.process(e, time.Now())
+					d.step(func() { d.process(e, time.Now()) })
 					continue
 				default:
 				}
 				break
 			}
-			now := time.Now()
-			d.noteDrops(now)
-			d.flushExpired(now, true)
-			d.mu.Unlock()
+			d.step(func() {
+				now := time.Now()
+				d.noteDrops(now)
+				d.flushExpired(now, true)
+			})
 			return
 		}
 	}
@@ -262,22 +291,35 @@ func (d *Dispatcher) flush(el *list.Element) {
 	d.deliver(e)
 }
 
-// deliver hands one event to the sink, surviving a panicking sink.
+// deliver queues one event for the sink. d.mu and d.deliverMu are held;
+// step hands it over once d.mu is released.
 func (d *Dispatcher) deliver(e Event) {
 	if e.Count == 0 {
 		e.Count = 1
 	}
 	d.stats.Delivered++
+	d.out = append(d.out, e)
+}
+
+// call hands one event to the sink, surviving a panicking sink. d.deliverMu
+// is held and d.mu is not.
+func (d *Dispatcher) call(e Event) {
 	defer func() {
 		if r := recover(); r != nil {
+			d.mu.Lock()
 			d.stats.SinkPanics++
-			if d.panicked {
+			first := !d.panicked
+			if first {
+				d.stats.Delivered++
+			}
+			d.mu.Unlock()
+			if !first {
 				return
 			}
 			d.panicked = true
-			d.deliver(Event{
+			d.call(Event{
 				Time: time.Now(), Kind: KindMetaSinkPanic, Category: CatMeta, Severity: Critical,
-				Protocol: "dnp3", Detail: fmt.Sprintf("the event sink panicked: %v", r),
+				Protocol: "dnp3", Count: 1, Detail: fmt.Sprintf("the event sink panicked: %v", r),
 			})
 		}
 	}()

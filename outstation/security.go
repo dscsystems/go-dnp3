@@ -10,6 +10,7 @@ import (
 
 	"github.com/dscsystems/go-dnp3"
 	"github.com/dscsystems/go-dnp3/internal/app"
+	"github.com/dscsystems/go-dnp3/internal/sechub"
 	"github.com/dscsystems/go-dnp3/internal/security"
 	"github.com/dscsystems/go-dnp3/internal/stack"
 	"github.com/dscsystems/go-dnp3/objects"
@@ -177,7 +178,7 @@ func (s *Session) challengeRequest(w io.Writer, r stack.Received, frag app.Fragm
 	s.security.pending = &authenticationPending{received: r, challenge: data, sequence: s.security.sequence, until: s.appl.Now().Add(s.securityReplyTimeout())}
 	s.countSecurity(8)
 	if s.sec.Enabled() {
-		s.sec.Flood(secevent.KindFloodAuthChallenges, s.cfg.Security.EffectiveLimits().AuthChallenges, 1, true,
+		s.sec.Flood(secevent.KindFloodAuthChallenges, s.cfg.Security.EffectiveLimits().AuthChallenges, 1, sechub.ReportOnly,
 			appEvent("", r, &frag.Header))
 	}
 	s.authEvent(secevent.KindAuthChallenge, r, 0, secevent.Observed, "",

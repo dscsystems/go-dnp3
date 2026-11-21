@@ -17,15 +17,20 @@ import (
 // cross into the UI as messages like everything else, and are dropped rather
 // than block it.
 
-// secEventMsg is one security event from the session.
-type secEventMsg secevent.Event
+// secEventMsg is one security event from the session built for device.
+type secEventMsg struct {
+	device string
+	event  secevent.Event
+}
 
 // securityPolicy is the policy every session the explorer builds reports
 // through. It only reports: a browsing tool has no business refusing what
-// the device sends.
-func securityPolicy(c *connection) *secevent.Policy {
+// the device sends. Each event is tagged with the device the session was
+// built for, so one that arrives after the operator switched devices is not
+// filed against the new one.
+func securityPolicy(c *connection, device string) *secevent.Policy {
 	return &secevent.Policy{
-		Sink: secevent.SinkFunc(func(e secevent.Event) { c.push(secEventMsg(e)) }),
+		Sink: secevent.SinkFunc(func(e secevent.Event) { c.push(secEventMsg{device: device, event: e}) }),
 		// The explorer reconnects to the same device over and over; the
 		// process-wide MAC history would report its own reconnects.
 		DisableMACLookup: true,
@@ -35,6 +40,7 @@ func securityPolicy(c *connection) *secevent.Policy {
 // secRow is one line of the Security screen.
 type secRow struct {
 	At       time.Time
+	Device   string
 	Kind     secevent.Kind
 	Severity secevent.Severity
 	Action   secevent.Action
@@ -45,7 +51,10 @@ type secRow struct {
 // maxSecRows bounds the Security screen like the log.
 const maxSecRows = 2000
 
-func (m *Model) addSecEvent(e secevent.Event) {
+func (m *Model) addSecEvent(device string, e secevent.Event) {
+	if m.conn != nil && device != m.conn.target() {
+		return // a straggler from the session for the previous device
+	}
 	text := e.Detail
 	if text == "" {
 		text = string(e.Kind)
@@ -60,7 +69,7 @@ func (m *Model) addSecEvent(e secevent.Event) {
 	if at.IsZero() {
 		at = time.Now()
 	}
-	m.security = append(m.security, secRow{At: at, Kind: e.Kind, Severity: e.Severity,
+	m.security = append(m.security, secRow{At: at, Device: device, Kind: e.Kind, Severity: e.Severity,
 		Action: e.Action, Count: e.Count, Text: text})
 	if e.Severity >= secevent.Warning {
 		m.secAlerts++
@@ -80,7 +89,7 @@ func (m *Model) visibleSecurity() []secRow {
 	}
 	out := make([]secRow, 0, len(m.security))
 	for _, r := range m.security {
-		if matchesFilter(m.filter, string(r.Kind), r.Severity.String(), r.Text) {
+		if matchesFilter(m.filter, string(r.Kind), r.Severity.String(), r.Text, r.Device) {
 			out = append(out, r)
 		}
 	}

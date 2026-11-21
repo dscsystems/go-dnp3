@@ -14,8 +14,10 @@ func (b *Bus) openSecurity() {
 		return
 	}
 	if err := b.cfg.Security.Valid(); err != nil {
-		// New cannot fail, so a policy it cannot use is logged and ignored.
-		b.log.Error("security policy ignored", "err", err)
+		// New cannot fail, so the error waits for Add. Serving without the
+		// policy would quietly drop whatever else it enforces.
+		b.log.Error("security policy invalid; refusing stations", "err", err)
+		b.secErr = err
 		return
 	}
 	em, done := b.cfg.Security.Open("bus")

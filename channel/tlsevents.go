@@ -4,13 +4,14 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"net/netip"
 	"time"
 
 	"github.com/dscsystems/go-dnp3/secevent"
 )
 
 // tlsFailed reports a failed handshake with the peer of raw.
-func (h *secHolder) tlsFailed(raw net.Conn, err error) {
+func (h *secHolder) tlsFailed(raw net.Conn, dialed string, err error) {
 	em := h.em.Load()
 	if em == nil {
 		return
@@ -21,9 +22,16 @@ func (h *secHolder) tlsFailed(raw net.Conn, err error) {
 	}
 	ev.Action = secevent.Rejected
 	tlsInfo := ev.Peer.TLS
-	if raw != nil {
+	switch {
+	case raw != nil:
 		ev.Peer = secevent.PeerOf(raw)
 		ev.Peer.TLS = tlsInfo
+	case dialed != "":
+		// A failed dial has no connection, only the address it tried.
+		ev.Peer.Network = "tcp"
+		if ap, perr := netip.ParseAddrPort(dialed); perr == nil {
+			ev.Peer.RemoteAddr = ap
+		}
 	}
 	em.Emit(ev)
 }

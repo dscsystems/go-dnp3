@@ -159,11 +159,11 @@ func (h *Hub) secondaryNote(em *secevent.Emitter, o stack.Observation) {
 		e.Action = secevent.Ignored
 		e.Detail = "broadcast of a link function other than user data"
 	case link.NoteResetLinkStates:
-		h.Flood(secevent.KindFloodLinkReset, h.policy.EffectiveLimits().LinkReset, 1, true,
+		h.Flood(secevent.KindFloodLinkReset, h.policy.EffectiveLimits().LinkReset, 1, ReportOnly,
 			linkEvent("", o.Header))
 		return
 	case link.NoteRequestLinkStatus:
-		h.Flood(secevent.KindFloodLinkStatus, h.policy.EffectiveLimits().LinkStatus, 1, true,
+		h.Flood(secevent.KindFloodLinkStatus, h.policy.EffectiveLimits().LinkStatus, 1, ReportOnly,
 			linkEvent("", o.Header))
 		return
 	default:
@@ -210,11 +210,11 @@ func (h *Hub) Traffic(frames, octets int) {
 	}
 	l := h.policy.EffectiveLimits()
 	if frames > 0 {
-		h.flood("frames", secevent.KindFloodFrames, l.Frames, frames, false,
+		h.flood("frames", secevent.KindFloodFrames, l.Frames, frames, Unrefusable,
 			secevent.Event{Value: "frames", Detail: "link frames"})
 	}
 	if octets > 0 {
-		h.flood("octets", secevent.KindFloodFrames, l.Octets, octets, false,
+		h.flood("octets", secevent.KindFloodFrames, l.Octets, octets, Unrefusable,
 			secevent.Event{Value: "octets", Detail: "octets received"})
 	}
 }
