@@ -155,7 +155,7 @@ func (s *Session) onAuthenticationResponse(w io.Writer, r stack.Received, f app.
 		return
 	}
 	if t.funcCode == app.FuncAuthRequest {
-		s.onSolicited(w, f)
+		s.onSolicited(w, r, f)
 		return
 	}
 	h, ok := singleAuthObject(f, 1)

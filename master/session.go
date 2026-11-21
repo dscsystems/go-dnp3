@@ -135,7 +135,8 @@ type Session struct {
 	stack   *stack.Stack
 
 	// sec carries security events to the policy's sink.
-	sec sechub.Hub
+	sec  sechub.Hub
+	secm secMaster
 
 	// seq is the application sequence number for solicited requests.
 	seq uint8
@@ -259,6 +260,7 @@ func (s *Session) Run(ctx context.Context, ch channel.Channel) error {
 		clear(s.security.control)
 		clear(s.security.monitor)
 		s.security = masterSecurity{}
+		s.secm = secMaster{}
 		s.startupSequence()
 
 		var end ending
@@ -647,6 +649,16 @@ func (s *Session) onFragment(w io.Writer, r stack.Received) {
 	if err != nil {
 		s.log.Warn("malformed response", "err", err)
 		s.bump(func(st *Stats) { st.FragmentsDiscarded++ })
+		if s.sec.Enabled() {
+			e := secevent.Event{Kind: secevent.KindProtoAppMalformed, Fields: secevent.HasLinkAddrs,
+				LinkSrc: r.Source, LinkDest: r.Dest, Raw: r.Fragment, Action: secevent.Rejected,
+				Detail: "response could not be parsed: " + err.Error(), Err: err}
+			if h, _, herr := app.ParseHeader(r.Fragment); herr == nil {
+				e = respEvent(secevent.KindProtoAppMalformed, r, h)
+				e.Action, e.Detail, e.Err = secevent.Rejected, "response could not be parsed: "+err.Error(), err
+			}
+			s.emit(e)
+		}
 
 		// A response to the request in flight that cannot be parsed is not a
 		// timeout, and counting it as one would hide the outstation's fault
@@ -662,6 +674,8 @@ func (s *Session) onFragment(w io.Writer, r stack.Received) {
 	}
 	if !frag.Header.IsResponse() {
 		s.log.Debug("ignoring a non-response fragment", "func", frag.Header.Func)
+		s.emitResp(secevent.KindProtoWrongDirection, r, frag.Header, secevent.Ignored,
+			fmt.Sprintf("master received a %s request", frag.Header.Func))
 		return
 	}
 
@@ -683,20 +697,27 @@ func (s *Session) onFragment(w io.Writer, r stack.Received) {
 		s.bump(func(st *Stats) { st.FragmentsDiscarded++ })
 		s.log.Debug("discarding an invalid response",
 			"func", frag.Header.Func, "uns", uns, "seq", frag.Header.Control.Seq)
+		s.emitResp(secevent.KindProtoInvalidResponse, r, frag.Header, secevent.Ignored,
+			fmt.Sprintf("%s with UNS=%t", frag.Header.Func, uns))
 		return
 	}
 
-	s.observeIIN(frag.Header.IIN)
+	s.remoteIndications(r, frag.Header)
+	if s.observeIIN(frag.Header.IIN) {
+		s.remoteRestart(r, frag.Header)
+	}
 
 	if frag.Header.Func == app.FuncUnsolicitedResponse {
-		s.onUnsolicited(w, frag)
+		s.unsolicitedWhileDisabled(r, frag)
+		s.onUnsolicited(w, r, frag)
 		return
 	}
-	s.onSolicited(w, frag)
+	s.onSolicited(w, r, frag)
 }
 
-// observeIIN reacts to the indications on every response.
-func (s *Session) observeIIN(iin app.IIN) {
+// observeIIN reacts to the indications on every response. It reports
+// whether they announced a restart outside the startup sequence.
+func (s *Session) observeIIN(iin app.IIN) bool {
 	s.mu.Lock()
 	s.lastIIN = iin
 	s.mu.Unlock()
@@ -711,7 +732,7 @@ func (s *Session) observeIIN(iin app.IIN) {
 			// step is the write that clears the indication, so every fragment
 			// until then still carries it — reacting again would restart the
 			// sequence on its own output, indefinitely.
-			return
+			return false
 		}
 		s.bump(func(st *Stats) { st.RestartsSeen++ })
 		s.log.Info("outstation reported a restart; re-running the startup sequence")
@@ -719,14 +740,23 @@ func (s *Session) observeIIN(iin app.IIN) {
 		// stale in a way no incremental poll can fix. Only a full re-baseline
 		// restores it.
 		s.startupSequence()
+		return true
 	}
+	return false
 }
 
 // onSolicited handles a response to a request we sent.
-func (s *Session) onSolicited(w io.Writer, frag app.Fragment) {
+func (s *Session) onSolicited(w io.Writer, r stack.Received, frag app.Fragment) {
 	t := s.inflight
 	if t == nil {
 		s.log.Debug("response with nothing in flight", "seq", frag.Header.Control.Seq)
+		if s.secm.hasLastSeq && frag.Header.Control.Seq == s.secm.lastSeq {
+			s.emitResp(secevent.KindSeqResponseRepeat, r, frag.Header, secevent.Ignored,
+				"the last response repeated after it completed: our confirm was lost?")
+		} else {
+			s.emitResp(secevent.KindUnsolResponseWithoutRequest, r, frag.Header, secevent.Ignored,
+				"solicited response with no request outstanding")
+		}
 		return
 	}
 	seq := frag.Header.Control.Seq
@@ -761,6 +791,8 @@ func (s *Session) onSolicited(w io.Writer, frag app.Fragment) {
 		// would attribute stale data to the current poll.
 		s.log.Debug("response sequence mismatch",
 			"got", seq, "want", t.seq, "started", t.started)
+		s.emitResp(secevent.KindSeqResponseStale, r, frag.Header, secevent.Ignored,
+			fmt.Sprintf("response SEQ %d does not answer %s (SEQ %d)", seq, t.name, t.seq))
 		return
 	}
 
@@ -768,6 +800,8 @@ func (s *Session) onSolicited(w io.Writer, frag app.Fragment) {
 		s.bump(func(st *Stats) { st.FragmentsDiscarded++ })
 		s.log.Debug("discarding a response fragment that does not continue the series",
 			"fir", frag.Header.Control.Fir, "started", t.started, "seq", seq)
+		s.emitResp(secevent.KindSeqResponseRepeat, r, frag.Header, secevent.Ignored,
+			"response fragment repeated or out of series; not delivered")
 
 		// The confirm still goes out. A repeat is sent precisely because the
 		// outstation did not see the confirm the first time, and withholding
@@ -789,6 +823,7 @@ func (s *Session) onSolicited(w io.Writer, frag app.Fragment) {
 	if t.onFragment != nil {
 		t.onFragment(frag)
 	}
+	s.remoteRejected(r, frag, t)
 
 	if frag.Header.Control.Con {
 		s.sendConfirm(w, frag.Header.Control.Seq, false)
@@ -802,8 +837,12 @@ func (s *Session) onSolicited(w io.Writer, frag app.Fragment) {
 	}
 
 	s.inflight = nil
+	s.secm.lastSeq, s.secm.hasLastSeq = seq, true
 	if t.onDone != nil {
 		t.onDone(frag.Header.IIN)
+	}
+	if t.failure == nil && frag.Header.IIN&app.RequestErrorMask == 0 {
+		s.unsolicitedMask(t)
 	}
 
 	if t.failure != nil {
@@ -824,7 +863,7 @@ func (s *Session) onSolicited(w io.Writer, frag app.Fragment) {
 }
 
 // onUnsolicited handles a fragment the outstation sent on its own.
-func (s *Session) onUnsolicited(w io.Writer, frag app.Fragment) {
+func (s *Session) onUnsolicited(w io.Writer, r stack.Received, frag app.Fragment) {
 	s.bump(func(st *Stats) { st.Unsolicited++ })
 
 	seq := frag.Header.Control.Seq
@@ -835,6 +874,8 @@ func (s *Session) onUnsolicited(w io.Writer, frag app.Fragment) {
 		// Our confirm was lost, not the data. Confirm again but do not deliver
 		// the measurements a second time.
 		s.log.Debug("duplicate unsolicited response", "seq", seq)
+		s.emitResp(secevent.KindSeqUnsolDuplicate, r, frag.Header, secevent.Ignored,
+			"unsolicited response repeated; confirmed again, not delivered")
 	} else {
 		s.deliver(frag, true)
 	}
