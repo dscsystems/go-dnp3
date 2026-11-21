@@ -25,10 +25,13 @@ func fromMaster(f link.Function) link.Control { return link.Control{Dir: true, P
 func dialOutstation(t *testing.T, cfg outstation.Config) (net.Conn, *eventLog) {
 	t.Helper()
 	log := newEventLog()
-	if cfg.Security == nil {
+	switch {
+	case cfg.Security == nil:
 		cfg.Security = log.policy()
-	} else {
+	case cfg.Security.Sink == nil:
 		cfg.Security.Sink = secevent.SyncSink(log)
+	default:
+		log = nil // the caller's own
 	}
 	addr := runOutstationOn(t, cfg, channel.TCPServer("127.0.0.1:0"))
 	c, err := net.Dial("tcp", addr)
@@ -36,7 +39,9 @@ func dialOutstation(t *testing.T, cfg outstation.Config) (net.Conn, *eventLog) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = c.Close() })
-	log.wait(t, secevent.KindConnAccepted)
+	if log != nil {
+		log.wait(t, secevent.KindConnAccepted)
+	}
 	return c, log
 }
 

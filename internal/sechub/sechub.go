@@ -28,6 +28,9 @@ type Hub struct {
 	// stopRecheck ends the connection's MAC re-check, if one runs.
 	linkSeen    bool
 	stopRecheck chan struct{}
+
+	// scan is the connection's probe detector.
+	scan scan
 }
 
 // Start opens the policy's emitter for a session in role and attaches it to
@@ -67,6 +70,7 @@ func (h *Hub) Connected(conn io.ReadWriteCloser, opened secevent.Kind) bool {
 	h.cur.Store(em)
 	h.since = time.Now()
 	h.linkSeen = false
+	h.scan = scan{}
 
 	detail := "connection opened"
 	if peer.MAC != nil {

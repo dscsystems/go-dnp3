@@ -100,6 +100,23 @@ type Policy struct {
 	// RejectUnexpectedMaster drops such a frame before the link layer acts
 	// on it, so it can neither be answered nor reset the link state.
 	RejectUnexpectedMaster bool
+
+	// Functions refuses application functions; see [FunctionPolicy]. Nil
+	// refuses nothing.
+	Functions *FunctionPolicy
+	// BroadcastAllowed lists the function codes a broadcast may carry
+	// without access.broadcast_misuse. Nil uses DefaultBroadcastAllowed.
+	// READ and CONFIRM are always allowed; WRITE only of time (group 50)
+	// and the restart indication (group 80).
+	BroadcastAllowed []uint8
+	// RejectBroadcastMisuse drops such a broadcast instead of executing it.
+	RejectBroadcastMisuse bool
+	// ScanThreshold and ScanWindow raise access.scan when one connection
+	// asks for this many distinct unknown functions, objects or points
+	// within the window. Zero uses 20 in a minute; a negative threshold
+	// turns it off.
+	ScanThreshold int
+	ScanWindow    time.Duration
 }
 
 // LinkTopology says whether a link is shared with other stations.
@@ -242,10 +259,11 @@ func (p *Policy) Valid() error {
 
 // Open returns the emitter a session uses under this policy, and a function
 // to call when the session ends, which closes a dispatcher the policy did not
-// supply. A nil policy, or one with neither sink nor dispatcher, yields a nil
-// emitter: reporting is off.
+// supply. A nil policy yields a nil emitter: reporting is off. So does one
+// with neither sink nor dispatcher, unless it refuses something — then the
+// events are built and discarded, so the refusals still happen.
 func (p *Policy) Open(role string) (*Emitter, func()) {
-	if p == nil || (p.Sink == nil && p.Dispatcher == nil) {
+	if p == nil || (p.Sink == nil && p.Dispatcher == nil && !p.enforces()) {
 		return nil, func() {}
 	}
 	maxRaw := p.MaxRaw
@@ -257,12 +275,24 @@ func (p *Policy) Open(role string) (*Emitter, func()) {
 		em.policy = p
 		return em, func() {}
 	}
-	d := NewDispatcher(p.Sink, DispatcherOptions{
+	sink := p.Sink
+	if sink == nil {
+		sink = SinkFunc(func(Event) {})
+	}
+	d := NewDispatcher(sink, DispatcherOptions{
 		QueueSize: p.QueueSize, AggregateWindow: p.AggregateWindow, MaxAggregates: p.MaxAggregates,
 	})
 	em := NewEmitter(d, role, maxRaw)
 	em.policy = p
 	return em, func() { _ = d.Close() }
+}
+
+// enforces reports whether the policy refuses anything, as opposed to only
+// reporting it.
+func (p *Policy) enforces() bool {
+	return p.RejectUnlisted || p.RejectOverRate || p.RejectBindingMismatch ||
+		p.DisconnectOnMACChange || p.RejectUnexpectedMaster || p.RejectBroadcastMisuse ||
+		p.Functions != nil
 }
 
 // Audit reports whether audit-trail events are wanted.

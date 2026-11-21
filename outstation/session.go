@@ -435,6 +435,8 @@ type Session struct {
 
 	// sec carries security events to the policy's sink.
 	sec sechub.Hub
+	// secReq tracks the request being handled, for its security events.
+	secReq secRequest
 }
 
 // Stats counts what a session has done.
@@ -918,7 +920,10 @@ func (s *Session) checkConfirmTimeout() {
 // handle dispatches one request fragment.
 func (s *Session) handle(w io.Writer, r stack.Received) error {
 	s.sec.SawLinkSource(r.Source)
-	return s.handleAuthenticated(w, r, false)
+	s.beginRequest(r)
+	err := s.handleAuthenticated(w, r, false)
+	s.endRequest()
+	return err
 }
 
 func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticated bool) error {
@@ -938,7 +943,28 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 	if err != nil {
 		s.bump(func(st *Stats) { st.MalformedRequests++ })
 		s.log.Warn("malformed request", "err", err)
+		if s.sec.Enabled() {
+			hdr, _, herr := app.ParseHeader(r.Fragment)
+			var hp *app.Header
+			if herr == nil {
+				hp = &hdr
+			}
+			if hp != nil && hdr.IsResponse() {
+				s.emitApp(secevent.KindProtoWrongDirection, r, hp, secevent.Ignored,
+					fmt.Sprintf("outstation received a %s", hdr.Func), nil)
+			} else {
+				e := appEvent(secevent.KindProtoAppMalformed, r, hp)
+				e.Action, e.Value, e.Err = secevent.Rejected, malformedReason(err), err
+				e.Detail = "request could not be parsed: " + err.Error()
+				s.emit(e)
+			}
+		}
 		return s.rejectMalformed(w, r, err)
+	}
+	s.parsedRequest(frag)
+	if frag.Header.IsResponse() {
+		s.emitApp(secevent.KindProtoWrongDirection, r, &frag.Header, secevent.Rejected,
+			fmt.Sprintf("outstation received a %s", frag.Header.Func), nil)
 	}
 
 	// Only a fragment carrying both FIR and FIN is a complete request. A
@@ -955,6 +981,8 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 		// As with a fragment we cannot parse: there is nothing meaningful to
 		// answer, so the indication rides on the next response instead.
 		s.iin = s.iin.Set(app.IINParameterError)
+		s.emitApp(secevent.KindProtoIncompleteRequest, r, &frag.Header, secevent.Ignored,
+			fmt.Sprintf("request fragment with FIR=%t FIN=%t; not executed", frag.Header.Control.Fir, frag.Header.Control.Fin), nil)
 		return nil
 	}
 
@@ -966,12 +994,16 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 	if frag.Header.Func == app.FuncConfirm && len(frag.Objects) > 0 {
 		s.bump(func(st *Stats) { st.MalformedRequests++ })
 		s.log.Warn("discarding a confirm that carries objects", "seq", frag.Header.Control.Seq)
+		s.emitApp(secevent.KindProtoConfirmWithObjects, r, &frag.Header, secevent.Ignored,
+			"CONFIRM carrying objects", nil)
 		return nil
 	}
 	if frag.Header.Func != app.FuncConfirm && (frag.Header.Control.Con || frag.Header.Control.Uns) {
 		s.bump(func(st *Stats) { st.MalformedRequests++ })
 		s.log.Warn("discarding a request with CON or UNS set",
 			"func", frag.Header.Func, "con", frag.Header.Control.Con, "uns", frag.Header.Control.Uns)
+		s.emitApp(secevent.KindProtoRequestCONUNS, r, &frag.Header, secevent.Ignored,
+			fmt.Sprintf("request with CON=%t UNS=%t", frag.Header.Control.Con, frag.Header.Control.Uns), nil)
 		return nil
 	}
 
@@ -983,11 +1015,22 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 			s.bump(func(st *Stats) { st.MalformedRequests++ })
 			s.log.Warn("request carries an inconsistent qualifier",
 				"group", h.Group, "variation", h.Variation, "qualifier", h.Qualifier)
+			if s.sec.Enabled() {
+				e := appEvent(secevent.KindProtoInconsistentQualifier, r, &frag.Header)
+				e.Fields |= secevent.HasObject
+				e.Group, e.Variation, e.Qualifier = h.Group, h.Variation, uint8(h.Qualifier)
+				e.Action, e.Detail = secevent.Rejected, "prefix and range that do not go together: "+h.Qualifier.String()
+				s.emit(e)
+			}
 			return s.rejectMalformed(w, r, fmt.Errorf("%w: %s", app.ErrBadQualifier, h.Qualifier))
 		}
 	}
 
 	if frag.Header.Func == app.FuncAuthRequest || frag.Header.Func == app.FuncAuthRequestNoAck {
+		if s.cfg.SecureAuthentication == nil {
+			s.emitApp(secevent.KindProtoSecureAuthUnsupported, r, &frag.Header, secevent.Rejected,
+				"secure authentication request, but SAv5 is not configured", nil)
+		}
 		return s.onAuthentication(w, r, frag)
 	}
 	if !authenticated && s.cfg.SecureAuthentication != nil && (criticalFunction(frag.Header.Func) || hasAuthenticationObject(frag)) {
@@ -1001,7 +1044,14 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 			s.bump(func(st *Stats) { st.RepeatedRequests++ })
 			s.log.Debug("repeated request; re-sending the previous response",
 				"seq", frag.Header.Control.Seq)
+			s.secReq.replay = true
+			s.emitApp(secevent.KindSeqRepeatRequest, r, &frag.Header, secevent.Observed,
+				"repeated request answered from the cache, not executed again", nil)
 			return s.replayResponse(w, r, frag.Header)
+		}
+		if s.lastReqValid && r.Source == s.lastReqSource && frag.Header.Control.Seq == s.lastReqSeq {
+			s.emitApp(secevent.KindSeqReusedSeq, r, &frag.Header, secevent.Observed,
+				"request reuses the last request's sequence number with different content", nil)
 		}
 		s.rememberRequest(r, frag)
 		// A new request ends whatever response the last one was still owed:
@@ -1015,6 +1065,9 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 		// carries the broadcast indication instead.
 		s.iin = s.iin.Set(app.IINBroadcast)
 		s.broadcastConfirm = r.Dest == link.BroadcastMandatoryConfirm
+		if s.cfg.Security != nil && s.broadcastMisuse(r, frag) {
+			return nil
+		}
 	}
 
 	// A request whose function code is meaningless without objects asked for
@@ -1026,6 +1079,8 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 		s.log.Warn("request carried no objects but requires them",
 			"func", frag.Header.Func, "seq", frag.Header.Control.Seq)
 		s.iin = s.iin.Set(app.IINParameterError)
+		s.emitApp(secevent.KindProtoNoObjects, r, &frag.Header, secevent.Rejected,
+			fmt.Sprintf("%s without objects", frag.Header.Func), nil)
 		if frag.Header.Func.NoReply() || r.Broadcast {
 			// Nothing to answer to; the indication rides on the next response.
 			return nil
@@ -1033,6 +1088,17 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 		// Unlike a fragment we cannot parse, this one has a valid header and a
 		// sequence number to answer on, and the master is waiting: it gets a
 		// null response carrying the error rather than silence.
+		return s.respond(w, r, frag.Header, nil)
+	}
+
+	// Controls are refused one object at a time, with a status, by the
+	// command path; everything else the function policy refuses is refused
+	// here, before any handler sees it.
+	if s.cfg.Security != nil && !isCommandFunc(frag.Header.Func) && s.blockedByPolicy(r, frag) {
+		s.iin = s.iin.Set(app.IINNoFuncCodeSupport)
+		if frag.Header.Func.NoReply() || r.Broadcast {
+			return nil
+		}
 		return s.respond(w, r, frag.Header, nil)
 	}
 
@@ -1835,6 +1901,7 @@ func (s *Session) sendFragments(w io.Writer, r stack.Received, req app.Header, b
 	if r.Broadcast {
 		return nil
 	}
+	s.responseSent()
 
 	s.pendingBodies = bodies
 	s.pendingIndex = 0

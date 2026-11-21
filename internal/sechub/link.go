@@ -138,6 +138,10 @@ func (h *Hub) secondaryNote(em *secevent.Emitter, o stack.Observation) {
 	case link.NoteFCBRepeat:
 		e = linkEvent(secevent.KindSeqFCBRepeat, o.Header)
 		e.Action = secevent.Ignored
+		if !h.policy.SharedLink(em.Transport()) {
+			// TCP does not duplicate frames.
+			e.Severity = secevent.Warning
+		}
 		e.Detail = "confirmed user data repeating the frame count bit; acknowledged, not delivered"
 	case link.NoteTestNack:
 		e = linkEvent(secevent.KindSeqTestLinkNack, o.Header)
