@@ -3,12 +3,15 @@ package outstation
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"time"
 
+	"github.com/dscsystems/go-dnp3"
 	"github.com/dscsystems/go-dnp3/internal/app"
 	"github.com/dscsystems/go-dnp3/internal/stack"
 	"github.com/dscsystems/go-dnp3/objects"
+	"github.com/dscsystems/go-dnp3/secevent"
 )
 
 // FileAuthenticator validates credentials. The session generates and tracks
@@ -51,6 +54,10 @@ func (s *Session) onAuthenticateFile(w io.Writer, r stack.Received, frag app.Fra
 		}
 		s.fileAuth.source = r.Source
 		s.fileAuth.until = s.appl.Now().Add(s.cfg.Files.Timeout)
+	} else {
+		// The user name is kept; the password never is.
+		s.fileEvent(secevent.KindAuthFileFailed, r, frag.Header, "", dnp3.FilePermissionDenied,
+			fmt.Sprintf("file authentication failed for user %q", a.User))
 	}
 	// A failed authentication returns key zero. Credentials never appear in
 	// the response or the session log.

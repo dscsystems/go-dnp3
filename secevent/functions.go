@@ -28,6 +28,7 @@ type FunctionPolicy struct {
 
 	DenyRestart            bool // COLD_RESTART, WARM_RESTART
 	DenyApplicationControl bool // INITIALIZE_DATA, INITIALIZE/START/STOP_APPL, SAVE/ACTIVATE_CONFIG
+	DenyFileWrite          bool // OPEN_FILE for writing or appending
 	DenyFileDelete         bool // DELETE_FILE
 	DenyAssignClass        bool // ASSIGN_CLASS
 	DenyDeadbandWrite      bool // WRITE of group 34

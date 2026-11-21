@@ -151,6 +151,10 @@ type Policy struct {
 	// may let time out before dos.confirm_withheld. Zero uses 3; negative
 	// turns it off.
 	ConfirmWithheldAfter int
+
+	// MaxFileSize reports a file opened for writing with a larger announced
+	// size as file.oversized. Zero does not check.
+	MaxFileSize int64
 }
 
 // CommandGuard decides whether a control may reach the command handler:

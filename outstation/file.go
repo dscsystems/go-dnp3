@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/dscsystems/go-dnp3/internal/app"
 	"github.com/dscsystems/go-dnp3/internal/stack"
 	"github.com/dscsystems/go-dnp3/objects"
+	"github.com/dscsystems/go-dnp3/secevent"
 )
 
 // File transfer is the one part of an outstation that reaches outside its own
@@ -307,6 +309,8 @@ type transfer struct {
 	handle uint32
 	name   string
 	mode   dnp3.FileMode
+	// dir marks a directory being listed.
+	dir bool
 
 	// r and br read a file out. br is buffered so the session can look one
 	// octet ahead, which is the only way to know that a full-sized block is
@@ -411,7 +415,14 @@ func (s *Session) onOpenFile(w io.Writer, r stack.Received, frag app.Fragment) e
 		return s.respond(w, r, frag.Header, nil)
 	}
 	reply := objects.FileCommandStatus{RequestID: cmd.RequestID}
+	s.checkFileName(r, frag.Header, cmd.Name)
 	if !s.fileAuthorized(r.Source, cmd.Key) {
+		reply.Status = dnp3.FilePermissionDenied
+		s.fileEvent(secevent.KindAuthFileFailed, r, frag.Header, cmd.Name, reply.Status,
+			"file open without a valid file authentication key")
+		return s.commandStatus(w, r, frag.Header, reply)
+	}
+	if s.fileWriteDenied(r, frag.Header, cmd.Name, cmd.Mode) {
 		reply.Status = dnp3.FilePermissionDenied
 		return s.commandStatus(w, r, frag.Header, reply)
 	}
@@ -422,14 +433,17 @@ func (s *Session) onOpenFile(w io.Writer, r stack.Received, frag app.Fragment) e
 		s.log.Warn("file open refused; another transfer is in flight",
 			"requested", cmd.Name, "open", s.file.name)
 		reply.Status = dnp3.FileTooManyOpen
+		s.fileOpened(r, frag.Header, cmd.Name, cmd.Mode, cmd.Size, false, reply.Status)
 		return s.commandStatus(w, r, frag.Header, reply)
 	}
 
 	t, status := s.openTransfer(cmd)
 	if status != dnp3.FileSuccess {
 		reply.Status = status
+		s.fileOpened(r, frag.Header, cmd.Name, cmd.Mode, cmd.Size, false, reply.Status)
 		return s.commandStatus(w, r, frag.Header, reply)
 	}
+	s.fileOpened(r, frag.Header, cmd.Name, cmd.Mode, t.size, t.dir, dnp3.FileSuccess)
 
 	s.handleSeq++
 	t.handle = s.handleSeq
@@ -471,6 +485,7 @@ func (s *Session) openTransfer(cmd objects.FileCommand) (*transfer, dnp3.FileSta
 			if status != dnp3.FileSuccess {
 				return nil, status
 			}
+			t.dir = true
 			t.r = io.NopCloser(bytes.NewReader(content))
 			t.size = uint32(len(content))
 		} else {
@@ -568,6 +583,8 @@ func (s *Session) onCloseFile(w io.Writer, r stack.Received, frag app.Fragment) 
 	reply := objects.FileCommandStatus{Handle: req.Handle, RequestID: req.RequestID}
 	if s.file == nil || s.file.handle != req.Handle {
 		reply.Status = dnp3.FileInvalidHandle
+		s.fileEvent(secevent.KindFileInvalidHandle, r, frag.Header, "", reply.Status,
+			fmt.Sprintf("close of handle %d, which is not open", req.Handle))
 		return s.commandStatus(w, r, frag.Header, reply)
 	}
 
@@ -590,6 +607,8 @@ func (s *Session) onCloseFile(w io.Writer, r stack.Received, frag app.Fragment) 
 		// The master needs to know: a write whose close failed has not landed,
 		// whatever the individual blocks reported.
 		reply.Status = dnp3.FileFatal
+		s.fileEvent(secevent.KindFileRejected, r, frag.Header, name, reply.Status,
+			"file closed incomplete or the close failed: not committed")
 		return s.commandStatus(w, r, frag.Header, reply)
 	}
 	s.log.Info("file closed", "name", name, "handle", req.Handle)
@@ -610,8 +629,11 @@ func (s *Session) onDeleteFile(w io.Writer, r stack.Received, frag app.Fragment)
 	}
 
 	reply := objects.FileCommandStatus{RequestID: cmd.RequestID}
+	s.checkFileName(r, frag.Header, cmd.Name)
 	if !s.fileAuthorized(r.Source, cmd.Key) {
 		reply.Status = dnp3.FilePermissionDenied
+		s.fileEvent(secevent.KindAuthFileFailed, r, frag.Header, cmd.Name, reply.Status,
+			"file delete without a valid file authentication key")
 		return s.commandStatus(w, r, frag.Header, reply)
 	}
 	if s.file != nil && s.file.name == cmd.Name {
@@ -624,6 +646,10 @@ func (s *Session) onDeleteFile(w io.Writer, r stack.Received, frag app.Fragment)
 	reply.Status = s.cfg.Files.Handler.Delete(cmd.Name)
 	if reply.Status == dnp3.FileSuccess {
 		s.log.Info("file deleted", "name", cmd.Name)
+		s.fileEvent(secevent.KindFileDelete, r, frag.Header, cmd.Name, reply.Status, "file deleted")
+	} else {
+		s.fileEvent(secevent.KindFileRejected, r, frag.Header, cmd.Name, reply.Status,
+			fmt.Sprintf("delete refused: %v", reply.Status))
 	}
 	return s.commandStatus(w, r, frag.Header, reply)
 }
@@ -657,12 +683,15 @@ func (s *Session) onAbortFile(w io.Writer, r stack.Received, frag app.Fragment) 
 	}
 	if reply.Handle != 0 && reply.Handle != s.file.handle {
 		reply.Status = dnp3.FileInvalidHandle
+		s.fileEvent(secevent.KindFileInvalidHandle, r, frag.Header, "", reply.Status,
+			fmt.Sprintf("abort of handle %d, which is not open", reply.Handle))
 		return s.commandStatus(w, r, frag.Header, reply)
 	}
 
 	name := s.file.name
 	_ = s.closeFile()
 	s.bump(func(st *Stats) { st.FilesAborted++ })
+	s.fileEvent(secevent.KindFileAborted, r, frag.Header, name, dnp3.FileSuccess, "file transfer aborted by the master")
 	s.log.Info("file transfer aborted", "name", name)
 	return s.commandStatus(w, r, frag.Header, reply)
 }
@@ -836,6 +865,8 @@ func (s *Session) onFileWrite(w io.Writer, r stack.Received, frag app.Fragment, 
 		reply.Status = dnp3.FileNotOpen
 	case t.handle != block.Handle:
 		reply.Status = dnp3.FileInvalidHandle
+		s.fileEvent(secevent.KindFileInvalidHandle, r, frag.Header, "", reply.Status,
+			fmt.Sprintf("write to handle %d, which is not open", block.Handle))
 	case t.mode != dnp3.FileModeWrite && t.mode != dnp3.FileModeAppend:
 		reply.Status = dnp3.FileInvalidMode
 	case block.Block != t.block:
@@ -880,6 +911,10 @@ func (s *Session) checkFileTimeout(now time.Time) {
 	}
 	s.log.Warn("file transfer timed out; the handle is being released",
 		"name", t.name, "handle", t.handle)
+	if s.sec.Enabled() {
+		s.emit(secevent.Event{Kind: secevent.KindFileTimeout, FileName: t.name,
+			Detail: "idle file transfer abandoned"})
+	}
 	_ = s.closeFile()
 	s.bump(func(st *Stats) { st.FileTimeouts++ })
 }

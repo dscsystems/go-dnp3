@@ -138,3 +138,14 @@ func (s *Session) unsolicitedWhileDisabled(r stack.Received, frag app.Fragment) 
 	s.emitResp(secevent.KindUnsolWhileDisabled, r, frag.Header, secevent.Observed,
 		fmt.Sprintf("unsolicited response with %d object header(s) although unsolicited reporting is disabled", len(frag.Objects)))
 }
+
+// fileRefused reports a file operation the outstation refused. It runs on
+// the caller's goroutine, so it only emits, which is safe from anywhere.
+func (s *Session) fileRefused(t *transfer) {
+	if t.refused == dnp3.FileSuccess {
+		return
+	}
+	s.emit(secevent.Event{Kind: secevent.KindRemoteRejected, Fields: secevent.HasFileStatus,
+		FileStatus: t.refused, FileName: t.name, Value: t.refused.String(),
+		Detail: fmt.Sprintf("file operation on %q refused: %v", t.name, t.refused)})
+}

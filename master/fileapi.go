@@ -154,6 +154,7 @@ func (s *Session) DeleteFile(ctx context.Context, name string) error {
 	if err := s.run(ctx, first); err != nil {
 		return err
 	}
+	s.fileRefused(t)
 	return t.err
 }
 
@@ -184,6 +185,7 @@ func (s *Session) runTransfer(ctx context.Context, t *transfer, first *task) err
 	if err == nil {
 		err = t.err
 	}
+	s.fileRefused(t)
 	if err == nil {
 		return nil
 	}
