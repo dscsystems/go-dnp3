@@ -23,6 +23,8 @@ type Limits struct {
 	AuthChallenges Rate // critical requests challenged under SAv5
 	FileOps        Rate // file opens and deletes
 	Frames         Rate // link frames of any kind
+	Octets         Rate // octets received, framed or not
+	Unsolicited    Rate // unsolicited responses, at a master
 
 	FCBRepeats     Rate // seq.fcb_repeat becomes Alert above this
 	Repeats        Rate // seq.repeat_request becomes Warning above this
@@ -42,6 +44,8 @@ var DefaultLimits = Limits{
 	AuthChallenges: Rate{N: 20, Per: time.Second},
 	FileOps:        Rate{N: 10, Per: time.Second},
 	Frames:         Rate{N: 2000, Per: time.Second},
+	Octets:         Rate{N: 1 << 20, Per: time.Second},
+	Unsolicited:    Rate{N: 20, Per: time.Second},
 	FCBRepeats:     Rate{N: 5, Per: time.Minute},
 	Repeats:        Rate{N: 5, Per: time.Minute},
 	CommandRejects: Rate{N: 10, Per: time.Minute},
@@ -60,6 +64,8 @@ func (l Limits) With(def Limits) Limits {
 	l.AuthChallenges = l.AuthChallenges.Or(def.AuthChallenges)
 	l.FileOps = l.FileOps.Or(def.FileOps)
 	l.Frames = l.Frames.Or(def.Frames)
+	l.Octets = l.Octets.Or(def.Octets)
+	l.Unsolicited = l.Unsolicited.Or(def.Unsolicited)
 	l.FCBRepeats = l.FCBRepeats.Or(def.FCBRepeats)
 	l.Repeats = l.Repeats.Or(def.Repeats)
 	l.CommandRejects = l.CommandRejects.Or(def.CommandRejects)

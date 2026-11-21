@@ -17,6 +17,7 @@ import (
 // is false for an error that is not about TLS at all.
 func ClassifyTLS(err error) (Event, bool) {
 	var (
+		aerr  *VerifyError
 		verr  *tls.CertificateVerificationError
 		rerr  tls.RecordHeaderError
 		uaerr x509.UnknownAuthorityError
@@ -25,6 +26,15 @@ func ClassifyTLS(err error) (Event, bool) {
 		operr *net.OpError
 	)
 	switch {
+	case errors.As(err, &aerr):
+		ev := Event{Kind: KindTLSCertRejected, Err: err, Value: "application",
+			Detail: "refused by the application's check: " + aerr.Err.Error()}
+		if aerr.Leaf != nil {
+			ev.Peer.TLS = leafInfo(aerr.Leaf)
+			ev.Detail += " (subject " + ev.Peer.TLS.Subject + ")"
+		}
+		return ev, true
+
 	case errors.As(err, &rerr):
 		if rerr.RecordHeader[0] == 0x05 && rerr.RecordHeader[1] == 0x64 {
 			return Event{Kind: KindTLSPlaintextOnTLSPort, Err: err,
@@ -111,3 +121,17 @@ func printable(b []byte) string {
 	}
 	return string(out)
 }
+
+// VerifyError is the handshake error when an application's own check (see
+// channel.TLSConfig.VerifyConnection) refused a peer whose certificate was
+// otherwise valid. Leaf is the peer's certificate, when it sent one.
+type VerifyError struct {
+	Leaf *x509.Certificate
+	Err  error
+}
+
+func (e *VerifyError) Error() string {
+	return "tls: peer refused by the application's check: " + e.Err.Error()
+}
+
+func (e *VerifyError) Unwrap() error { return e.Err }

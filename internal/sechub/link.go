@@ -201,10 +201,20 @@ func (h *Hub) transportDiscard(em *secevent.Emitter, o stack.Observation, shared
 	em.Emit(e)
 }
 
-// Frames counts n link frames received against the frame rate.
-func (h *Hub) Frames(n int) {
-	if h.base == nil || n == 0 {
+// Traffic counts what one read delivered — link frames decoded and octets
+// received — against the frame and octet rates. Both are reported as
+// flood.frames; Value says which limit was crossed.
+func (h *Hub) Traffic(frames, octets int) {
+	if h.base == nil {
 		return
 	}
-	h.Flood(secevent.KindFloodFrames, h.policy.EffectiveLimits().Frames, n, false, secevent.Event{})
+	l := h.policy.EffectiveLimits()
+	if frames > 0 {
+		h.flood("frames", secevent.KindFloodFrames, l.Frames, frames, false,
+			secevent.Event{Value: "frames", Detail: "link frames"})
+	}
+	if octets > 0 {
+		h.flood("octets", secevent.KindFloodFrames, l.Octets, octets, false,
+			secevent.Event{Value: "octets", Detail: "octets received"})
+	}
 }

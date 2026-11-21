@@ -182,6 +182,11 @@ policy that sets any of them takes effect even without a sink.
   200 ms) and `MACRecheckInterval`: see section 4.
 - `CertExpiryWarning`: how far ahead a certificate's expiry is reported.
   The default is 30 days.
+- `channel.TLSConfig.VerifyConnection` is not part of the policy, but
+  belongs with it. It is your own check, run after the standard certificate
+  verification: pin a certificate, check a subject or an extension, consult
+  a revocation list. A refusal is reported as `tls.cert_rejected` with
+  `Value: application` and your error's text.
 
 ### Link layer
 
@@ -264,6 +269,8 @@ set well above ordinary polling:
 | `AuthChallenges` | 20 / s | SAv5 challenges (report only) |
 | `FileOps` | 10 / s | file opens and deletes |
 | `Frames` | 2000 / s | link frames of any kind |
+| `Octets` | 1 MiB / s | octets received, framed or not |
+| `Unsolicited` | 20 / s | unsolicited responses, at a master |
 | `FCBRepeats` | 5 / min | raises `seq.fcb_repeat` to Alert |
 | `Repeats` | 5 / min | raises `seq.repeat_request` to Warning |
 | `CommandRejects` | 10 / min | raises `cmd.brute_force` |
@@ -278,6 +285,10 @@ set well above ordinary polling:
 
 Link status, link resets and authentication challenges are only ever
 reported. Refusing them would break the link or SAv5 itself.
+
+A master counts frames, octets and unsolicited responses. It cannot refuse
+what an outstation sends without losing data, so at a master `Throttled`
+only reports, while `Disconnected` still drops the connection.
 
 `ConfirmWithheldAfter` is the number of confirmations in a row that may time
 out before `dos.confirm_withheld`. The default is 3.
@@ -359,7 +370,9 @@ Each station's own session reports its own events through its own
   `channel.TLSClient`) on any network you do not fully control. The library
   always requires client certificates and refuses TLS below 1.2.
   `tls.cert_rejected`, `tls.no_client_cert` and `tls.plaintext_on_tls_port`
-  are then among the most valuable events you will get.
+  are then among the most valuable events you will get. When one CA signs
+  more than your masters' certificates, pin the ones you expect with
+  `TLSConfig.VerifyConnection`.
 - **Use SAv5** where controls matter and TLS is not available end to end,
   for example over serial or through protocol gateways. It stops replays,
   which `cmd.duplicate` can only report.
@@ -405,6 +418,9 @@ against: `-allow-peer`, `-reject-unlisted`, `-allowed-master`,
 robustness flags `-idle-timeout`, `-write-timeout` and `-busy-reject`. See
 [`cmd/README.md`](../cmd/README.md).
 
+`dnp3-explorer` shows the master's events on its Security tab (key `6`),
+with a count on the Overview, and exports them to CSV with `e`.
+
 ## 9. Stability
 
 Event kinds, their categories and their JSON field names are public API. New
@@ -441,7 +457,7 @@ for example on a point-to-point link.
 
 | Kind | Severity | ATT&CK | Roles | Trigger |
 |------|----------|--------|-------|---------|
-| `tls.cert_rejected` ★ | Alert | T0849 | O, M | The peer's certificate failed verification: unknown authority, expired, or wrong name. Carries the unverified leaf's subject, issuer, serial, expiry and SHA-256 fingerprint. |
+| `tls.cert_rejected` ★ | Alert | T0849 | O, M | The peer's certificate failed verification: unknown authority, expired, or wrong name, or `TLSConfig.VerifyConnection` refused it (`Value` is `application`). Carries the unverified leaf's subject, issuer, serial, expiry and SHA-256 fingerprint. |
 | `tls.no_client_cert` | Alert | T0849 | O, M | A client connected without sending a certificate. The TLS server always requires one. |
 | `tls.local_cert_rejected` | Warning | T0830 | O, M | The peer refused our certificate (a `bad_certificate`, `unknown_ca` or `certificate_expired` alert). TLS 1.3 clients learn this only on their first read. |
 | `tls.plaintext_on_tls_port` | Warning |  | O, M | The first octets on the TLS port were `05 64`: a DNP3 master talking plaintext to the TLS port. |
@@ -645,13 +661,14 @@ for example on a point-to-point link.
 | `flood.link_reset` | Warning | T0814 | O | RESET_LINK_STATES went over `Limits.LinkReset` (default 5 per 10 s). Report only. |
 | `flood.auth_challenges` | Warning | T0814 | O | Challenged critical requests went over `Limits.AuthChallenges` (default 20 a second). Each challenge costs a nonce and an HMAC. Report only. |
 | `flood.file_ops` | Warning | T0814 | O | File opens and deletes went over `Limits.FileOps` (default 10 a second). |
-| `flood.frames` | Warning | T0814 | O | Link frames of any kind went over `Limits.Frames` (default 2000 a second). Never throttled, but can be disconnected. |
+| `flood.frames` | Warning | T0814 | O, M | Link frames went over `Limits.Frames` (default 2000 a second), or octets received went over `Limits.Octets` (default 1 MiB a second). `Value` says which: `frames` or `octets`. Never throttled, but can be disconnected. |
+| `flood.unsolicited` | Warning | T0814 | M | Unsolicited responses went over `Limits.Unsolicited` (default 20 a second). A master cannot refuse them without losing data, so this is reported, or disconnected. |
 
 ### 10.16 Resources (`dos.*`)
 
 | Kind | Severity | ATT&CK | Roles | Trigger |
 |------|----------|--------|-------|---------|
-| `dos.rx_backlog` | Warning | T0814 | O | The receive queue stayed full for a second or more: the peer is sending faster than the outstation can process. Re-arms once the queue is below half. |
+| `dos.rx_backlog` | Warning | T0814 | O, M | The receive queue stayed full for a second or more: the peer is sending faster than this end can process. Re-arms once the queue is below half. |
 | `dos.write_stall` | Warning | T0814 | O, M | A write ran past `WriteTimeout`: the peer stopped reading. Disconnected. |
 | `dos.slow_frame` | Warning | T0814 | O | A partial link frame was not finished within `FrameAssemblyTimeout` (slowloris). Disconnected. |
 | `dos.confirm_withheld` | Warning | T0804 | O | `ConfirmWithheldAfter` application or unsolicited confirmations in a row timed out (default 3). Events are sent again and again. |

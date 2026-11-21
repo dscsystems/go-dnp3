@@ -144,6 +144,8 @@ type Policy struct {
 	// answered ThrottleStatus, any other request PARAMETER_ERROR, and
 	// neither is executed — or Disconnected. Link status requests,
 	// confirmations, link resets and authentication are only ever reported.
+	// A master cannot refuse what an outstation sends it, so there Throttled
+	// only reports; Disconnected still drops the connection.
 	FloodAction Action
 	// ThrottleStatus answers a throttled control. Zero uses TOO_MANY_OPS.
 	ThrottleStatus dnp3.CommandStatus

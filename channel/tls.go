@@ -45,6 +45,13 @@ type TLSConfig struct {
 	// Busy says what a server does with a connection that arrives while it is
 	// serving another. It does not apply to clients.
 	Busy BusyPolicy
+
+	// VerifyConnection, when set, is called after the standard certificate
+	// checks have passed, with the handshake's state — to pin a certificate,
+	// check a subject or an extension, or consult a revocation list. An
+	// error refuses the peer, which is reported as tls.cert_rejected with
+	// the error's text.
+	VerifyConnection func(tls.ConnectionState) error
 }
 
 // buildTLS turns a TLSConfig into a crypto/tls configuration.
@@ -86,6 +93,19 @@ func (c TLSConfig) build(server bool) (*tls.Config, error) {
 	}
 	if server {
 		cfg.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+	if verify := c.VerifyConnection; verify != nil {
+		cfg.VerifyConnection = func(st tls.ConnectionState) error {
+			err := verify(st)
+			if err == nil {
+				return nil
+			}
+			ve := &secevent.VerifyError{Err: err}
+			if len(st.PeerCertificates) > 0 {
+				ve.Leaf = st.PeerCertificates[0]
+			}
+			return ve
+		}
 	}
 	return cfg, nil
 }

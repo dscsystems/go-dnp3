@@ -3,9 +3,11 @@ package channel
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"net"
 	"net/netip"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -214,5 +216,44 @@ func TestTLSRefusalSeenByTheClientSession(t *testing.T) {
 	ev, ok := secevent.ClassifyTLS(err)
 	if !ok || ev.Kind != secevent.KindTLSLocalCertRejected {
 		t.Fatalf("read error %v classified as %+v ok=%v", err, ev, ok)
+	}
+}
+
+// An application check that refuses a peer whose certificate is valid is
+// reported as a certificate rejection, with the check's reason.
+func TestTLSApplicationCheckRefuses(t *testing.T) {
+	_, ca, sCert, sKey, cCert, cKey := certs(t)
+	checked := make(chan string, 1)
+	server, err := TLSServer("127.0.0.1:0", TLSConfig{
+		CertFile: sCert, KeyFile: sKey, CAFile: ca,
+		VerifyConnection: func(st tls.ConnectionState) error {
+			select {
+			case checked <- st.PeerCertificates[0].Subject.CommonName:
+			default:
+			}
+			return errors.New("not on the pinned list")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	log := attach(t, server, &secevent.Policy{CertExpiryWarning: -1})
+	addr := serveLoop(t, server)
+
+	client, err := TLSClient(addr, TLSConfig{CertFile: cCert, KeyFile: cKey, CAFile: ca, ServerName: "localhost"}, NoRetry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c, err := client.Connect(t.Context()); err == nil {
+		_, _ = c.Read(make([]byte, 1))
+		_ = c.Close()
+	}
+	e := log.wait(t, secevent.KindTLSCertRejected)
+	if e.Value != "application" || !strings.Contains(e.Detail, "not on the pinned list") || e.Peer.TLS == nil {
+		t.Fatalf("event = %+v", e)
+	}
+	if cn := <-checked; cn == "" {
+		t.Error("the check saw no certificate")
 	}
 }

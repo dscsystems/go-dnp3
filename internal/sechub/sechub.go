@@ -39,6 +39,8 @@ type Hub struct {
 	rates map[string]*rateState
 	// drop names a flood whose policy is to disconnect.
 	drop string
+	// backlog is the connection's receive queue detector.
+	backlog backlog
 }
 
 // Start opens the policy's emitter for a session in role and attaches it to
@@ -82,6 +84,7 @@ func (h *Hub) Connected(conn io.ReadWriteCloser, opened secevent.Kind) bool {
 	h.scan = scan{}
 	h.rates = nil
 	h.drop = ""
+	h.backlog = backlog{}
 
 	detail := "connection opened"
 	if peer.MAC != nil {

@@ -105,3 +105,16 @@ func TestConfirmWithheld(t *testing.T) {
 		Unsolicited: outstation.UnsolicitedConfig{Enabled: true, ConfirmTimeout: 30 * time.Millisecond}})
 	log.wait(t, secevent.KindDoSConfirmWithheld)
 }
+
+func TestOctetFloodDisconnects(t *testing.T) {
+	c, log := dialOutstation(t, outstation.Config{LocalAddr: 10, RemoteAddr: 1,
+		Security: &secevent.Policy{FloodAction: secevent.Disconnected,
+			Limits: secevent.Limits{Octets: secevent.Rate{N: 64, Per: time.Hour}}}})
+	if _, err := c.Write(make([]byte, 200)); err != nil {
+		t.Fatal(err)
+	}
+	if e := log.wait(t, secevent.KindFloodFrames); e.Value != "octets" || e.Action != secevent.Disconnected {
+		t.Errorf("event %+v", e)
+	}
+	log.wait(t, secevent.KindConnClosed)
+}

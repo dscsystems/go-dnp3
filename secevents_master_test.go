@@ -3,6 +3,7 @@ package dnp3_test
 import (
 	"context"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,7 +64,12 @@ func startMaster(t *testing.T, cfg master.Config) (*fakeOutstation, *eventLog) {
 	}
 	t.Cleanup(func() { _ = l.Close() })
 	log := newEventLog()
-	cfg.LocalAddr, cfg.RemoteAddr, cfg.Security = 1, 10, log.policy()
+	cfg.LocalAddr, cfg.RemoteAddr = 1, 10
+	if cfg.Security == nil {
+		cfg.Security = log.policy()
+	} else {
+		cfg.Security.Sink = secevent.SyncSink(log)
+	}
 	m := master.New(cfg, nil)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
@@ -141,6 +147,35 @@ func TestMasterReportsRefusal(t *testing.T) {
 	seq, _ := o.request()
 	o.send(0xC0|seq, 0x81, 0x00, 0x04) // PARAMETER_ERROR
 	if e := log.wait(t, secevent.KindRemoteRejected); e.Value == "" {
+		t.Errorf("event %+v", e)
+	}
+}
+
+func TestMasterUnsolicitedFlood(t *testing.T) {
+	o, log := startMaster(t, master.Config{Security: &secevent.Policy{
+		FloodAction: secevent.Disconnected,
+		Limits:      secevent.Limits{Unsolicited: secevent.Rate{N: 2, Per: time.Hour}},
+	}})
+	for i := range byte(4) {
+		o.send(0xF0|i, 0x82, 0x00, 0x00)
+	}
+	if e := log.wait(t, secevent.KindFloodUnsolicited); e.Action != secevent.Disconnected {
+		t.Errorf("event %+v", e)
+	}
+	if e := log.wait(t, secevent.KindConnClosed); !strings.HasPrefix(e.Detail, "flood") {
+		t.Errorf("closed: %q", e.Detail)
+	}
+}
+
+func TestMasterOctetFlood(t *testing.T) {
+	o, log := startMaster(t, master.Config{Security: &secevent.Policy{
+		Limits: secevent.Limits{Octets: secevent.Rate{N: 64, Per: time.Hour}},
+	}})
+	if _, err := o.c.Write(make([]byte, 200)); err != nil { // noise, never a frame
+		t.Fatal(err)
+	}
+	e := log.wait(t, secevent.KindFloodFrames)
+	if e.Value != "octets" || e.Action != secevent.Observed {
 		t.Errorf("event %+v", e)
 	}
 }

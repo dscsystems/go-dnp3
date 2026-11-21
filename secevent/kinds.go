@@ -158,6 +158,7 @@ const (
 	KindFloodAuthChallenges         Kind = "flood.auth_challenges"
 	KindFloodFileOps                Kind = "flood.file_ops"
 	KindFloodFrames                 Kind = "flood.frames"
+	KindFloodUnsolicited            Kind = "flood.unsolicited"
 	KindDoSRxBacklog                Kind = "dos.rx_backlog"
 	KindDoSWriteStall               Kind = "dos.write_stall"
 	KindDoSSlowFrame                Kind = "dos.slow_frame"
@@ -325,6 +326,7 @@ var kindTable = map[Kind]kindInfo{
 	KindFloodAuthChallenges:         {CatFlood, Warning, "T0814", false},
 	KindFloodFileOps:                {CatFlood, Warning, "T0814", false},
 	KindFloodFrames:                 {CatFlood, Warning, "T0814", false},
+	KindFloodUnsolicited:            {CatFlood, Warning, "T0814", false},
 	KindDoSRxBacklog:                {CatResource, Warning, "T0814", false},
 	KindDoSWriteStall:               {CatResource, Warning, "T0814", false},
 	KindDoSSlowFrame:                {CatResource, Warning, "T0814", false},

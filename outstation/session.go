@@ -767,7 +767,7 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) ending {
 			}
 			after, _ := s.stack.Stats()
 			idle.onReceive(time.Now(), after.FramesDecoded != before.FramesDecoded, s.stack.Buffered())
-			s.sec.Frames(int(after.FramesDecoded - before.FramesDecoded))
+			s.sec.Traffic(int(after.FramesDecoded-before.FramesDecoded), len(data))
 			s.checkOverflow()
 			if class, drop := s.sec.Drop(); drop {
 				s.log.Warn("dropping the connection: flood", "class", class)

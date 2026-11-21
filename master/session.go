@@ -392,11 +392,19 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) ending {
 
 		case data := <-rx:
 			s.lastRx = time.Now()
+			before, _ := s.stack.Stats()
 			if err := s.stack.Receive(out, data, func(r stack.Received) {
 				s.onFragment(out, r)
 			}); err != nil {
 				s.log.Warn("receive failed", "err", err)
 				return ending{reason: "receive failed", err: err}
+			}
+			after, _ := s.stack.Stats()
+			s.sec.Traffic(int(after.FramesDecoded-before.FramesDecoded), len(data))
+			s.sec.Backlog(len(rx), cap(rx), s.lastRx)
+			if class, drop := s.sec.Drop(); drop {
+				s.log.Warn("dropping the connection: flood", "class", class)
+				return ending{reason: "flood: " + class}
 			}
 
 		case <-timer.C:
@@ -869,6 +877,14 @@ func (s *Session) onUnsolicited(w io.Writer, r stack.Received, frag app.Fragment
 	seq := frag.Header.Control.Seq
 	duplicate := s.hasUnsolSeq && seq == s.unsolSeq
 	s.unsolSeq, s.hasUnsolSeq = seq, true
+
+	if s.sec.Enabled() {
+		// A master cannot refuse an unsolicited response without losing the
+		// data in it, so Throttled only reports; Disconnected drops the
+		// connection once this read is done.
+		s.sec.Flood(secevent.KindFloodUnsolicited, s.cfg.Security.EffectiveLimits().Unsolicited, 1, false,
+			respEvent("", r, frag.Header))
+	}
 
 	if duplicate {
 		// Our confirm was lost, not the data. Confirm again but do not deliver

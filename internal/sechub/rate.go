@@ -60,7 +60,13 @@ func (h *Hub) Over(key string, r secevent.Rate) bool {
 // (reportOnly), it returns Observed: carry on. A caller that cannot refuse
 // one occurrence treats Throttled as Observed.
 func (h *Hub) Flood(k secevent.Kind, r secevent.Rate, n int, reportOnly bool, e secevent.Event) secevent.Action {
-	over, first := h.limit(string(k), r, n)
+	return h.flood(string(k), k, r, n, reportOnly, e)
+}
+
+// flood is Flood with the rate detector named by key, for a kind fed by
+// more than one limit.
+func (h *Hub) flood(key string, k secevent.Kind, r secevent.Rate, n int, reportOnly bool, e secevent.Event) secevent.Action {
+	over, first := h.limit(key, r, n)
 	if !over {
 		return secevent.Observed
 	}
@@ -78,7 +84,7 @@ func (h *Hub) Flood(k secevent.Kind, r secevent.Rate, n int, reportOnly bool, e 
 		h.Emit(e)
 	}
 	if action == secevent.Disconnected {
-		h.drop = string(k)
+		h.drop = key
 	}
 	return action
 }
@@ -89,4 +95,36 @@ func (h *Hub) Drop() (string, bool) {
 	d := h.drop
 	h.drop = ""
 	return d, d != ""
+}
+
+// backlog tracks how long a session's receive queue has been full.
+type backlog struct {
+	since    time.Time
+	reported bool
+}
+
+// BacklogAfter is how long the receive queue must stay full before
+// dos.rx_backlog.
+const BacklogAfter = time.Second
+
+// Backlog reports dos.rx_backlog when the receive queue has been full for
+// BacklogAfter: the peer sends faster than this end processes. It re-arms
+// once the queue is below half.
+func (h *Hub) Backlog(queued, capacity int, now time.Time) {
+	if h.base == nil {
+		return
+	}
+	b := &h.backlog
+	switch {
+	case queued < capacity/2:
+		*b = backlog{}
+	case queued < capacity:
+	case b.since.IsZero():
+		b.since = now
+	case !b.reported && now.Sub(b.since) >= BacklogAfter:
+		b.reported = true
+		h.Emit(secevent.Event{Kind: secevent.KindDoSRxBacklog,
+			Detail: fmt.Sprintf("receive queue full for %v: the peer sends faster than it is processed",
+				now.Sub(b.since).Round(time.Millisecond))})
+	}
 }

@@ -272,6 +272,7 @@ Without a policy, none of them applies. See [security.md](security.md).
 | Idle and write timeouts | `IdleTimeout`, `FrameAssemblyTimeout`, `WriteTimeout` (outstation), `WriteTimeout` (master). Off by default |
 | Second connection while serving | Left in the backlog (default), or closed at once with `BusyReject` |
 | UDP peer pinning | `UDPConfig.PinPeer` drops datagrams from anyone but the peer |
+| Application certificate check | `TLSConfig.VerifyConnection` runs after standard verification; a refusal is reported as `tls.cert_rejected` |
 
 ## Interoperability
 

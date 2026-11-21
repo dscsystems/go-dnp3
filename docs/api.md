@@ -768,6 +768,8 @@ type TLSConfig struct {
 
     HandshakeTimeout time.Duration // server: how long a peer has to finish the handshake; zero uses 10s
     Busy             BusyPolicy    // server: see ServerOptions
+
+    VerifyConnection func(tls.ConnectionState) error // extra check after standard verification
 }
 ```
 
@@ -776,6 +778,12 @@ plant, and a channel that authenticates only the server lets anyone who can
 reach the port issue them. IEC 62351-3 requires both sides to present
 certificates, and `TLSClient`/`TLSServer` refuse to build a configuration that
 does not.
+
+`VerifyConnection` adds your own check on top: pinning, a subject or
+extension test, a revocation list. It runs on both ends after the chain has
+verified. An error refuses the peer. The handshake then fails with a
+`*secevent.VerifyError` wrapping your error, and a session with a policy
+reports it as `tls.cert_rejected`.
 
 ## SerialConfig
 
@@ -2645,6 +2653,7 @@ type FunctionPolicy struct {
 type Limits struct {
     Commands, Integrity, EventPolls, Restart, TimeWrite, AppControl Rate
     LinkStatus, LinkReset, AuthChallenges, FileOps, Frames          Rate
+    Octets, Unsolicited                                             Rate
     FCBRepeats, Repeats, CommandRejects                             Rate
 }
 
@@ -2759,6 +2768,11 @@ type PeerInfo struct {
 }
 
 func ClassifyTLS(err error) (Event, bool) // map a handshake error to a tls.* event
+
+type VerifyError struct { // TLSConfig.VerifyConnection refused the peer
+    Leaf *x509.Certificate
+    Err  error
+}
 ```
 
 ---

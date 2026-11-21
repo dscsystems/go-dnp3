@@ -11,15 +11,9 @@ import (
 
 // secDoS is the outstation's state for the resource-exhaustion events.
 type secDoS struct {
-	backlogSince    time.Time
-	backlogReported bool
-	confirmMisses   int
-	overflow        bool
+	confirmMisses int
+	overflow      bool
 }
-
-// backlogAfter is how long the receive queue must stay full before
-// dos.rx_backlog.
-const backlogAfter = time.Second
 
 // floodClass returns the flood class a request belongs to, if any.
 func floodClass(frag app.Fragment, l secevent.Limits) (secevent.Kind, secevent.Rate, bool) {
@@ -79,21 +73,7 @@ func (s *Session) commandFlooded(group, variation uint8, index uint16) bool {
 // checkBacklog reports a receive queue that has stayed full: the peer sends
 // faster than the outstation processes.
 func (s *Session) checkBacklog(queued, capacity int, now time.Time) {
-	if !s.sec.Enabled() {
-		return
-	}
-	d := &s.secDoS
-	switch {
-	case queued < capacity/2:
-		d.backlogSince, d.backlogReported = time.Time{}, false
-	case queued < capacity:
-	case d.backlogSince.IsZero():
-		d.backlogSince = now
-	case !d.backlogReported && now.Sub(d.backlogSince) >= backlogAfter:
-		d.backlogReported = true
-		s.emit(secevent.Event{Kind: secevent.KindDoSRxBacklog,
-			Detail: fmt.Sprintf("receive queue full for %v: the peer sends faster than requests are processed", now.Sub(d.backlogSince).Round(time.Millisecond))})
-	}
+	s.sec.Backlog(queued, capacity, now)
 }
 
 // confirmMissed counts a confirmation the master let time out.
