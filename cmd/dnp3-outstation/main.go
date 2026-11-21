@@ -42,6 +42,7 @@ import (
 
 	"github.com/dscsystems/go-dnp3"
 	"github.com/dscsystems/go-dnp3/channel"
+	"github.com/dscsystems/go-dnp3/cmd/internal/secflags"
 	"github.com/dscsystems/go-dnp3/outstation"
 )
 
@@ -86,6 +87,12 @@ func run() error {
 		inject injectFlag
 	)
 	flag.Var(&inject, "inject", "inject a fault; repeatable (see -help)")
+	var (
+		idleTimeout  = flag.Duration("idle-timeout", 0, "close a connection that sends no valid frame for `duration`")
+		writeTimeout = flag.Duration("write-timeout", 0, "close a connection whose master stops reading for `duration`")
+		busyReject   = flag.Bool("busy-reject", false, "close a second connection at once instead of leaving it waiting")
+	)
+	sec := secflags.Register(flag.CommandLine, true)
 	flag.Usage = usage
 	flag.Parse()
 
@@ -135,6 +142,18 @@ func run() error {
 	log := newLogger(*verbose, *quiet)
 	ocfg := cfg.outstationConfig()
 	ocfg.Log = log
+	ocfg.IdleTimeout = *idleTimeout
+	ocfg.WriteTimeout = *writeTimeout
+	policy, closeEvents, err := sec.Policy()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := closeEvents(); err != nil {
+			log.Error("closing the security event stream", "err", err)
+		}
+	}()
+	ocfg.Security = policy
 
 	files, servingFiles, closeFiles, err := buildFileConfig(cfg, sim)
 	if err != nil {
@@ -151,7 +170,7 @@ func run() error {
 	plant.sess = sess
 
 	ch, description, err := buildChannel(*listen, *serialDev, *baud, *udp,
-		*tlsCert, *tlsKey, *tlsCA)
+		*tlsCert, *tlsKey, *tlsCA, *busyReject)
 	if err != nil {
 		return err
 	}
@@ -234,7 +253,12 @@ func simulate(ctx context.Context, sess *outstation.Session, sim *Simulator,
 
 // buildChannel selects the transport from the flags.
 func buildChannel(listen, serialDev string, baud int, udp bool,
-	cert, key, ca string) (channel.Channel, string, error) {
+	cert, key, ca string, busyReject bool) (channel.Channel, string, error) {
+
+	busy := channel.BusyBacklog
+	if busyReject {
+		busy = channel.BusyReject
+	}
 
 	switch {
 	case serialDev != "":
@@ -251,7 +275,7 @@ func buildChannel(listen, serialDev string, baud int, udp bool,
 			return nil, "", errors.New("TLS needs -tls-cert, -tls-key and -tls-ca together")
 		}
 		ch, err := channel.TLSServer(listen, channel.TLSConfig{
-			CertFile: cert, KeyFile: key, CAFile: ca,
+			CertFile: cert, KeyFile: key, CAFile: ca, Busy: busy,
 		})
 		if err != nil {
 			return nil, "", err
@@ -259,7 +283,8 @@ func buildChannel(listen, serialDev string, baud int, udp bool,
 		return ch, "TLS " + listen, nil
 
 	default:
-		return channel.TCPServer(listen), "TCP " + listen, nil
+		return channel.TCPServerWithOptions(listen, channel.ServerOptions{Busy: busy}),
+			"TCP " + listen, nil
 	}
 }
 
@@ -430,6 +455,22 @@ File transfer (group 70; simulated files in memory by default):
   -files DIR          serve a real directory instead, and nothing above it
   -files-read-only    refuse writes and deletes
   -no-files           disable file transfer, so the device reports it has none
+
+Robustness (all off by default):
+  -idle-timeout D     close a connection that sends no valid frame for D
+  -write-timeout D    close a connection whose master stops reading for D
+  -busy-reject        close a second connection at once (TCP and TLS)
+
+Security events (see docs/security.md):
+  -events json|FILE   report events as JSON lines, to stderr or appended to FILE
+  -events-min SEV     only events at or above info, notice, warning, alert, critical
+  -allow-peer ADDR    expect masters only from this address or prefix; repeatable
+  -reject-unlisted    close connections from anywhere else, before TLS
+  -allowed-master N   serve only this master link address; repeatable
+  -reject-unexpected-master
+                      drop frames from any other master address
+  -read-only          refuse controls, restarts, configuration and file writes
+  -flood-action A     beyond the flood limits: observe (default), throttle, disconnect
 
 Fault injection (repeatable):
   -inject event-storm=N       generate N binary events per second

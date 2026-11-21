@@ -13,8 +13,11 @@ import (
 	"github.com/dscsystems/go-dnp3"
 	"github.com/dscsystems/go-dnp3/channel"
 	"github.com/dscsystems/go-dnp3/internal/app"
+	"github.com/dscsystems/go-dnp3/internal/netio"
+	"github.com/dscsystems/go-dnp3/internal/sechub"
 	"github.com/dscsystems/go-dnp3/internal/stack"
 	"github.com/dscsystems/go-dnp3/objects"
+	"github.com/dscsystems/go-dnp3/secevent"
 )
 
 // Config parameterises a master session.
@@ -71,6 +74,17 @@ type Config struct {
 	// next poll times out, which on a slow schedule can be minutes.
 	KeepAlive time.Duration
 
+	// WriteTimeout bounds each write to the connection. An outstation that
+	// stops reading would otherwise block the session goroutine in a write
+	// for good, and every request with it. Zero, the default, never times
+	// out. It applies to connections that support write deadlines (TCP and
+	// TLS).
+	WriteTimeout time.Duration
+
+	// Security turns on security event reporting (see package secevent).
+	// Nil, the default, reports nothing and costs nothing.
+	Security *secevent.Policy
+
 	// Log receives protocol and session events. Nil discards them.
 	Log *slog.Logger
 }
@@ -119,6 +133,10 @@ type Session struct {
 	handler Handler
 	log     *slog.Logger
 	stack   *stack.Stack
+
+	// sec carries security events to the policy's sink.
+	sec  sechub.Hub
+	secm secMaster
 
 	// seq is the application sequence number for solicited requests.
 	seq uint8
@@ -209,6 +227,12 @@ func (s *Session) Run(ctx context.Context, ch channel.Channel) error {
 		MaxRetries:    s.cfg.LinkRetries,
 		MaxRxFragment: s.cfg.MaxRxFragment,
 	})
+	if err := s.cfg.Security.Valid(); err != nil {
+		return err
+	}
+	s.sec.Start(s.cfg.Security, "master", ch)
+	s.sec.Observe(s.stack, false)
+	defer s.sec.Stop()
 
 	// Cancelling the context is how Run is asked to stop, and a closed channel
 	// is the same instruction arriving from the other direction. Both end the
@@ -236,16 +260,32 @@ func (s *Session) Run(ctx context.Context, ch channel.Channel) error {
 		clear(s.security.control)
 		clear(s.security.monitor)
 		s.security = masterSecurity{}
+		s.secm = secMaster{}
 		s.startupSequence()
 
-		s.serve(ctx, conn)
+		var end ending
+		if s.connectionOpened(conn) {
+			end = s.serve(ctx, conn)
+		} else {
+			end = ending{reason: "refused by the security policy"}
+			// Redialling at once would refuse again at once; pace it.
+			select {
+			case <-ctx.Done():
+			case <-time.After(refusedRedialDelay):
+			}
+		}
 
 		s.setConnected(false)
 		_ = conn.Close()
+		s.connectionClosed(end)
 		s.failInflight(dnp3.ErrNoConnection)
 		s.log.Info("disconnected")
 	}
 }
+
+// refusedRedialDelay paces reconnection after the security policy refused a
+// connection, which would otherwise be redialled and refused in a tight loop.
+const refusedRedialDelay = 5 * time.Second
 
 func (s *Session) setConnected(v bool) {
 	s.mu.Lock()
@@ -306,7 +346,7 @@ func (s *Session) enqueue(t *task) {
 }
 
 // serve runs one connection.
-func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
+func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) ending {
 	// The read goroutine only moves octets. Everything that touches protocol
 	// state — the link state machines, the reassembler, the scheduler — runs
 	// on this goroutine, so the stack needs no locking and a send can never
@@ -322,45 +362,63 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 	readErr := make(chan error, 1)
 	go readInto(readCtx, conn, rx, readErr)
 
+	// Everything the session writes goes through out, which bounds each write
+	// when WriteTimeout is set.
+	out := netio.WithWriteTimeout(conn, s.cfg.WriteTimeout)
+
 	timer := time.NewTimer(time.Hour)
 	defer timer.Stop()
 
 	for {
-		s.runDueTask(conn)
+		s.runDueTask(out)
+		if out.Stalled() {
+			return s.writeStalled()
+		}
 		resetTimer(timer, s.nextWakeup())
 
 		select {
 		case <-ctx.Done():
-			return
+			return ending{reason: "shutdown"}
 
 		case err := <-readErr:
 			if err != nil && !errors.Is(err, io.EOF) {
 				s.log.Warn("read loop ended", "err", err)
+				return ending{reason: "read failed", err: err}
 			}
-			return
+			return ending{reason: "closed by the peer"}
 
 		case t := <-s.submit:
 			s.enqueue(t)
 
 		case data := <-rx:
 			s.lastRx = time.Now()
-			if err := s.stack.Receive(conn, data, func(r stack.Received) {
-				s.onFragment(conn, r)
+			before, _ := s.stack.Stats()
+			if err := s.stack.Receive(out, data, func(r stack.Received) {
+				s.onFragment(out, r)
 			}); err != nil {
 				s.log.Warn("receive failed", "err", err)
-				return
+				return ending{reason: "receive failed", err: err}
+			}
+			after, _ := s.stack.Stats()
+			s.sec.Traffic(int(after.FramesDecoded-before.FramesDecoded), len(data))
+			s.sec.Backlog(len(rx), cap(rx), s.lastRx)
+			if class, drop := s.sec.Drop(); drop {
+				s.log.Warn("dropping the connection: flood", "class", class)
+				return ending{reason: "flood: " + class}
 			}
 
 		case <-timer.C:
-			if s.checkLinkTimeout(conn) {
+			if s.checkLinkTimeout(out) {
 				continue
 			}
 			if s.peerSilent {
 				s.peerSilent = false
-				return
+				s.emit(secevent.Event{Kind: secevent.KindConnKeepaliveFailed, Action: secevent.Disconnected,
+					Detail: "the keep-alive link status request went unanswered"})
+				return ending{reason: "keep-alive unanswered"}
 			}
 			s.checkTimeout()
-			s.checkKeepAlive(conn)
+			s.checkKeepAlive(out)
 		}
 	}
 }
@@ -593,11 +651,22 @@ func (s *Session) failInflight(err error) {
 // onFragment routes an incoming fragment.
 func (s *Session) onFragment(w io.Writer, r stack.Received) {
 	s.bump(func(st *Stats) { st.FragmentsRx++ })
+	s.sec.SawLinkSource(r.Source)
 
 	frag, err := app.ParseFragment(nil, r.Fragment)
 	if err != nil {
 		s.log.Warn("malformed response", "err", err)
 		s.bump(func(st *Stats) { st.FragmentsDiscarded++ })
+		if s.sec.Enabled() {
+			e := secevent.Event{Kind: secevent.KindProtoAppMalformed, Fields: secevent.HasLinkAddrs,
+				LinkSrc: r.Source, LinkDest: r.Dest, Raw: r.Fragment, Action: secevent.Rejected,
+				Detail: "response could not be parsed: " + err.Error(), Err: err}
+			if h, _, herr := app.ParseHeader(r.Fragment); herr == nil {
+				e = respEvent(secevent.KindProtoAppMalformed, r, h)
+				e.Action, e.Detail, e.Err = secevent.Rejected, "response could not be parsed: "+err.Error(), err
+			}
+			s.emit(e)
+		}
 
 		// A response to the request in flight that cannot be parsed is not a
 		// timeout, and counting it as one would hide the outstation's fault
@@ -613,6 +682,8 @@ func (s *Session) onFragment(w io.Writer, r stack.Received) {
 	}
 	if !frag.Header.IsResponse() {
 		s.log.Debug("ignoring a non-response fragment", "func", frag.Header.Func)
+		s.emitResp(secevent.KindProtoWrongDirection, r, frag.Header, secevent.Ignored,
+			fmt.Sprintf("master received a %s request", frag.Header.Func))
 		return
 	}
 
@@ -634,20 +705,27 @@ func (s *Session) onFragment(w io.Writer, r stack.Received) {
 		s.bump(func(st *Stats) { st.FragmentsDiscarded++ })
 		s.log.Debug("discarding an invalid response",
 			"func", frag.Header.Func, "uns", uns, "seq", frag.Header.Control.Seq)
+		s.emitResp(secevent.KindProtoInvalidResponse, r, frag.Header, secevent.Ignored,
+			fmt.Sprintf("%s with UNS=%t", frag.Header.Func, uns))
 		return
 	}
 
-	s.observeIIN(frag.Header.IIN)
+	s.remoteIndications(r, frag.Header)
+	if s.observeIIN(frag.Header.IIN) {
+		s.remoteRestart(r, frag.Header)
+	}
 
 	if frag.Header.Func == app.FuncUnsolicitedResponse {
-		s.onUnsolicited(w, frag)
+		s.unsolicitedWhileDisabled(r, frag)
+		s.onUnsolicited(w, r, frag)
 		return
 	}
-	s.onSolicited(w, frag)
+	s.onSolicited(w, r, frag)
 }
 
-// observeIIN reacts to the indications on every response.
-func (s *Session) observeIIN(iin app.IIN) {
+// observeIIN reacts to the indications on every response. It reports
+// whether they announced a restart outside the startup sequence.
+func (s *Session) observeIIN(iin app.IIN) bool {
 	s.mu.Lock()
 	s.lastIIN = iin
 	s.mu.Unlock()
@@ -662,7 +740,7 @@ func (s *Session) observeIIN(iin app.IIN) {
 			// step is the write that clears the indication, so every fragment
 			// until then still carries it — reacting again would restart the
 			// sequence on its own output, indefinitely.
-			return
+			return false
 		}
 		s.bump(func(st *Stats) { st.RestartsSeen++ })
 		s.log.Info("outstation reported a restart; re-running the startup sequence")
@@ -670,14 +748,23 @@ func (s *Session) observeIIN(iin app.IIN) {
 		// stale in a way no incremental poll can fix. Only a full re-baseline
 		// restores it.
 		s.startupSequence()
+		return true
 	}
+	return false
 }
 
 // onSolicited handles a response to a request we sent.
-func (s *Session) onSolicited(w io.Writer, frag app.Fragment) {
+func (s *Session) onSolicited(w io.Writer, r stack.Received, frag app.Fragment) {
 	t := s.inflight
 	if t == nil {
 		s.log.Debug("response with nothing in flight", "seq", frag.Header.Control.Seq)
+		if s.secm.hasLastSeq && frag.Header.Control.Seq == s.secm.lastSeq {
+			s.emitResp(secevent.KindSeqResponseRepeat, r, frag.Header, secevent.Ignored,
+				"the last response repeated after it completed: our confirm was lost?")
+		} else {
+			s.emitResp(secevent.KindUnsolResponseWithoutRequest, r, frag.Header, secevent.Ignored,
+				"solicited response with no request outstanding")
+		}
 		return
 	}
 	seq := frag.Header.Control.Seq
@@ -712,6 +799,8 @@ func (s *Session) onSolicited(w io.Writer, frag app.Fragment) {
 		// would attribute stale data to the current poll.
 		s.log.Debug("response sequence mismatch",
 			"got", seq, "want", t.seq, "started", t.started)
+		s.emitResp(secevent.KindSeqResponseStale, r, frag.Header, secevent.Ignored,
+			fmt.Sprintf("response SEQ %d does not answer %s (SEQ %d)", seq, t.name, t.seq))
 		return
 	}
 
@@ -719,6 +808,8 @@ func (s *Session) onSolicited(w io.Writer, frag app.Fragment) {
 		s.bump(func(st *Stats) { st.FragmentsDiscarded++ })
 		s.log.Debug("discarding a response fragment that does not continue the series",
 			"fir", frag.Header.Control.Fir, "started", t.started, "seq", seq)
+		s.emitResp(secevent.KindSeqResponseRepeat, r, frag.Header, secevent.Ignored,
+			"response fragment repeated or out of series; not delivered")
 
 		// The confirm still goes out. A repeat is sent precisely because the
 		// outstation did not see the confirm the first time, and withholding
@@ -740,6 +831,7 @@ func (s *Session) onSolicited(w io.Writer, frag app.Fragment) {
 	if t.onFragment != nil {
 		t.onFragment(frag)
 	}
+	s.remoteRejected(r, frag, t)
 
 	if frag.Header.Control.Con {
 		s.sendConfirm(w, frag.Header.Control.Seq, false)
@@ -753,8 +845,12 @@ func (s *Session) onSolicited(w io.Writer, frag app.Fragment) {
 	}
 
 	s.inflight = nil
+	s.secm.lastSeq, s.secm.hasLastSeq = seq, true
 	if t.onDone != nil {
 		t.onDone(frag.Header.IIN)
+	}
+	if t.failure == nil && frag.Header.IIN&app.RequestErrorMask == 0 {
+		s.unsolicitedMask(t)
 	}
 
 	if t.failure != nil {
@@ -775,17 +871,27 @@ func (s *Session) onSolicited(w io.Writer, frag app.Fragment) {
 }
 
 // onUnsolicited handles a fragment the outstation sent on its own.
-func (s *Session) onUnsolicited(w io.Writer, frag app.Fragment) {
+func (s *Session) onUnsolicited(w io.Writer, r stack.Received, frag app.Fragment) {
 	s.bump(func(st *Stats) { st.Unsolicited++ })
 
 	seq := frag.Header.Control.Seq
 	duplicate := s.hasUnsolSeq && seq == s.unsolSeq
 	s.unsolSeq, s.hasUnsolSeq = seq, true
 
+	if s.sec.Enabled() {
+		// A master cannot refuse an unsolicited response without losing the
+		// data in it: Unrefusable, so Throttled only reports, and
+		// Disconnected drops the connection once this read is done.
+		s.sec.Flood(secevent.KindFloodUnsolicited, s.cfg.Security.EffectiveLimits().Unsolicited, 1, sechub.Unrefusable,
+			respEvent("", r, frag.Header))
+	}
+
 	if duplicate {
 		// Our confirm was lost, not the data. Confirm again but do not deliver
 		// the measurements a second time.
 		s.log.Debug("duplicate unsolicited response", "seq", seq)
+		s.emitResp(secevent.KindSeqUnsolDuplicate, r, frag.Header, secevent.Ignored,
+			"unsolicited response repeated; confirmed again, not delivered")
 	} else {
 		s.deliver(frag, true)
 	}

@@ -34,6 +34,7 @@ res, err = m.DirectOperate(ctx, master.AnalogOutputFloat32(7, 13.75))
 | [User guide](docs/user-guide.md) | How to build a master, an outstation, or a decoder with this. Start here. |
 | [API reference](docs/api.md) | Every exported type and function, package by package. |
 | [Device profile](docs/device-profile.md) | What is supported, in the shape a vendor ships — including the known gaps. |
+| [Security events](docs/security.md) | Reporting attacks and anomalies to a SIEM, the policy that can refuse them, and deployment guidance. |
 | [`SKILL.md`](SKILL.md) | The same ground, condensed for AI coding agents. |
 
 ## Why
@@ -158,6 +159,12 @@ staged after that. Transports: TCP, TLS, serial and UDP. A symmetric Secure
 Authentication v5 subset is available independently of TLS; see the
 [device profile](docs/device-profile.md) for its supported exchanges and limits.
 
+Both roles can report security events, typed and stable enough to forward
+to a SIEM. These cover unexpected peers, TLS refusals, MAC changes, malformed
+and replayed traffic, controls and restarts, authentication failures and
+floods. Optional policies refuse some of these as well. See
+[security events](docs/security.md).
+
 ## Commands
 
 Each has a README of its own with the full flag reference, configuration file
@@ -180,7 +187,7 @@ no socket and no hardware:
 ```console
 $ dnp3-explorer -demo
 dnp3-explorer  demo (in-process outstation)  ● connected      up 1:36  13.4/s  12:04:29
- 1 Overview  2 Points  3 Events  4 Log  5 Files  6 Help                   20 points
+ 1 Overview  2 Points  3 Events  4 Log  5 Files  6 Security  7 Help       20 points
 ────────────────────────────────────────────────────────────────────────────────────
  POINT ▲          VALUE TREND        QUALITY                AGE TIMESTAMP
  BI 0                ON ▁▁▁▁████████ ONLINE                 0s  12:04:29.375
@@ -195,8 +202,9 @@ dnp3-explorer  demo (in-process outstation)  ● connected      up 1:36  13.4/s 
  ↑↓ move · enter act · d inspect · / filter · < > r sort · b deadband · ? help
 ```
 
-Six screens: an overview of the session and the device's health, the point
-table, the sequence of events, the activity log, file transfer, and a reference. Points can be
+Seven screens: an overview of the session and the device's health, the point
+table, the sequence of events, the activity log, file transfer, the security
+events the master saw, and a reference. Points can be
 filtered on anything in the row, sorted by value or by quality — worst first,
 which is how you find the broken points in a device with a thousand good ones —
 and inspected one at a time, with the flags named, the trend drawn and the
@@ -292,6 +300,10 @@ The fault injections matter as much as the simulation: `-inject
 event-storm=500`, `-inject restart-after=5m`, `-inject offline-every=30s`.
 Those are the conditions a master's error handling is usually wrong about and
 the hardest to arrange with real equipment.
+
+`-events json` prints its security events as JSON lines, and the policy flags
+let it act as a hardened device: `-allow-peer`, `-allowed-master`,
+`-read-only`, `-flood-action throttle`.
 
 `dnp3-decode` takes hex from arguments, a file or a pipe and renders the layer
 tree. It reads Wireshark hex-dump exports directly — the offset column and

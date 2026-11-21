@@ -50,7 +50,16 @@ dnp3-outstation [flags]
 | `-unsolicited` | off | push events without being polled |
 | `-points` | — | print the point list and exit |
 
-**Fault injection** (repeatable) and **logging** are covered below.
+**Robustness** (all off by default)
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `-idle-timeout DUR` | off | close a connection that sends no valid frame for `DUR` |
+| `-write-timeout DUR` | off | close a connection whose master stops reading for `DUR` |
+| `-busy-reject` | off | close a second connection at once instead of leaving it waiting (TCP, TLS) |
+
+**Security events** and **fault injection** (repeatable) and **logging** are
+covered below.
 
 The TCP listener serves **one master at a time**. That is the common field
 configuration; two concurrent masters would need a session per connection, which
@@ -331,6 +340,31 @@ Controls act on the simulated plant, which is what makes the tool worth having:
   accepted, which is the whole point of the two-pass sequence.
 - An **analog setpoint** within the point's `min`..`max` switches that point to
   the `fixed` signal at the requested value; outside it, `OUT_OF_RANGE`.
+
+## Security events
+
+With `-events`, the outstation reports
+[security events](../../docs/security.md) as JSON lines. The other flags turn
+it into a hardened device, which is useful for seeing how a master copes
+with refusals.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `-events json\|FILE` | off | `json` writes to stderr; anything else is a file to append to |
+| `-events-min SEV` | `info` | only events at or above `info`, `notice`, `warning`, `alert` or `critical` |
+| `-allow-peer ADDR` | — | expect masters only from this address or prefix; repeatable or comma-separated |
+| `-reject-unlisted` | off | close connections from anywhere else, before any TLS handshake |
+| `-allowed-master N` | — | serve only this master link address; repeatable |
+| `-reject-unexpected-master` | off | drop frames from any other master address |
+| `-read-only` | off | refuse controls, restarts, configuration changes and file writes; time writes still allowed |
+| `-flood-action A` | `observe` | beyond the flood limits: `observe`, `throttle` or `disconnect` |
+
+```console
+$ dnp3-outstation -events json -read-only -allow-peer 127.0.0.1 2>events.jsonl
+```
+
+A master that then tries a control gets `NOT_AUTHORIZED`, and the log shows
+`access.function_blocked` and `cmd.received` for it.
 
 ## Logging
 

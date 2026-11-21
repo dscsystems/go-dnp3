@@ -17,8 +17,11 @@ import (
 	"github.com/dscsystems/go-dnp3/channel"
 	"github.com/dscsystems/go-dnp3/internal/app"
 	"github.com/dscsystems/go-dnp3/internal/link"
+	"github.com/dscsystems/go-dnp3/internal/netio"
+	"github.com/dscsystems/go-dnp3/internal/sechub"
 	"github.com/dscsystems/go-dnp3/internal/stack"
 	"github.com/dscsystems/go-dnp3/objects"
+	"github.com/dscsystems/go-dnp3/secevent"
 )
 
 // Config parameterises an outstation session.
@@ -101,11 +104,37 @@ type Config struct {
 	// retransmitting. It matters only when UseLinkConfirms is set.
 	LinkTimeout time.Duration
 
+	// IdleTimeout ends a connection that has gone quiet. When no valid link
+	// frame has arrived for this long, the outstation probes the master with
+	// a link status request, and closes the connection if that is not
+	// answered within LinkTimeout. Zero, the default, never times out.
+	//
+	// A TCP or TLS server channel serves one connection at a time, so without
+	// this a peer that connects and says nothing holds the only slot for good
+	// and every real master is locked out.
+	IdleTimeout time.Duration
+
+	// FrameAssemblyTimeout ends a connection on which a link frame has
+	// started arriving and not finished within this long: a peer trickling
+	// octets to hold the connection open. Zero, the default, never times out.
+	FrameAssemblyTimeout time.Duration
+
+	// WriteTimeout bounds each write to the connection. A peer that stops
+	// reading would otherwise block the session goroutine in a write for good,
+	// stopping its timers and its updates with it. Zero, the default, never
+	// times out. It applies to connections that support write deadlines (TCP
+	// and TLS).
+	WriteTimeout time.Duration
+
 	// Indications are the device-controlled internal indications asserted from
 	// the start, for a device that already knows its configuration is bad or a
 	// point is in local control when it comes up. They can be changed while
 	// running with [Session.SetIndication].
 	Indications Indication
+
+	// Security turns on security event reporting (see package secevent).
+	// Nil, the default, reports nothing and costs nothing.
+	Security *secevent.Policy
 
 	// Log receives protocol and session events. Nil discards them.
 	Log *slog.Logger
@@ -264,6 +293,11 @@ func (s *Session) SetIndication(ind Indication, on bool) {
 			next = old | uint32(ind)
 		}
 		if s.indications.CompareAndSwap(old, next) {
+			if old != next && s.sec.AuditFromAnywhere() {
+				s.sec.Emit(secevent.Event{Kind: secevent.KindCtrlIndicationChange,
+					Fields: secevent.HasIIN, IIN: uint16(next),
+					Detail: fmt.Sprintf("device indications changed from %v to %v", app.IIN(old), app.IIN(next))})
+			}
 			return
 		}
 	}
@@ -403,6 +437,12 @@ type Session struct {
 	restartPending atomic.Bool
 	mu             sync.Mutex
 	stats          Stats
+
+	// sec carries security events to the policy's sink.
+	sec sechub.Hub
+	// secReq tracks the request being handled, for its security events.
+	secReq secRequest
+	secDoS secDoS
 }
 
 // Stats counts what a session has done.
@@ -592,6 +632,12 @@ func (s *Session) Run(ctx context.Context, ch channel.Channel) error {
 		MaxRxFragment: s.cfg.MaxRxFragment,
 		SelfAddress:   s.cfg.SelfAddress,
 	})
+	if err := s.cfg.Security.Valid(); err != nil {
+		return err
+	}
+	s.sec.Start(s.cfg.Security, "outstation", ch)
+	s.sec.Observe(s.stack, true)
+	defer s.sec.Stop()
 
 	// Cancelling the context is how Run is asked to stop, and a closed channel
 	// is the same instruction arriving from the other direction. Both end the
@@ -614,15 +660,21 @@ func (s *Session) Run(ctx context.Context, ch channel.Channel) error {
 		s.log.Info("connected", "channel", ch.String())
 
 		s.stack.Reset()
-		s.serve(ctx, conn)
+		if !s.connectionOpened(conn) {
+			_ = conn.Close()
+			s.connectionClosed(ending{reason: "refused by the security policy"})
+			continue
+		}
+		end := s.serve(ctx, conn)
 		_ = conn.Close()
+		s.connectionClosed(end)
 
 		s.log.Info("disconnected")
 	}
 }
 
 // serve runs one connection until it fails or the context ends.
-func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
+func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) ending {
 	// The read goroutine only moves octets. Everything that touches protocol
 	// state runs on this goroutine, so the stack needs no locking and a
 	// response can never interleave with the processing of an inbound frame.
@@ -636,6 +688,11 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 	rx := make(chan []byte, 8)
 	readErr := make(chan error, 1)
 	go readInto(readCtx, conn, rx, readErr)
+
+	// Everything the session writes goes through out, which bounds each write
+	// when WriteTimeout is set.
+	out := netio.WithWriteTimeout(conn, s.cfg.WriteTimeout)
+	idle := idleState{lastFrame: time.Now()}
 
 	s.connected = true
 	// Cached application replies belong to this connection, including file
@@ -663,7 +720,7 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 	// waiting for the first tick would let the master's own startup sequence
 	// clear the restart indication first — leaving the announcement carrying
 	// nothing worth announcing.
-	if err := s.pollUnsolicited(conn, s.appl.Now()); err != nil {
+	if err := s.pollUnsolicited(out, s.appl.Now()); err != nil {
 		s.log.Warn("initial unsolicited transmission failed", "err", err)
 	}
 
@@ -675,13 +732,14 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return ending{reason: "shutdown"}
 
 		case err := <-readErr:
 			if err != nil && !errors.Is(err, io.EOF) {
 				s.log.Warn("read loop ended", "err", err)
+				return ending{reason: "read failed", err: err}
 			}
-			return
+			return ending{reason: "closed by the peer"}
 
 		case <-s.wake:
 			s.drainUpdates()
@@ -694,42 +752,63 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 			s.drainUpdates()
 
 			var handleErr error
-			if err := s.stack.Receive(conn, data, func(r stack.Received) {
+			before, _ := s.stack.Stats()
+			if err := s.stack.Receive(out, data, func(r stack.Received) {
 				if handleErr == nil {
-					handleErr = s.handle(conn, r)
+					handleErr = s.handle(out, r)
 				}
 			}); err != nil {
 				s.log.Warn("receive failed", "err", err)
-				return
+				return ending{reason: "receive failed", err: err}
 			}
 			if handleErr != nil {
 				s.log.Warn("request handling failed", "err", handleErr)
-				return
+				return ending{reason: "request handling failed", err: handleErr}
 			}
-			if err := s.advanceResponse(conn); err != nil {
+			after, _ := s.stack.Stats()
+			idle.onReceive(time.Now(), after.FramesDecoded != before.FramesDecoded, s.stack.Buffered())
+			s.sec.Traffic(int(after.FramesDecoded-before.FramesDecoded), len(data))
+			s.checkOverflow()
+			if class, drop := s.sec.Drop(); drop {
+				s.log.Warn("dropping the connection: flood", "class", class)
+				return ending{reason: "flood: " + class}
+			}
+			if err := s.advanceResponse(out); err != nil {
 				s.log.Warn("sending a queued response fragment failed", "err", err)
-				return
+				return ending{reason: "send failed", err: err}
 			}
-			if err := s.resumeDeferredRead(conn); err != nil {
+			if err := s.resumeDeferredRead(out); err != nil {
 				s.log.Warn("answering a deferred read failed", "err", err)
-				return
+				return ending{reason: "send failed", err: err}
+			}
+			if out.Stalled() {
+				return s.writeStalled()
 			}
 
 		case <-ticker.C:
 			now := s.appl.Now()
-			s.checkLinkTimeout(conn)
+			if out.Stalled() {
+				return s.writeStalled()
+			}
+			if end, drop := s.checkIdle(out, &idle, time.Now()); drop {
+				s.log.Warn("dropping the connection", "reason", end.reason)
+				return end
+			}
+			s.checkBacklog(len(rx), cap(rx), time.Now())
+			s.checkOverflow()
+			s.checkLinkTimeout(out)
 			s.checkConfirmTimeout()
 			s.checkFileTimeout(now)
 			s.clockDue()
 			s.runFreezes(now)
 			s.expireSecurity()
-			if err := s.pollUnsolicited(conn, now); err != nil {
+			if err := s.pollUnsolicited(out, now); err != nil {
 				s.log.Warn("unsolicited transmission failed", "err", err)
-				return
+				return ending{reason: "send failed", err: err}
 			}
-			if err := s.resumeDeferredRead(conn); err != nil {
+			if err := s.resumeDeferredRead(out); err != nil {
 				s.log.Warn("answering a deferred read failed", "err", err)
-				return
+				return ending{reason: "send failed", err: err}
 			}
 		}
 	}
@@ -757,6 +836,67 @@ func readInto(ctx context.Context, r io.Reader, out chan<- []byte, errc chan<- e
 	}
 }
 
+// idleState tracks what the idle and frame-assembly timeouts measure.
+type idleState struct {
+	// lastFrame is when the last valid link frame arrived.
+	lastFrame time.Time
+	// partialSince is when a link frame started arriving and has not yet
+	// finished; zero when nothing is part-received.
+	partialSince time.Time
+	// probedAt is when a keep-alive probe went out for the current idle
+	// spell; zero when none has.
+	probedAt time.Time
+}
+
+func (st *idleState) onReceive(now time.Time, gotFrame bool, buffered int) {
+	if gotFrame {
+		st.lastFrame = now
+		st.probedAt = time.Time{}
+	}
+	switch {
+	case buffered == 0:
+		st.partialSince = time.Time{}
+	case gotFrame || st.partialSince.IsZero():
+		// A frame finished and another has begun, or the first octets of one
+		// have just arrived.
+		st.partialSince = now
+	}
+}
+
+// checkIdle applies IdleTimeout and FrameAssemblyTimeout, reporting whether
+// the connection should be dropped and why.
+func (s *Session) checkIdle(w io.Writer, st *idleState, now time.Time) (ending, bool) {
+	if d := s.cfg.FrameAssemblyTimeout; d > 0 && !st.partialSince.IsZero() && now.Sub(st.partialSince) > d {
+		s.emit(secevent.Event{Kind: secevent.KindDoSSlowFrame, Action: secevent.Disconnected,
+			Detail: "a link frame started arriving and did not finish within FrameAssemblyTimeout"})
+		return ending{reason: "a link frame did not finish arriving in time"}, true
+	}
+	d := s.cfg.IdleTimeout
+	if d <= 0 || now.Sub(st.lastFrame) < d {
+		return ending{}, false
+	}
+	if st.probedAt.IsZero() {
+		if s.stack.Busy() {
+			// A response is still going out; probe once it has.
+			return ending{}, false
+		}
+		st.probedAt = now
+		if err := s.stack.SendLinkStatusRequest(w); err != nil {
+			return ending{reason: "the keep-alive probe could not be sent", err: err}, true
+		}
+		s.linkDeadline = now.Add(s.cfg.LinkTimeout)
+		s.log.Debug("idle link; keep-alive sent")
+		return ending{}, false
+	}
+	// The probe and its retries have had their time.
+	if now.Sub(st.probedAt) > s.cfg.LinkTimeout*time.Duration(s.cfg.LinkRetries+1) {
+		s.emit(secevent.Event{Kind: secevent.KindConnIdleTimeout, Action: secevent.Disconnected,
+			Detail: "no valid link frame within IdleTimeout and the keep-alive probe went unanswered"})
+		return ending{reason: "idle and the keep-alive probe went unanswered"}, true
+	}
+	return ending{}, false
+}
+
 // checkLinkTimeout retransmits an unacknowledged link frame.
 func (s *Session) checkLinkTimeout(w io.Writer) {
 	if !s.stack.Pending() || time.Now().Before(s.linkDeadline) {
@@ -770,6 +910,8 @@ func (s *Session) checkLinkTimeout(w io.Writer) {
 	s.linkDeadline = time.Now().Add(s.cfg.LinkTimeout)
 	if failed {
 		s.log.Warn("link layer gave up on a response")
+		s.emit(secevent.Event{Kind: secevent.KindDoSLinkRetriesExhausted,
+			Detail: "the link layer gave up: the peer did not acknowledge after every retry"})
 	}
 }
 
@@ -788,12 +930,17 @@ func (s *Session) checkConfirmTimeout() {
 	s.pendingIndex = 0
 	n := s.db.events.Unselect()
 	s.bump(func(st *Stats) { st.ConfirmTimeouts++ })
+	s.confirmMissed(false)
 	s.log.Warn("application confirm timed out; events requeued", "events", n)
 }
 
 // handle dispatches one request fragment.
 func (s *Session) handle(w io.Writer, r stack.Received) error {
-	return s.handleAuthenticated(w, r, false)
+	s.sec.SawLinkSource(r.Source)
+	s.beginRequest(r)
+	err := s.handleAuthenticated(w, r, false)
+	s.endRequest()
+	return err
 }
 
 func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticated bool) error {
@@ -813,7 +960,28 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 	if err != nil {
 		s.bump(func(st *Stats) { st.MalformedRequests++ })
 		s.log.Warn("malformed request", "err", err)
+		if s.sec.Enabled() {
+			hdr, _, herr := app.ParseHeader(r.Fragment)
+			var hp *app.Header
+			if herr == nil {
+				hp = &hdr
+			}
+			if hp != nil && hdr.IsResponse() {
+				s.emitApp(secevent.KindProtoWrongDirection, r, hp, secevent.Ignored,
+					fmt.Sprintf("outstation received a %s", hdr.Func), nil)
+			} else {
+				e := appEvent(secevent.KindProtoAppMalformed, r, hp)
+				e.Action, e.Value, e.Err = secevent.Rejected, malformedReason(err), err
+				e.Detail = "request could not be parsed: " + err.Error()
+				s.emit(e)
+			}
+		}
 		return s.rejectMalformed(w, r, err)
+	}
+	s.parsedRequest(frag)
+	if frag.Header.IsResponse() {
+		s.emitApp(secevent.KindProtoWrongDirection, r, &frag.Header, secevent.Rejected,
+			fmt.Sprintf("outstation received a %s", frag.Header.Func), nil)
 	}
 
 	// Only a fragment carrying both FIR and FIN is a complete request. A
@@ -830,6 +998,8 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 		// As with a fragment we cannot parse: there is nothing meaningful to
 		// answer, so the indication rides on the next response instead.
 		s.iin = s.iin.Set(app.IINParameterError)
+		s.emitApp(secevent.KindProtoIncompleteRequest, r, &frag.Header, secevent.Ignored,
+			fmt.Sprintf("request fragment with FIR=%t FIN=%t; not executed", frag.Header.Control.Fir, frag.Header.Control.Fin), nil)
 		return nil
 	}
 
@@ -841,12 +1011,16 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 	if frag.Header.Func == app.FuncConfirm && len(frag.Objects) > 0 {
 		s.bump(func(st *Stats) { st.MalformedRequests++ })
 		s.log.Warn("discarding a confirm that carries objects", "seq", frag.Header.Control.Seq)
+		s.emitApp(secevent.KindProtoConfirmWithObjects, r, &frag.Header, secevent.Ignored,
+			"CONFIRM carrying objects", nil)
 		return nil
 	}
 	if frag.Header.Func != app.FuncConfirm && (frag.Header.Control.Con || frag.Header.Control.Uns) {
 		s.bump(func(st *Stats) { st.MalformedRequests++ })
 		s.log.Warn("discarding a request with CON or UNS set",
 			"func", frag.Header.Func, "con", frag.Header.Control.Con, "uns", frag.Header.Control.Uns)
+		s.emitApp(secevent.KindProtoRequestCONUNS, r, &frag.Header, secevent.Ignored,
+			fmt.Sprintf("request with CON=%t UNS=%t", frag.Header.Control.Con, frag.Header.Control.Uns), nil)
 		return nil
 	}
 
@@ -858,11 +1032,22 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 			s.bump(func(st *Stats) { st.MalformedRequests++ })
 			s.log.Warn("request carries an inconsistent qualifier",
 				"group", h.Group, "variation", h.Variation, "qualifier", h.Qualifier)
+			if s.sec.Enabled() {
+				e := appEvent(secevent.KindProtoInconsistentQualifier, r, &frag.Header)
+				e.Fields |= secevent.HasObject
+				e.Group, e.Variation, e.Qualifier = h.Group, h.Variation, uint8(h.Qualifier)
+				e.Action, e.Detail = secevent.Rejected, "prefix and range that do not go together: "+h.Qualifier.String()
+				s.emit(e)
+			}
 			return s.rejectMalformed(w, r, fmt.Errorf("%w: %s", app.ErrBadQualifier, h.Qualifier))
 		}
 	}
 
 	if frag.Header.Func == app.FuncAuthRequest || frag.Header.Func == app.FuncAuthRequestNoAck {
+		if s.cfg.SecureAuthentication == nil {
+			s.emitApp(secevent.KindProtoSecureAuthUnsupported, r, &frag.Header, secevent.Rejected,
+				"secure authentication request, but SAv5 is not configured", nil)
+		}
 		return s.onAuthentication(w, r, frag)
 	}
 	if !authenticated && s.cfg.SecureAuthentication != nil && (criticalFunction(frag.Header.Func) || hasAuthenticationObject(frag)) {
@@ -876,9 +1061,23 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 			s.bump(func(st *Stats) { st.RepeatedRequests++ })
 			s.log.Debug("repeated request; re-sending the previous response",
 				"seq", frag.Header.Control.Seq)
+			s.secReq.replay = true
+			if s.sec.Enabled() {
+				e := appEvent(secevent.KindSeqRepeatRequest, r, &frag.Header)
+				e.Detail = "repeated request answered from the cache, not executed again"
+				if s.sec.Over("repeat", s.cfg.Security.EffectiveLimits().Repeats) {
+					e.Severity = secevent.Warning
+				}
+				s.emit(e)
+			}
 			return s.replayResponse(w, r, frag.Header)
 		}
+		if s.lastReqValid && r.Source == s.lastReqSource && frag.Header.Control.Seq == s.lastReqSeq {
+			s.emitApp(secevent.KindSeqReusedSeq, r, &frag.Header, secevent.Observed,
+				"request reuses the last request's sequence number with different content", nil)
+		}
 		s.rememberRequest(r, frag)
+		s.checkDuplicate(r, frag)
 		// A new request ends whatever response the last one was still owed:
 		// the master has moved on, and will not confirm it now.
 		s.abandonResponse()
@@ -890,6 +1089,9 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 		// carries the broadcast indication instead.
 		s.iin = s.iin.Set(app.IINBroadcast)
 		s.broadcastConfirm = r.Dest == link.BroadcastMandatoryConfirm
+		if s.cfg.Security != nil && s.broadcastMisuse(r, frag) {
+			return nil
+		}
 	}
 
 	// A request whose function code is meaningless without objects asked for
@@ -901,6 +1103,8 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 		s.log.Warn("request carried no objects but requires them",
 			"func", frag.Header.Func, "seq", frag.Header.Control.Seq)
 		s.iin = s.iin.Set(app.IINParameterError)
+		s.emitApp(secevent.KindProtoNoObjects, r, &frag.Header, secevent.Rejected,
+			fmt.Sprintf("%s without objects", frag.Header.Func), nil)
 		if frag.Header.Func.NoReply() || r.Broadcast {
 			// Nothing to answer to; the indication rides on the next response.
 			return nil
@@ -911,6 +1115,26 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 		return s.respond(w, r, frag.Header, nil)
 	}
 
+	// Controls are refused one object at a time, with a status, by the
+	// command path; everything else the function policy refuses is refused
+	// here, before any handler sees it.
+	if s.cfg.Security != nil && !isCommandFunc(frag.Header.Func) && s.blockedByPolicy(r, frag) {
+		s.iin = s.iin.Set(app.IINNoFuncCodeSupport)
+		if frag.Header.Func.NoReply() || r.Broadcast {
+			return nil
+		}
+		return s.respond(w, r, frag.Header, nil)
+	}
+
+	if s.flooded(r, frag) {
+		s.iin = s.iin.Set(app.IINParameterError)
+		if frag.Header.Func.NoReply() || r.Broadcast {
+			return nil
+		}
+		return s.respond(w, r, frag.Header, nil)
+	}
+
+	s.secReq.dispatched = true
 	switch frag.Header.Func {
 	case app.FuncConfirm:
 		// Solicited and unsolicited responses have separate sequence spaces,
@@ -1124,9 +1348,11 @@ func (s *Session) onConfirm(h app.Header) {
 		// A confirm for a response we are not waiting on. Ignoring it is
 		// right: acting on it would drop events the master never received.
 		s.log.Debug("unexpected confirm", "seq", h.Control.Seq, "awaiting", s.awaitingConfirm)
+		s.unexpectedConfirm(h, false)
 		return
 	}
 	s.awaitingConfirm = false
+	s.confirmed()
 	if s.pendingIndex >= len(s.pendingBodies) {
 		// The last fragment is confirmed, so the response is done now, not
 		// when advanceResponse next runs. A request in the same read as the
@@ -1331,9 +1557,11 @@ func (s *Session) onWrite(w io.Writer, r stack.Received, frag app.Fragment) erro
 				continue
 			}
 			recorded := objects.ParseTime48(data)
-			elapsed := s.appl.Now().Sub(s.recordedTime)
+			old := s.appl.Now()
+			elapsed := old.Sub(s.recordedTime)
 			if s.appl.WriteAbsoluteTime(recorded.Time.Add(elapsed)) {
 				s.clockSet()
+				s.auditTimeWrite(old, recorded.Time.Add(elapsed))
 				s.recordedTime = time.Time{}
 				s.log.Debug("clock set by the recorded-time procedure",
 					"recorded_at", recorded.Time, "elapsed", elapsed)
@@ -1352,8 +1580,10 @@ func (s *Session) onWrite(w io.Writer, r stack.Received, frag app.Fragment) erro
 				continue
 			}
 			ts := objects.ParseTime48(data)
+			old := s.appl.Now()
 			if s.appl.WriteAbsoluteTime(ts.Time) {
 				s.clockSet()
+				s.auditTimeWrite(old, ts.Time)
 				s.log.Debug("clock set by master", "time", ts.Time)
 			} else {
 				s.iin = s.iin.Set(app.IINParameterError)
@@ -1424,8 +1654,10 @@ func (s *Session) writeDeadbands(h app.ObjectHeader) {
 			s.iin = s.iin.Set(app.IINParameterError)
 			continue
 		}
+		old := cfg.Deadband
 		cfg.Deadband = value
 		s.db.Configure(dnp3.TypeAnalog, index, cfg)
+		s.auditDeadband(index, old, value)
 		s.log.Debug("deadband written", "index", index, "value", value)
 	}
 }
@@ -1710,6 +1942,7 @@ func (s *Session) sendFragments(w io.Writer, r stack.Received, req app.Header, b
 	if r.Broadcast {
 		return nil
 	}
+	s.responseSent()
 
 	s.pendingBodies = bodies
 	s.pendingIndex = 0

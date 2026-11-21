@@ -45,7 +45,7 @@ func buildChannel(s Site) (channel.Channel, error) {
 }
 
 // newSession builds one site's session.
-func newSession(s Site, log *slog.Logger) (*session, error) {
+func newSession(s Site, log *slog.Logger, tune func(*master.Config)) (*session, error) {
 	ch, err := buildChannel(s)
 	if err != nil {
 		return nil, fmt.Errorf("site %q: %w", s.Name, err)
@@ -55,7 +55,7 @@ func newSession(s Site, log *slog.Logger) (*session, error) {
 	// session while the recorder catches up.
 	h := master.NewChannelHandler(4096)
 
-	sess := master.New(master.Config{
+	mcfg := master.Config{
 		LocalAddr:             s.Local,
 		RemoteAddr:            s.Address,
 		ResponseTimeout:       s.Timeout,
@@ -66,18 +66,20 @@ func newSession(s Site, log *slog.Logger) (*session, error) {
 		UseLinkConfirms:       s.LinkConfirms != nil && *s.LinkConfirms,
 		LinkRetries:           3,
 		Log:                   log.With("site", s.Name),
-	}, h)
+	}
+	tune(&mcfg)
+	sess := master.New(mcfg, h)
 
 	return &session{site: s, sess: sess, ch: ch, h: h}, nil
 }
 
 // run polls every configured site until the context ends.
 func run(ctx context.Context, cfg *Config, rec *Recorder, snap *Snapshot,
-	log *slog.Logger, listen string) error {
+	log *slog.Logger, listen string, tune func(*master.Config)) error {
 
 	var sessions []*session
 	for _, raw := range cfg.Sites {
-		s, err := newSession(cfg.resolved(raw), log)
+		s, err := newSession(cfg.resolved(raw), log, tune)
 		if err != nil {
 			return err
 		}

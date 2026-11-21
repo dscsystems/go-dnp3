@@ -116,6 +116,7 @@ type tcpClient struct {
 
 	mu     sync.Mutex
 	closed bool
+	sec    secHolder
 }
 
 // TCPClient returns a channel that dials addr, retrying with backoff.
@@ -147,6 +148,7 @@ func (c *tcpClient) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		c.sec.dialFailed(c.addr, c.attempt, err)
 		if c.retry.Min <= 0 {
 			return nil, err
 		}
@@ -187,10 +189,35 @@ func (c *tcpClient) String() string { return "tcp-client " + c.addr }
 
 type tcpServer struct {
 	addr string
+	opts ServerOptions
 
 	mu       sync.Mutex
 	listener *net.TCPListener
 	closed   bool
+	busy     busyRejecter
+	sec      secHolder
+}
+
+// BusyPolicy says what a server channel, which serves one connection at a
+// time, does with a connection that arrives while it is serving another.
+type BusyPolicy uint8
+
+const (
+	// BusyBacklog leaves the new connection in the listener's backlog until
+	// the current one ends. The peer sees its connection succeed and then
+	// hears nothing. This is the default.
+	BusyBacklog BusyPolicy = iota
+	// BusyReject accepts the new connection and closes it at once, so the
+	// peer learns straight away that the outstation is serving someone else
+	// instead of waiting on a connection that will not be answered.
+	BusyReject
+)
+
+// ServerOptions tunes a TCP server channel.
+type ServerOptions struct {
+	// Busy says what to do with a connection that arrives while one is being
+	// served.
+	Busy BusyPolicy
 }
 
 // TCPServer returns a channel that accepts inbound connections on addr,
@@ -201,6 +228,11 @@ type tcpServer struct {
 // which belongs above this layer.
 func TCPServer(addr string) Channel {
 	return &tcpServer{addr: addr}
+}
+
+// TCPServerWithOptions is [TCPServer] with its behaviour tuned by opts.
+func TCPServerWithOptions(addr string, opts ServerOptions) Channel {
+	return &tcpServer{addr: addr, opts: opts}
 }
 
 // Addr returns the address the listener bound to, which is how a test that
@@ -241,9 +273,22 @@ func (s *tcpServer) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn, err := acceptContext(ctx, l)
-	if err != nil {
-		return nil, err
+	// The rejecter for the previous connection, if any, must stop accepting
+	// before this accept starts: two accepts at once would race for the
+	// next connection.
+	s.busy.stop()
+	var conn net.Conn
+	for {
+		conn, err = acceptContext(ctx, l, s.sec.acceptFailed)
+		if err != nil {
+			return nil, err
+		}
+		if s.sec.admit(conn) {
+			break
+		}
+	}
+	if s.opts.Busy == BusyReject {
+		return s.busy.start(l, conn, &s.sec), nil
 	}
 	return conn, nil
 }
@@ -257,7 +302,9 @@ func (s *tcpServer) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 // policy, and the sessions treat a connect error as fatal, so returning one
 // would end an outstation for good over a moment's trouble. It waits and
 // accepts again instead, backing off as net/http's server does.
-func acceptContext(ctx context.Context, l *net.TCPListener) (net.Conn, error) {
+//
+// onErr, when not nil, is told about each error it rides out.
+func acceptContext(ctx context.Context, l *net.TCPListener, onErr func(error)) (net.Conn, error) {
 	var backoff time.Duration
 	for {
 		conn, err := acceptOnce(ctx, l)
@@ -266,6 +313,9 @@ func acceptContext(ctx context.Context, l *net.TCPListener) (net.Conn, error) {
 		}
 		if errors.Is(err, net.ErrClosed) {
 			return nil, ErrClosed
+		}
+		if onErr != nil {
+			onErr(err)
 		}
 		backoff = min(max(2*backoff, acceptMinBackoff), acceptMaxBackoff)
 		t := time.NewTimer(backoff)
@@ -340,12 +390,14 @@ func acceptOnce(ctx context.Context, l *net.TCPListener) (net.Conn, error) {
 
 func (s *tcpServer) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.closed = true
+	var err error
 	if s.listener != nil {
-		return s.listener.Close()
+		err = s.listener.Close()
 	}
-	return nil
+	s.mu.Unlock()
+	s.busy.stop()
+	return err
 }
 
 func (s *tcpServer) String() string { return "tcp-server " + s.addr }

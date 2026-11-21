@@ -25,6 +25,8 @@ signatures may change before 1.0.
 | `multidrop` | `…/multidrop` | One channel shared by several sessions: multi-drop serial, serial gateways |
 | `decoder` | `…/decoder` | Structured protocol traces for logging and tooling |
 | `objects` | `…/objects` | Group/variation codecs and the object descriptor table |
+| `secevent` | `…/secevent` | Security events: kinds, sinks, dispatcher, and the policy that turns reporting on |
+| `netpeer` | `…/netpeer` | Peer MAC lookup and MAC/IP history, usable with any `net.Conn` |
 
 Groups 0 and 70 are hand-written rather than generated: their objects carry
 their own length, and group 0's variation is the attribute's identity rather
@@ -677,6 +679,7 @@ Returned once the channel is shut down and will produce no more connections.
 ```go
 func TCPClient(addr string, retry Retry) Channel
 func TCPServer(addr string) Channel
+func TCPServerWithOptions(addr string, opts ServerOptions) Channel
 
 func TLSClient(addr string, tlsCfg TLSConfig, retry Retry) (Channel, error)
 func TLSServer(addr string, tlsCfg TLSConfig) (Channel, error)
@@ -696,6 +699,23 @@ channel is closed, or the context's error. A failed accept is waited out and
 retried, and a peer that fails the TLS handshake (bounded at 10 seconds) is
 dropped while the server waits for the next. Sessions treat any other connect
 error as fatal, so a server never hands them a passing one.
+
+```go
+type ServerOptions struct {
+    Busy BusyPolicy // what to do with a connection that arrives while one is served
+}
+
+type BusyPolicy uint8
+
+const (
+    BusyBacklog BusyPolicy = iota // leave it in the listen backlog until the current one ends (default)
+    BusyReject                    // accept it and close it at once
+)
+```
+
+With `BusyBacklog` a second master sees its connection succeed and then hears
+nothing. `BusyReject` tells it straight away that the outstation is serving
+someone else.
 
 `Pipe` returns two channels connected to each other in memory. This is what
 every integration test runs over and what the explorer's demo mode uses: a full
@@ -745,6 +765,11 @@ type TLSConfig struct {
     CAFile     string // the authority that signs the peer's certificate
     ServerName string // name to verify against the peer's cert; for a client, defaults to the dialled host
     MinVersion uint16 // zero uses TLS 1.2, the floor IEC 62351 sets
+
+    HandshakeTimeout time.Duration // server: how long a peer has to finish the handshake; zero uses 10s
+    Busy             BusyPolicy    // server: see ServerOptions
+
+    VerifyConnection func(tls.ConnectionState) error // extra check after standard verification
 }
 ```
 
@@ -753,6 +778,12 @@ plant, and a channel that authenticates only the server lets anyone who can
 reach the port issue them. IEC 62351-3 requires both sides to present
 certificates, and `TLSClient`/`TLSServer` refuse to build a configuration that
 does not.
+
+`VerifyConnection` adds your own check on top: pinning, a subject or
+extension test, a revocation list. It runs on both ends after the chain has
+verified. An error refuses the peer. The handshake then fails with a
+`*secevent.VerifyError` wrapping your error, and a session with a policy
+reports it as `tls.cert_rejected`.
 
 ## SerialConfig
 
@@ -793,7 +824,12 @@ minutes at a time, and a read returning empty is not an error.
 type UDPConfig struct {
     LocalAddr  string // empty binds an ephemeral port on all interfaces — what a master wants
     RemoteAddr string // empty replies to whoever writes first — what an outstation wants
+    PinPeer    bool   // drop datagrams from anyone but RemoteAddr, or whoever wrote first
 }
+
+Without `PinPeer`, a datagram socket takes requests from any host that can
+reach the port, while its replies keep going to the first peer. Anyone could
+then operate the outstation without ever seeing an answer.
 ```
 
 ---
@@ -861,6 +897,8 @@ type Config struct {
     Turnaround time.Duration // 0 → DefaultTurnaround (2s); negative disables arbitration
     Queue      int           // 0 → DefaultQueue, 16 frames per station
     Log        *slog.Logger  // nil discards
+
+    Security *secevent.Policy // line-level security events; see docs/security.md
 }
 ```
 
@@ -943,6 +981,10 @@ func (s *Session) Run(ctx context.Context, ch channel.Channel) error
 func (s *Session) Connected() bool
 func (s *Session) Stats() Stats
 func (s *Session) LastIIN() app.IIN        // see "Internal types in the public API"
+
+func (s *Session) ReportCyberEvent(e secevent.Event)    // add an application event to the stream
+func (s *Session) PeerInfo() (secevent.PeerInfo, bool)  // the far end of the current connection
+func (s *Session) SecurityStats() secevent.Stats
 ```
 
 `Run` connects and polls until the context is cancelled. It is the call that
@@ -979,7 +1021,10 @@ type Config struct {
     LinkRetries     int           // retransmissions of a confirmed frame
     LinkTimeout     time.Duration // default 1s; matters only with UseLinkConfirms
 
-    KeepAlive time.Duration // probe an idle link this often; zero disables
+    KeepAlive    time.Duration // probe an idle link this often; zero disables
+    WriteTimeout time.Duration // bound each write (TCP, TLS); zero never times out
+
+    Security *secevent.Policy // nil reports nothing; see docs/security.md
 
     Log *slog.Logger // nil discards
 }
@@ -1402,6 +1447,10 @@ func (s *Session) Events() *EventBuffer
 func (s *Session) Restart()
 func (s *Session) SetIndication(ind Indication, on bool)
 func (s *Session) Stats() Stats
+
+func (s *Session) ReportCyberEvent(e secevent.Event)    // add an application event to the stream
+func (s *Session) PeerInfo() (secevent.PeerInfo, bool)  // the far end of the current connection
+func (s *Session) SecurityStats() secevent.Stats
 ```
 
 `SetIndication` asserts or clears `IndicationLocalControl`,
@@ -1495,8 +1544,19 @@ type Config struct {
 
     Indications Indication // device indications asserted from the start; see SetIndication
 
+    IdleTimeout          time.Duration // probe, then close, a connection silent this long; zero never
+    FrameAssemblyTimeout time.Duration // close a connection that leaves a link frame half sent
+    WriteTimeout         time.Duration // bound each write (TCP, TLS); zero never times out
+
+    Security *secevent.Policy // nil reports nothing; see docs/security.md
+
     Log *slog.Logger // nil discards
 }
+
+The three timeouts default to off. An outstation reachable over TCP should set
+`IdleTimeout` and `WriteTimeout`: a server channel serves one connection at a
+time, so a peer that connects and then says nothing, or stops reading, holds
+the only slot for good.
 ```
 
 ### Extended services
@@ -2495,6 +2555,297 @@ func PackedOctets(count int, bitsPerObject int) int
 80 variation 1, which share an encoding. **Packed variations carry no quality
 information, so every value comes back online** — the encoding has nowhere to say
 otherwise.
+
+---
+
+# Package secevent
+
+```go
+import "github.com/dscsystems/go-dnp3/secevent"
+```
+
+Security events. The [security guide](security.md) explains the model and the
+policy and lists every event kind. This section is the reference.
+
+## Policy
+
+```go
+type Policy struct {
+    // Delivery
+    Sink            Sink        // receives events; ignored when Dispatcher is set
+    Dispatcher      *Dispatcher // shared between sessions; the session does not close it
+    QueueSize       int         // own dispatcher: queue bound (default 1024)
+    AggregateWindow time.Duration // own dispatcher: fold repeats within this (default 1s)
+    MaxAggregates   int         // own dispatcher: aggregates kept at once (default 4096)
+    MaxRaw          int         // frame octets kept on an event; 0 → 64, negative → none
+    DisableAudit    bool        // drop audit events for successful state changes
+
+    // Peers and connections
+    DisableMACLookup      bool
+    Resolver              netpeer.Resolver // nil → netpeer.DefaultResolver()
+    MACCache              *netpeer.Cache   // nil → netpeer.DefaultCache()
+    MACLookupTimeout      time.Duration    // 0 → 200ms
+    MACRecheckInterval    time.Duration    // re-check while open; 0 → never
+    DisconnectOnMACChange bool             // needs MACRecheckInterval
+    PeerBindings          map[netip.Addr]net.HardwareAddr
+    RejectBindingMismatch bool
+    AllowedPeers          []netip.Prefix   // nil allows any
+    RejectUnlisted        bool
+    AcceptRate            Rate             // per IP; 0 → 10 per 10s
+    GlobalAcceptRate      Rate             // 0 → 50 per 10s
+    RejectOverRate        bool
+    CertExpiryWarning     time.Duration    // 0 → 30 days; negative → off
+
+    // Link layer
+    LinkTopology           LinkTopology // TopologyAuto, PointToPoint, SharedBus
+    AllowedMasters         []uint16     // nil checks nothing
+    RejectUnexpectedMaster bool         // needs AllowedMasters
+
+    // Application layer (outstation)
+    Functions             *FunctionPolicy
+    BroadcastAllowed      []uint8 // nil → DefaultBroadcastAllowed
+    RejectBroadcastMisuse bool
+    ScanThreshold         int           // 0 → 20; negative → off
+    ScanWindow            time.Duration // 0 → 1 minute
+    CommandGuard          CommandGuard
+    DuplicateWindow       time.Duration // 0 → 10 minutes; negative → off
+    ClockStepThreshold    time.Duration // 0 → 1 minute; negative → off
+    AuthFailureRate       Rate          // 0 → 5 per minute
+
+    // Floods
+    Limits               Limits             // zero rates → DefaultLimits
+    FloodAction          Action             // Observed (default), Throttled, Disconnected
+    ThrottleStatus       dnp3.CommandStatus // 0 → TOO_MANY_OPS
+    ConfirmWithheldAfter int                // 0 → 3; negative → off
+
+    // Files
+    MaxFileSize int64 // 0 → not checked
+}
+
+func DefaultPolicy(sink Sink) *Policy
+func (p *Policy) Valid() error
+
+type Rate struct {
+    N   int
+    Per time.Duration
+}
+
+type CommandGuard func(peer PeerInfo, fc uint8, group uint8, index uint16,
+    code dnp3.ControlCode) dnp3.CommandStatus
+```
+
+A nil `*Policy` turns reporting off. A policy only reports unless one of the
+settings listed in [the guide](security.md#3-the-policy) says to refuse
+traffic. A policy that refuses traffic does so even without a sink.
+
+```go
+type FunctionPolicy struct {
+    Deny           []uint8 // function codes
+    ReadOnly       bool    // everything that changes the outstation
+    AllowTimeWrite bool    // except the clock
+
+    DenyRestart, DenyApplicationControl, DenyFileWrite, DenyFileDelete bool
+    DenyAssignClass, DenyDeadbandWrite, DenyTerminal, DenyUnsolDisable bool
+
+    DenyStatus dnp3.CommandStatus // refused controls; 0 → NOT_AUTHORIZED
+}
+
+type Limits struct {
+    Commands, Integrity, EventPolls, Restart, TimeWrite, AppControl Rate
+    LinkStatus, LinkReset, AuthChallenges, FileOps, Frames          Rate
+    Octets, Unsolicited                                             Rate
+    FCBRepeats, Repeats, CommandRejects                             Rate
+}
+
+var DefaultLimits Limits // see the guide for the values
+```
+
+## Event
+
+```go
+type Event struct {
+    Time      time.Time
+    Kind      Kind
+    Category  Category
+    Severity  Severity
+    Action    Action
+    Protocol  string // "dnp3"
+    Role      string // "master", "outstation", "bus"
+    Transport string // "tcp", "tls", "udp", "serial", "pipe", "multidrop"
+    ConnID    uint64
+    Peer      PeerInfo
+    Local     string
+
+    Fields        FieldMask // which of the protocol fields below are set
+    LinkSrc, LinkDest uint16
+    LinkFunc, TransportSeq, AppFunc, AppSeq, ExpectedSeq uint8
+    IIN           uint16
+    Group, Variation, Qualifier uint8
+    Index         uint32
+    CommandStatus dnp3.CommandStatus
+    ControlCode   dnp3.ControlCode
+    User          uint16
+    FileStatus    dnp3.FileStatus
+    FileName      string
+    Value         string
+
+    Count     int
+    FirstSeen time.Time
+    Detail    string
+    Err       error
+    Raw       []byte
+    Technique string
+}
+
+type Kind string
+
+func (k Kind) Category() Category
+func (k Kind) DefaultSeverity() Severity
+func (k Kind) Technique() string
+func (k Kind) AlwaysDeliver() bool
+func (k Kind) Known() bool
+func Kinds() []Kind
+```
+
+Severities, from lowest to highest: `Info`, `Notice`, `Warning`, `Alert`,
+`Critical`. The actions are `Observed`, `Ignored`, `Rejected`, `Throttled`,
+`Disconnected` and `Blocked`.
+
+`Event` marshals to JSON with stable snake_case names. An application
+reporting its own event through `ReportCyberEvent` sets `Kind` and whatever
+context it has. The session fills in the rest.
+
+## Delivery
+
+```go
+type Sink interface{ HandleEvent(Event) }
+type SinkFunc func(Event)
+
+func JSONLinesSink(w io.Writer) *JSONSink
+func SlogSink(l *slog.Logger) Sink
+func NewChannelSink(c chan<- Event) *ChannelSink
+func MultiSink(sinks ...Sink) Sink
+func FilterSink(min Severity, cats []Category, s Sink) Sink
+func SyncSink(s Sink) Sink // deliver on the emitting goroutine
+
+type DispatcherOptions struct {
+    QueueSize       int
+    AggregateWindow time.Duration // negative turns aggregation off
+    MaxAggregates   int
+}
+
+func NewDispatcher(sink Sink, opts DispatcherOptions) *Dispatcher
+func (d *Dispatcher) Submit(e Event) bool // never blocks; false when dropped
+func (d *Dispatcher) Stats() Stats
+func (d *Dispatcher) Close() error        // flushes, then stops
+
+type Stats struct {
+    ByKind     map[Kind]uint64
+    ByCategory map[Category]uint64
+    Delivered, Aggregated, Dropped, SinkPanics uint64
+}
+```
+
+`Submit` takes an event as it is. Sessions fill in the kind's defaults before
+submitting, and so do emitters (`NewEmitter`, `Emitter.Emit`) built by code
+that reports its own events outside a session.
+
+## Peers
+
+```go
+type PeerInfo struct {
+    Network     string
+    RemoteAddr  netip.AddrPort
+    LocalAddr   netip.AddrPort
+    MAC         net.HardwareAddr
+    MACSource   MACSource // none, neighbor, gateway, static, custom
+    OnLink      bool
+    Interface   string
+    TLS         *TLSPeer
+    ConnectedAt time.Time
+    SerialPort  string
+    LinkAddr    uint16
+}
+
+func ClassifyTLS(err error) (Event, bool) // map a handshake error to a tls.* event
+
+type VerifyError struct { // TLSConfig.VerifyConnection refused the peer
+    Leaf *x509.Certificate
+    Err  error
+}
+```
+
+---
+
+# Package netpeer
+
+```go
+import "github.com/dscsystems/go-dnp3/netpeer"
+```
+
+Finds the MAC address behind a peer's IP, and remembers which MAC, DNP3 link
+address and certificate each IP has shown, so that a change is noticed. It
+depends on nothing else in go-dnp3 and works with any `net.Conn`.
+
+```go
+func Lookup(ctx context.Context, r Resolver, ip netip.Addr) (Result, error)
+func OnLink(ip netip.Addr) (iface string, ok bool)
+
+type Result struct {
+    MAC       net.HardwareAddr
+    Source    Source // SourceNone, SourceNeighbor, SourceGateway, SourceStatic, SourceCustom
+    OnLink    bool
+    Interface string
+    Gateway   netip.Addr // for SourceGateway: the next hop whose MAC this is
+    Local     bool       // our own address
+}
+
+type Resolver interface {
+    Lookup(ctx context.Context, ip netip.Addr) (Neighbor, error)
+}
+type ResolverFunc func(ctx context.Context, ip netip.Addr) (Neighbor, error)
+type Authoritative interface { Resolver; Authoritative() bool }
+
+func DefaultResolver() Resolver
+func SetDefaultResolver(r Resolver) // nil restores the platform's
+
+var ErrUnsupported, ErrNotFound error
+```
+
+`Lookup` decides whether the peer is on-link before asking the resolver. For
+a peer off-link it reports the gateway's MAC as `SourceGateway`, never as the
+peer's. Not finding a MAC is not an error. The platform resolvers are
+netlink on Linux, `GetIpNetTable2` on Windows and the routing socket on
+macOS and the BSDs. Other platforms return `ErrUnsupported`.
+
+```go
+func NewCache(ttl time.Duration, max int) *Cache // 0 → 30 days, 4096 entries
+func DefaultCache() *Cache
+
+func (c *Cache) Observe(o Observation) []Change
+func (c *Cache) Len() int
+func (c *Cache) Save(w io.Writer) error
+func (c *Cache) Load(r io.Reader) error
+
+type Observation struct {
+    IP          netip.Addr
+    MAC         net.HardwareAddr
+    Source      Source
+    LinkAddr    uint16
+    HasLinkAddr bool
+    CertSHA256  string
+    Time        time.Time
+}
+
+type Change struct {
+    Kind ChangeKind // MACChanged, IPChanged, MACShared, LinkAddrChanged, CertChanged
+    IP, OldIP netip.Addr
+    OldMAC, NewMAC net.HardwareAddr
+    OldLinkAddr, NewLinkAddr uint16
+    OldCert, NewCert string
+    LastSeen time.Time
+}
+```
 
 ---
 

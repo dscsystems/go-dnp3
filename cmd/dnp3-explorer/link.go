@@ -254,6 +254,7 @@ func (s *supervisor) start(p link) {
 		UnsolClassMask:        unsolMask(p.Unsolicited),
 		KeepAlive:             30 * time.Second,
 		Log:                   s.log,
+		Security:              securityPolicy(s.conn, p.target()),
 	}, h)
 	// Written before the session goroutine starts, which is what makes it safe
 	// for that goroutine to read without a lock.

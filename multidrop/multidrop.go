@@ -60,6 +60,7 @@ import (
 	"github.com/dscsystems/go-dnp3/channel"
 	"github.com/dscsystems/go-dnp3/internal/link"
 	"github.com/dscsystems/go-dnp3/internal/transport"
+	"github.com/dscsystems/go-dnp3/secevent"
 )
 
 // Defaults for [Config].
@@ -100,6 +101,14 @@ type Config struct {
 
 	// Log receives bus events. Nil discards them.
 	Log *slog.Logger
+
+	// Security reports the bus's security events: line noise, frames for
+	// no station on the bus, frames dropped for a station that stopped
+	// reading, and the line connecting and dropping. Nil reports nothing.
+	// Each session on the bus reports its own events under its own policy.
+	// An invalid policy is not ignored: Add refuses every station, so the
+	// bus never serves without the rules it was configured with.
+	Security *secevent.Policy
 }
 
 func (c *Config) applyDefaults() {
@@ -224,6 +233,14 @@ type Bus struct {
 	err     error
 	closed  bool
 	stats   Stats
+
+	// em reports the bus's events, connEm those of the line in use; secDone
+	// closes a dispatcher the policy did not supply.
+	em      *secevent.Emitter
+	connEm  *secevent.Emitter
+	secDone func()
+	// secErr is why the security policy could not be used; Add reports it.
+	secErr error
 }
 
 // New returns a bus over ch.
@@ -243,6 +260,7 @@ func New(ch channel.Channel, cfg Config) *Bus {
 		dead:   make(chan struct{}),
 	}
 	b.arb.init(cfg.Turnaround)
+	b.openSecurity()
 	return b
 }
 
@@ -262,6 +280,9 @@ func (b *Bus) Add(s Station) (channel.Channel, error) {
 
 	if b.closed {
 		return nil, channel.ErrClosed
+	}
+	if b.secErr != nil {
+		return nil, fmt.Errorf("multidrop: security policy: %w", b.secErr)
 	}
 	for _, existing := range b.stations {
 		if existing.addr.conflicts(s) {
@@ -316,7 +337,11 @@ func (b *Bus) Close() error {
 	if conn != nil {
 		_ = conn.Close()
 	}
-	return b.ch.Close()
+	err := b.ch.Close()
+	if b.secDone != nil {
+		b.secDone()
+	}
+	return err
 }
 
 func (b *Bus) String() string { return "multidrop " + b.ch.String() }
@@ -377,6 +402,7 @@ func (b *Bus) pump() {
 			return
 		}
 		b.log.Info("bus connected")
+		b.secConnected(conn)
 
 		// A fresh parser per connection: buffered octets from a line that has
 		// just dropped are half a frame that will never be completed.
@@ -385,6 +411,7 @@ func (b *Bus) pump() {
 
 		b.detach(conn)
 		b.log.Info("bus disconnected")
+		b.secDisconnected()
 	}
 }
 
@@ -478,6 +505,7 @@ func (b *Bus) feed(p *link.Parser, data []byte) {
 			// of this read has nowhere to go. Giving up beats spinning.
 			b.log.Warn("bus parser is full; octets dropped",
 				"dropped", len(data), "err", werr)
+			b.secQueueDrop(fmt.Sprintf("bus parser full; %d octets dropped", len(data)))
 			return
 		}
 	}
@@ -498,6 +526,12 @@ func (b *Bus) syncParserStats(p *link.Parser, prev *link.Stats) {
 		st.BadLength += cur.BadLength - prev.BadLength
 		st.Resyncs += cur.Resyncs - prev.Resyncs
 	})
+	b.secParser(link.Stats{
+		BytesDiscarded:  cur.BytesDiscarded - prev.BytesDiscarded,
+		HeaderCRCErrors: cur.HeaderCRCErrors - prev.HeaderCRCErrors,
+		BodyCRCErrors:   cur.BodyCRCErrors - prev.BodyCRCErrors,
+		BadLength:       cur.BadLength - prev.BadLength,
+	})
 	*prev = cur
 }
 
@@ -515,6 +549,7 @@ func (b *Bus) route(f link.Frame) {
 		b.mu.Unlock()
 		b.log.Debug("frame for nobody on the bus",
 			"src", f.Header.Src, "dest", f.Header.Dest)
+		b.secUnrouted(f.Header)
 		return
 	}
 	b.stats.FramesRouted++
@@ -540,6 +575,7 @@ func (b *Bus) route(f link.Frame) {
 		if !c.push(out) {
 			b.bump(func(st *Stats) { st.FramesDropped++ })
 			b.log.Warn("station queue full; frame dropped", "station", c.st.addr)
+			b.secQueueDrop(fmt.Sprintf("queue for %s full; frame dropped", c.st.addr))
 			// The session never sees this frame, so as far as it knows the
 			// exchange is still open. Ending its hold on the strength of a
 			// frame it did not receive would hand the line to another

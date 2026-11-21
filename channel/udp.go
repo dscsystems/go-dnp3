@@ -5,7 +5,11 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"sync"
+	"sync/atomic"
+
+	"github.com/dscsystems/go-dnp3/secevent"
 )
 
 // UDP is a legal DNP3 transport, and a genuinely awkward one.
@@ -31,6 +35,13 @@ type UDPConfig struct {
 	// RemoteAddr is where to send. Empty means reply to whoever writes first,
 	// which is what an outstation normally wants.
 	RemoteAddr string
+
+	// PinPeer drops datagrams from anyone but the peer: RemoteAddr when it is
+	// set, otherwise whoever wrote first. Without it a datagram socket takes
+	// requests from any host that can reach the port, while its replies keep
+	// going to the first peer — so anyone can operate the outstation without
+	// ever seeing an answer.
+	PinPeer bool
 }
 
 // UDPChannel returns a channel over a UDP socket.
@@ -45,6 +56,12 @@ type udpChannel struct {
 	conn   *net.UDPConn
 	remote *net.UDPAddr
 	closed bool
+
+	// foreign counts datagrams that came from someone other than the peer,
+	// and dropped those PinPeer refused.
+	foreign, dropped atomic.Uint64
+
+	sec secHolder
 }
 
 func (c *udpChannel) Addr() net.Addr {
@@ -136,6 +153,12 @@ type udpConn struct {
 	rbuf    []byte
 	pending []byte
 
+	// check, when set, decides whether a peer this connection is about to
+	// learn may be served; refused remembers the ones it turned away, so a
+	// refused peer costs one check rather than one per datagram.
+	check   func(netip.AddrPort) bool
+	refused map[netip.AddrPort]bool
+
 	// wbuf gathers the frames of a message between BeginMessage and
 	// EndMessage.
 	wmu      sync.Mutex
@@ -161,12 +184,30 @@ func (u *udpConn) Read(p []byte) (int, error) {
 		}
 
 		// Learn the peer from the first datagram, so an outstation can answer
-		// a master it was not configured with.
+		// a master it was not configured with — once the session's policy,
+		// if it has one, has accepted it.
+		u.ch.mu.Lock()
+		learning := u.ch.remote == nil
+		u.ch.mu.Unlock()
+		if learning && !u.admitPeer(unmap(addr.AddrPort())) {
+			u.ch.dropped.Add(1)
+			continue
+		}
 		u.ch.mu.Lock()
 		if u.ch.remote == nil {
 			u.ch.remote = addr
 		}
+		remote := u.ch.remote
 		u.ch.mu.Unlock()
+
+		if !sameUDPAddr(addr, remote) {
+			u.ch.foreign.Add(1)
+			u.ch.foreignSource(addr, remote)
+			if u.ch.cfg.PinPeer {
+				u.ch.dropped.Add(1)
+				continue
+			}
+		}
 
 		u.pending = u.rbuf[:n] // an empty datagram loops round for the next
 	}
@@ -174,6 +215,37 @@ func (u *udpConn) Read(p []byte) (int, error) {
 	n := copy(p, u.pending)
 	u.pending = u.pending[n:]
 	return n, nil
+}
+
+// SetPeerCheck installs a check run on the peer this connection learns from
+// its first datagram, before anything from it is delivered. A session's
+// security policy uses it to apply its allowlist and MAC pinning to a peer
+// it could not know when the connection opened. It is called on the reading
+// goroutine.
+func (u *udpConn) SetPeerCheck(check func(netip.AddrPort) bool) { u.check = check }
+
+// admitPeer runs the peer check, remembering refusals.
+func (u *udpConn) admitPeer(ap netip.AddrPort) bool {
+	if u.check == nil {
+		return true
+	}
+	if u.refused[ap] {
+		return false
+	}
+	if u.check(ap) {
+		return true
+	}
+	if u.refused == nil || len(u.refused) >= 256 {
+		u.refused = map[netip.AddrPort]bool{}
+	}
+	u.refused[ap] = true
+	return false
+}
+
+// sameUDPAddr compares two UDP addresses by IP and port, treating an
+// IPv4-mapped IPv6 address as the IPv4 address it carries.
+func sameUDPAddr(a, b *net.UDPAddr) bool {
+	return a.Port == b.Port && a.IP.Equal(b.IP)
 }
 
 // BeginMessage starts gathering writes into one datagram. A message is one
@@ -235,3 +307,23 @@ func (u *udpConn) send(p []byte) (int, error) {
 // Close does not close the socket: the channel owns it, and a session
 // reconnecting must find it still there.
 func (u *udpConn) Close() error { return nil }
+
+// foreignSource reports a datagram from someone other than the peer.
+func (c *udpChannel) foreignSource(from, peer *net.UDPAddr) {
+	if !c.sec.enabled() {
+		return
+	}
+	action, what := secevent.Observed, "delivered"
+	if c.cfg.PinPeer {
+		action, what = secevent.Blocked, "dropped"
+	}
+	c.sec.emit(secevent.Event{
+		Kind: secevent.KindConnUDPForeignSource, Action: action,
+		Peer:   secevent.PeerInfo{Network: "udp", RemoteAddr: unmap(from.AddrPort())},
+		Detail: "datagram from " + from.String() + ", not the peer " + peer.String() + "; " + what,
+	})
+}
+
+func unmap(ap netip.AddrPort) netip.AddrPort {
+	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
+}

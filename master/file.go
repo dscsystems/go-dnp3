@@ -60,6 +60,10 @@ type transfer struct {
 	// closed records that the close step has run, so a caller does not send a
 	// second one after a failure.
 	closed bool
+
+	// refused is the status the outstation refused a step with, for the
+	// security event.
+	refused dnp3.FileStatus
 }
 
 // fail records the first protocol-level failure and stops the chain.
@@ -146,6 +150,7 @@ func newFileOpenTask(t *transfer, mode dnp3.FileMode, blockSize uint16, next fun
 				return
 			}
 			if st.Status != dnp3.FileSuccess {
+				t.refused = st.Status
 				t.fail(fmt.Errorf("master: opening %q: %w%s",
 					t.name, st.Status.Err(), statusText(st.Text)))
 				return
@@ -264,6 +269,7 @@ func newFileWriteTask(t *transfer, data []byte, last bool, next func() *task) *t
 				return
 			}
 			if st.Status != dnp3.FileSuccess {
+				t.refused = st.Status
 				t.fail(fmt.Errorf("master: writing %q block %d: %w%s",
 					t.name, t.block, st.Status.Err(), statusText(st.Text)))
 			}
@@ -312,6 +318,7 @@ func newFileCloseTask(t *transfer) *task {
 				return
 			}
 			if st.Status != dnp3.FileSuccess {
+				t.refused = st.Status
 				// A close that fails on a write means the file did not land,
 				// however well the blocks went.
 				t.fail(fmt.Errorf("master: closing %q: %w%s",
@@ -371,6 +378,7 @@ func newFileDeleteTask(t *transfer) *task {
 				return
 			}
 			if st.Status != dnp3.FileSuccess {
+				t.refused = st.Status
 				t.fail(fmt.Errorf("master: deleting %q: %w%s",
 					t.name, st.Status.Err(), statusText(st.Text)))
 			}

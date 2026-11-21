@@ -10,3 +10,9 @@ coverage.html
 # dnp3c conformance runs: reports, logs and captures, and the plugin's build.
 /conformance/dnp3c/results/
 /conformance/dnp3c/plugin/target/
+
+# Binaries go build leaves next to their package.
+/cmd/dnp3-decode/dnp3-decode
+/cmd/dnp3-explorer/dnp3-explorer
+/cmd/dnp3-master/dnp3-master
+/cmd/dnp3-outstation/dnp3-outstation

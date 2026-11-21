@@ -57,6 +57,9 @@ type task struct {
 	// period, when non-zero, reschedules the task after each run.
 	period time.Duration
 
+	// unsolMask is the classes an enable or disable unsolicited task names.
+	unsolMask dnp3.Class
+
 	due      time.Time
 	deadline time.Time
 	seq      uint8
@@ -125,9 +128,10 @@ func newUnsolicitedTask(enable bool, mask dnp3.Class) *task {
 	}
 
 	return &task{
-		name:     name,
-		funcCode: fc,
-		priority: priorityStartup,
+		name:      name,
+		funcCode:  fc,
+		unsolMask: mask,
+		priority:  priorityStartup,
 		build: func(b *app.Builder) error {
 			for _, c := range []struct {
 				class     dnp3.Class

@@ -29,7 +29,35 @@ type SecResult struct {
 	// error — but worth counting. It is also set for a frame whose control
 	// field is not a valid combination.
 	Discarded bool
+	// Note says what was unusual about the frame, for security reporting.
+	// NoteNone for an ordinary frame.
+	Note Note
 }
+
+// Note classifies a received primary frame for security reporting.
+type Note uint8
+
+// Notes.
+const (
+	NoteNone Note = iota
+	// NoteInvalidControl: FCV or the user data length contradicts the function.
+	NoteInvalidControl
+	// NoteNotReset: confirmed user data before the link was reset.
+	NoteNotReset
+	// NoteFCBRepeat: confirmed user data repeating the last frame count bit.
+	NoteFCBRepeat
+	// NoteTestNack: TEST_LINK_STATES before a reset or with the wrong FCB.
+	NoteTestNack
+	// NoteUnsupported: a link function this station does not implement.
+	NoteUnsupported
+	// NoteBroadcastFunction: a broadcast of a function that is not user data.
+	NoteBroadcastFunction
+	// NoteResetLinkStates: the peer reset the link. Ordinary, but counted.
+	NoteResetLinkStates
+	// NoteRequestLinkStatus: the peer asked for link status. Ordinary, but
+	// counted.
+	NoteRequestLinkStatus
+)
 
 // validControl reports whether a primary frame's control field is one of the
 // combinations the standard's control-code validity matrix allows.
@@ -95,7 +123,7 @@ func (s *Secondary) OnFrame(f Frame) SecResult {
 	// act on, and the peer's own timeout is what should tell it something is
 	// wrong.
 	if !validControl(f.Header.Control) || !validLength(f.Header.Control, f.Payload) {
-		return SecResult{Discarded: true}
+		return SecResult{Discarded: true, Note: NoteInvalidControl}
 	}
 
 	if IsBroadcast(f.Header.Dest) {
@@ -110,14 +138,14 @@ func (s *Secondary) OnFrame(f Frame) SecResult {
 		// carry FCB=1, so that is what we expect next.
 		s.reset = true
 		s.expectFCB = true
-		return SecResult{Reply: s.reply(FuncAck, src)}
+		return SecResult{Reply: s.reply(FuncAck, src), Note: NoteResetLinkStates}
 
 	case FuncTestLinkStates:
 		if !s.reset {
-			return SecResult{Reply: s.reply(FuncNack, src)}
+			return SecResult{Reply: s.reply(FuncNack, src), Note: NoteTestNack}
 		}
 		if f.Header.Control.Fcb != s.expectFCB {
-			return SecResult{Reply: s.reply(FuncNack, src)}
+			return SecResult{Reply: s.reply(FuncNack, src), Note: NoteTestNack}
 		}
 		s.expectFCB = !s.expectFCB
 		return SecResult{Reply: s.reply(FuncAck, src)}
@@ -126,13 +154,13 @@ func (s *Secondary) OnFrame(f Frame) SecResult {
 		if !s.reset {
 			// Confirmed data before a reset is a protocol error on the peer's
 			// side. NACK tells it to reset the link and start over.
-			return SecResult{Reply: s.reply(FuncNack, src), Discarded: true}
+			return SecResult{Reply: s.reply(FuncNack, src), Discarded: true, Note: NoteNotReset}
 		}
 		if f.Header.Control.Fcb != s.expectFCB {
 			// A retransmission of a frame we already accepted: our ACK was
 			// lost, not the data. Re-ACK and drop the duplicate payload,
 			// without touching the expected FCB.
-			return SecResult{Reply: s.reply(FuncAck, src), Discarded: true}
+			return SecResult{Reply: s.reply(FuncAck, src), Discarded: true, Note: NoteFCBRepeat}
 		}
 		s.expectFCB = !s.expectFCB
 		return SecResult{Reply: s.reply(FuncAck, src), Payload: f.Payload}
@@ -142,10 +170,10 @@ func (s *Secondary) OnFrame(f Frame) SecResult {
 		return SecResult{Payload: f.Payload}
 
 	case FuncRequestLinkStatus:
-		return SecResult{Reply: s.reply(FuncLinkStatus, src)}
+		return SecResult{Reply: s.reply(FuncLinkStatus, src), Note: NoteRequestLinkStatus}
 
 	default:
-		return SecResult{Reply: s.reply(FuncNotSupported, src)}
+		return SecResult{Reply: s.reply(FuncNotSupported, src), Note: NoteUnsupported}
 	}
 }
 
@@ -168,7 +196,7 @@ func (s *Secondary) onBroadcast(f Frame) SecResult {
 	case FuncConfirmedUserData, FuncUnconfirmedUserData:
 		return SecResult{Payload: f.Payload}
 	default:
-		return SecResult{Discarded: true}
+		return SecResult{Discarded: true, Note: NoteBroadcastFunction}
 	}
 }
 

@@ -9,7 +9,7 @@ It answers the question you actually have when pointing at an unfamiliar device:
 ```console
 $ dnp3-explorer -demo
 dnp3-explorer  demo (in-process outstation)  ● connected      up 1:36  13.4/s  12:04:29
- 1 Overview  2 Points  3 Events  4 Log  5 Files  6 Help                   20 points
+ 1 Overview  2 Points  3 Events  4 Log  5 Files  6 Security  7 Help       20 points
 ────────────────────────────────────────────────────────────────────────────────────
  POINT ▲          VALUE TREND        QUALITY                AGE TIMESTAMP
  BI 0                ON ▁▁▁▁████████ ONLINE                 0s  12:04:29.375
@@ -72,7 +72,7 @@ dnp3-explorer -demo
 | `-no-confirm` | off | issue controls without asking first |
 | `-pulse MS` | 1000 | pulse duration for trip and close |
 
-## The six screens
+## The seven screens
 
 **1 Overview** — the session and the device's health: connection state, uptime,
 message rate, the internal indications the outstation is asserting, and the task
@@ -128,7 +128,15 @@ directory already uses, so a device reached at `C:\LOGS` gets
 In `-demo` the simulated device carries files of its own, so the screen has
 something to browse without hardware.
 
-**6 Help** — the full key and mouse reference.
+**6 Security** — the master's [security events](../../docs/security.md):
+anything the session saw that looked wrong, with its severity and kind.
+That covers outstation restarts and configuration-corrupt or local-control
+indications, refused requests, unsolicited responses after they were
+disabled, stale or repeated responses, malformed fragments, and floods.
+Warnings and worse are coloured, and the Overview's Traffic panel counts
+them. The explorer only reports: it never refuses anything the device sends.
+
+**7 Help** — the full key and mouse reference.
 
 Points can be filtered on anything in the row and sorted by any column —
 including by quality, **worst first**, which is how you find the broken points
@@ -140,7 +148,7 @@ arrived under.
 
 | Key | Does |
 | --- | --- |
-| `1`–`6`, `tab` | switch screens |
+| `1`–`7`, `tab` | switch screens |
 | `↑` `↓`, `j` `k` | move the cursor; `pgup`/`pgdn` by a page |
 | `enter` | act on the selected row — control, setpoint, or inspector |
 | `i` / `p` | integrity poll / poll event classes 1, 2 and 3 |
@@ -220,6 +228,7 @@ they were looking at rather than something they have to reconstruct.
 | Points, Overview | `dnp3-points-<stamp>.csv` | `type,index,value,quality,timestamp,timestamp_quality,received,updates,events,source` |
 | Events | `dnp3-events-<stamp>.csv` | `received,type,index,value,quality,timestamp,class,source` |
 | Log | `dnp3-log-<stamp>.csv` | `time,level,message` |
+| Security | `dnp3-security-<stamp>.csv` | `time,device,severity,kind,action,count,detail` |
 
 `source` is the group and variation the value arrived under, e.g. `g30v5`.
 

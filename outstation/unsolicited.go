@@ -193,6 +193,7 @@ func (s *Session) onUnsolicitedTimeout(w io.Writer, now time.Time) error {
 	s.unsol.awaiting = false
 	s.unsol.retries++
 	s.bump(func(st *Stats) { st.UnsolicitedTimeouts++ })
+	s.confirmMissed(true)
 
 	if s.deferredRead != nil && s.unsol.nullConfirmed {
 		// A read has been waiting for this response to be confirmed. It is
@@ -326,10 +327,12 @@ func (s *Session) onUnsolicitedConfirm(h app.Header) {
 	if !s.unsol.awaiting || h.Control.Seq != s.unsol.awaitSeq {
 		s.log.Debug("unexpected unsolicited confirm",
 			"seq", h.Control.Seq, "awaiting", s.unsol.awaiting)
+		s.unexpectedConfirm(h, true)
 		return
 	}
 
 	s.unsol.awaiting = false
+	s.confirmed()
 	s.unsol.retries = 0
 	s.unsol.retained = false
 	s.unsol.lastBody = nil

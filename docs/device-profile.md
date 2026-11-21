@@ -256,6 +256,24 @@ thing to check when values look wrong.
 
 ---
 
+## Security behaviour
+
+These rows hold only when the session's `Config.Security` sets the field.
+Without a policy, none of them applies. See [security.md](security.md).
+
+| Item | Support |
+| --- | --- |
+| Security event reporting | Typed events for connection, TLS, peer identity, link, transport, application, authentication, control, command, flood and file anomalies. Report only by default |
+| Peer allowlist | `AllowedPeers` and `RejectUnlisted`: closed before any TLS handshake |
+| Master address allowlist | `AllowedMasters` and `RejectUnexpectedMaster`: dropped before the link layer acts, so an unlisted master cannot reset link state |
+| Function policy | `FunctionPolicy` refuses functions for every peer. A refused function is answered `NO_FUNC_CODE_SUPPORT`, a refused control `NOT_AUTHORIZED` (configurable), and the handler is not called |
+| Broadcast policy | Broadcasts outside `BroadcastAllowed` are reported, or dropped with `RejectBroadcastMisuse` |
+| Flood throttling | With `FloodAction: Throttled`, controls beyond the limit are answered `TOO_MANY_OPS` (configurable) and other requests `PARAMETER_ERROR`, without executing them. Link status, link reset and SAv5 challenges are never throttled |
+| Idle and write timeouts | `IdleTimeout`, `FrameAssemblyTimeout`, `WriteTimeout` (outstation), `WriteTimeout` (master). Off by default |
+| Second connection while serving | Left in the backlog (default), or closed at once with `BusyReject` |
+| UDP peer pinning | `UDPConfig.PinPeer` drops datagrams from anyone but the peer |
+| Application certificate check | `TLSConfig.VerifyConnection` runs after standard verification; a refusal is reported as `tls.cert_rejected` |
+
 ## Interoperability
 
 Verified against opendnp3, in both directions. The recorded run built

@@ -10,6 +10,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/dscsystems/go-dnp3/secevent"
 )
 
 // TLSConfig describes a mutually authenticated TLS channel.
@@ -33,6 +35,23 @@ type TLSConfig struct {
 	// MinVersion is the lowest TLS version to accept. Zero uses TLS 1.2, the
 	// floor IEC 62351 sets.
 	MinVersion uint16
+
+	// HandshakeTimeout bounds how long an accepted peer has to complete the
+	// handshake. Zero uses ten seconds. A server serves one connection at a
+	// time and handshakes before serving, so a peer that stalls its handshake
+	// holds the accept for this long.
+	HandshakeTimeout time.Duration
+
+	// Busy says what a server does with a connection that arrives while it is
+	// serving another. It does not apply to clients.
+	Busy BusyPolicy
+
+	// VerifyConnection, when set, is called after the standard certificate
+	// checks have passed, with the handshake's state — to pin a certificate,
+	// check a subject or an extension, or consult a revocation list. An
+	// error refuses the peer, which is reported as tls.cert_rejected with
+	// the error's text.
+	VerifyConnection func(tls.ConnectionState) error
 }
 
 // buildTLS turns a TLSConfig into a crypto/tls configuration.
@@ -75,6 +94,19 @@ func (c TLSConfig) build(server bool) (*tls.Config, error) {
 	if server {
 		cfg.ClientAuth = tls.RequireAndVerifyClientCert
 	}
+	if verify := c.VerifyConnection; verify != nil {
+		cfg.VerifyConnection = func(st tls.ConnectionState) error {
+			err := verify(st)
+			if err == nil {
+				return nil
+			}
+			ve := &secevent.VerifyError{Err: err}
+			if len(st.PeerCertificates) > 0 {
+				ve.Leaf = st.PeerCertificates[0]
+			}
+			return ve
+		}
+	}
 	return cfg, nil
 }
 
@@ -102,6 +134,7 @@ type tlsClient struct {
 
 	mu     sync.Mutex
 	closed bool
+	sec    secHolder
 }
 
 func (c *tlsClient) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
@@ -123,11 +156,18 @@ func (c *tlsClient) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 
 		conn, err := dialer.DialContext(ctx, "tcp", c.addr)
 		if err == nil {
+			if tc, ok := conn.(*tls.Conn); ok {
+				c.sec.tlsEstablished(tc)
+			}
 			c.attempt = 0
 			return closeIfClosed(&c.mu, &c.closed, conn)
 		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
+		}
+		c.sec.dialFailed(c.addr, c.attempt, err)
+		if _, isTLS := secevent.ClassifyTLS(err); isTLS {
+			c.sec.tlsFailed(nil, c.addr, err)
 		}
 		if c.retry.Min <= 0 {
 			return nil, err
@@ -155,12 +195,20 @@ func TLSServer(addr string, tlsCfg TLSConfig) (Channel, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &tlsServer{addr: addr, cfg: cfg}, nil
+	timeout := tlsCfg.HandshakeTimeout
+	if timeout <= 0 {
+		timeout = tlsHandshakeTimeout
+	}
+	return &tlsServer{addr: addr, cfg: cfg, handshakeTimeout: timeout, busyPolicy: tlsCfg.Busy}, nil
 }
 
 type tlsServer struct {
-	addr string
-	cfg  *tls.Config
+	addr             string
+	cfg              *tls.Config
+	handshakeTimeout time.Duration
+	busyPolicy       BusyPolicy
+	busy             busyRejecter
+	sec              secHolder
 
 	mu sync.Mutex
 	// The raw listener is kept rather than a tls.Listener so accepts can be
@@ -208,10 +256,14 @@ func (s *tlsServer) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.busy.stop()
 	for {
-		raw, err := acceptContext(ctx, l)
+		raw, err := acceptContext(ctx, l, s.sec.acceptFailed)
 		if err != nil {
 			return nil, err
+		}
+		if !s.sec.admit(raw) {
+			continue
 		}
 		// Handshake before handing the connection over. tls.Server alone
 		// defers it to the first read or write, so the caller would be given
@@ -220,31 +272,38 @@ func (s *tlsServer) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 		// for good. A failed handshake is the peer's problem, not the
 		// listener's: drop it and wait for the next one.
 		conn := tls.Server(raw, s.cfg)
-		hctx, cancel := context.WithTimeout(ctx, tlsHandshakeTimeout)
+		hctx, cancel := context.WithTimeout(ctx, s.handshakeTimeout)
 		err = conn.HandshakeContext(hctx)
 		cancel()
 		if err == nil {
+			s.sec.tlsEstablished(conn)
+			if s.busyPolicy == BusyReject {
+				return s.busy.start(l, conn, &s.sec), nil
+			}
 			return conn, nil
 		}
 		_ = raw.Close()
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		s.sec.tlsFailed(raw, "", err)
 	}
 }
 
-// tlsHandshakeTimeout bounds how long an accepted peer has to complete the
-// handshake, matching the client's dial timeout.
+// tlsHandshakeTimeout is the default bound on how long an accepted peer has to
+// complete the handshake, matching the client's dial timeout.
 const tlsHandshakeTimeout = 10 * time.Second
 
 func (s *tlsServer) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.closed = true
+	var err error
 	if s.listener != nil {
-		return s.listener.Close()
+		err = s.listener.Close()
 	}
-	return nil
+	s.mu.Unlock()
+	s.busy.stop()
+	return err
 }
 
 func (s *tlsServer) String() string { return "tls-server " + s.addr }
