@@ -117,6 +117,53 @@ type Policy struct {
 	// turns it off.
 	ScanThreshold int
 	ScanWindow    time.Duration
+
+	// CommandGuard, when set, is asked about every control before the
+	// command handler. A status other than SUCCESS refuses it with that
+	// status and reports access.function_blocked.
+	CommandGuard CommandGuard
+	// DuplicateWindow is how long a state-changing request is remembered,
+	// so the same octets arriving on another connection are reported as
+	// cmd.duplicate — a replay. Zero uses 10 minutes; negative turns it
+	// off. Not checked under SAv5, whose challenges catch replays.
+	DuplicateWindow time.Duration
+	// ClockStepThreshold is the clock change a time write may make before
+	// it is reported as ctrl.clock_step. Zero uses a minute; negative turns
+	// it off.
+	ClockStepThreshold time.Duration
+}
+
+// CommandGuard decides whether a control may reach the command handler:
+// fc is the application function, group 12 for a CROB (code is its control
+// code) or 41 for an analog output (code is zero).
+type CommandGuard func(peer PeerInfo, fc uint8, group uint8, index uint16, code dnp3.ControlCode) dnp3.CommandStatus
+
+// Defaults for the duplicate window and the clock step threshold.
+const (
+	DefaultDuplicateWindow    = 10 * time.Minute
+	DefaultClockStepThreshold = time.Minute
+)
+
+// Duplicates returns the effective duplicate window, zero when off.
+func (p *Policy) Duplicates() time.Duration {
+	switch {
+	case p == nil || p.DuplicateWindow < 0:
+		return 0
+	case p.DuplicateWindow == 0:
+		return DefaultDuplicateWindow
+	}
+	return p.DuplicateWindow
+}
+
+// ClockStep returns the effective clock step threshold, zero when off.
+func (p *Policy) ClockStep() time.Duration {
+	switch {
+	case p == nil || p.ClockStepThreshold < 0:
+		return 0
+	case p.ClockStepThreshold == 0:
+		return DefaultClockStepThreshold
+	}
+	return p.ClockStepThreshold
 }
 
 // LinkTopology says whether a link is shared with other stations.
@@ -292,7 +339,7 @@ func (p *Policy) Open(role string) (*Emitter, func()) {
 func (p *Policy) enforces() bool {
 	return p.RejectUnlisted || p.RejectOverRate || p.RejectBindingMismatch ||
 		p.DisconnectOnMACChange || p.RejectUnexpectedMaster || p.RejectBroadcastMisuse ||
-		p.Functions != nil
+		p.Functions != nil || p.CommandGuard != nil
 }
 
 // Audit reports whether audit-trail events are wanted.

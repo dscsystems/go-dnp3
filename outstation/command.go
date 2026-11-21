@@ -139,7 +139,7 @@ func (s *selection) clear() {
 // breaker after a SELECT that named a close, and the whole point of
 // select-before-operate is that the operator confirms exactly what was
 // proposed.
-func (s *selection) matches(objectsRaw []byte, seq uint8, now time.Time) dnp3.CommandStatus {
+func (s *selection) matches(objectsRaw []byte, seq uint8, now time.Time) (dnp3.CommandStatus, selectFault) {
 	// An expired selection is kept rather than cleared when its window
 	// closes, so the late operate can be told why it is refused: TIMEOUT says
 	// the select arrived and the operator was too slow, where NO_SELECT would
@@ -147,18 +147,18 @@ func (s *selection) matches(objectsRaw []byte, seq uint8, now time.Time) dnp3.Co
 	// operates.
 	switch {
 	case !s.active:
-		return dnp3.CommandNoSelect
+		return dnp3.CommandNoSelect, faultNoSelect
 	case now.After(s.expires):
-		return dnp3.CommandTimeout
+		return dnp3.CommandTimeout, faultTimeout
 	case seq != nextSeq(s.seq):
 		// The operate must be the request immediately after the select.
 		// Anything else means a request went missing in between, and the
 		// operator may not be acting on what they think they are.
-		return dnp3.CommandNoSelect
+		return dnp3.CommandNoSelect, faultSeqGap
 	case !bytes.Equal(s.objects, objectsRaw):
-		return dnp3.CommandNoSelect
+		return dnp3.CommandNoSelect, faultMismatch
 	default:
-		return dnp3.CommandSuccess
+		return dnp3.CommandSuccess, faultNone
 	}
 }
 
@@ -169,6 +169,12 @@ type commandOutcome struct {
 	// index is as the request gave it, which may be wider than any point.
 	index  uint32
 	status dnp3.CommandStatus
+
+	// What the security events need: the object, and whether the outstation
+	// refused it before the handler saw it, and why.
+	group, variation uint8
+	raw              []byte
+	refusal          refusal
 }
 
 // onCommand handles SELECT, OPERATE, DIRECT_OPERATE and DIRECT_OPERATE_NR.
@@ -195,8 +201,9 @@ func (s *Session) onCommand(w io.Writer, r stack.Received, frag app.Fragment) er
 
 	// An OPERATE is only honoured against a live, matching selection.
 	var selectStatus = dnp3.CommandSuccess
+	fault := faultNone
 	if opType == OperateSelected {
-		selectStatus = s.sel.matches(objectsRaw, frag.Header.Control.Seq, now)
+		selectStatus, fault = s.sel.matches(objectsRaw, frag.Header.Control.Seq, now)
 		// The selection is consumed either way: a failed operate must not
 		// leave a reservation an operator could stumble into later.
 		s.sel.clear()
@@ -204,6 +211,7 @@ func (s *Session) onCommand(w io.Writer, r stack.Received, frag app.Fragment) er
 
 	body, outcomes := s.executeCommands(frag, opType, selectStatus, now)
 	s.logCommands(fc, opType, outcomes)
+	s.auditCommands(r, frag, opType, fault, outcomes)
 
 	if fc.NoReply() || r.Broadcast {
 		return nil
@@ -213,6 +221,9 @@ func (s *Session) onCommand(w io.Writer, r stack.Received, frag app.Fragment) er
 
 // onSelect reserves the commands without operating anything.
 func (s *Session) onSelect(w io.Writer, r stack.Received, frag app.Fragment, objectsRaw []byte, now time.Time) error {
+	if s.sel.active {
+		s.selectAbandoned(r, now)
+	}
 	body, outcomes := s.executeCommands(frag, 0, dnp3.CommandSuccess, now)
 
 	allOK := true
@@ -233,6 +244,7 @@ func (s *Session) onSelect(w io.Writer, r stack.Received, frag app.Fragment, obj
 	}
 
 	s.logCommands(app.FuncSelect, 0, outcomes)
+	s.auditCommands(r, frag, 0, faultNone, outcomes)
 	if r.Broadcast {
 		return nil
 	}
@@ -303,23 +315,35 @@ func (s *Session) executeCommands(
 			// is. Both are a parameter out of range as well as a refusal.
 			index := uint16(wide)
 			status := selectStatus
+			why := refusedNot
+			if !status.OK() {
+				why = refusedSelect
+			}
 			controls++
 			switch {
 			case wide > 0xFFFF || !s.controlExists(h.Group, index):
 				status = dnp3.CommandNotSupported
+				why = refusedUnknownPoint
 				s.iin = s.iin.Set(app.IINParameterError)
 			case s.cfg.MaxControlsPerRequest > 0 && controls > s.cfg.MaxControlsPerRequest:
 				// The controls past the limit are refused, and the ones within
 				// it carried out: TOO_MANY_OPS on each object says exactly
 				// which did not happen.
 				status = dnp3.CommandTooManyOps
+				why = refusedTooMany
 			case status.OK():
+				if st := s.guardCommand(frag.Header.Func, h.Group, h.Variation, index, raw); !st.OK() {
+					status = st
+					why = refusedPolicy
+					break
+				}
 				status = s.runCommand(h.Group, h.Variation, index, raw, selecting, opType)
 				if !selecting {
 					s.recordCommandEvent(h.Group, h.Variation, index, raw, status)
 				}
 			}
-			outcomes = append(outcomes, commandOutcome{index: wide, status: status})
+			outcomes = append(outcomes, commandOutcome{index: wide, status: status,
+				group: h.Group, variation: h.Variation, raw: raw, refusal: why})
 
 			echo = append(echo, h.Data[off-prefixLen-size:off]...)
 			// The status octet is the last of every command object, so

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/dscsystems/go-dnp3"
 	"github.com/dscsystems/go-dnp3/internal/app"
 	"github.com/dscsystems/go-dnp3/internal/stack"
 	"github.com/dscsystems/go-dnp3/secevent"
@@ -24,6 +25,10 @@ type secRequest struct {
 	sent    app.IIN
 	didSend bool
 	replay  bool
+	// dispatched says the request reached its function's handler, and
+	// unsolBefore is the unsolicited classes enabled before it did.
+	dispatched  bool
+	unsolBefore dnp3.Class
 }
 
 // appEvent returns an event about request r, carrying its addresses and,
@@ -71,6 +76,7 @@ func (s *Session) parsedRequest(frag app.Fragment) {
 		return
 	}
 	s.secReq.hdr = frag.Header
+	s.secReq.unsolBefore = s.unsolClasses
 	s.secReq.objects = s.secReq.objects[:0]
 	for _, h := range frag.Objects {
 		s.secReq.objects = append(s.secReq.objects, [2]uint8{h.Group, h.Variation})
@@ -103,6 +109,7 @@ func (s *Session) endRequest() {
 		errs = q.sent
 	}
 	errs &^= q.pending
+	s.auditControl(errs)
 	if errs == 0 {
 		return
 	}

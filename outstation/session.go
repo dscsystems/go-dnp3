@@ -293,6 +293,11 @@ func (s *Session) SetIndication(ind Indication, on bool) {
 			next = old | uint32(ind)
 		}
 		if s.indications.CompareAndSwap(old, next) {
+			if old != next && s.sec.AuditFromAnywhere() {
+				s.sec.Emit(secevent.Event{Kind: secevent.KindCtrlIndicationChange,
+					Fields: secevent.HasIIN, IIN: uint16(next),
+					Detail: fmt.Sprintf("device indications changed from %v to %v", app.IIN(old), app.IIN(next))})
+			}
 			return
 		}
 	}
@@ -1054,6 +1059,7 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 				"request reuses the last request's sequence number with different content", nil)
 		}
 		s.rememberRequest(r, frag)
+		s.checkDuplicate(r, frag)
 		// A new request ends whatever response the last one was still owed:
 		// the master has moved on, and will not confirm it now.
 		s.abandonResponse()
@@ -1102,6 +1108,7 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 		return s.respond(w, r, frag.Header, nil)
 	}
 
+	s.secReq.dispatched = true
 	switch frag.Header.Func {
 	case app.FuncConfirm:
 		// Solicited and unsolicited responses have separate sequence spaces,
@@ -1522,9 +1529,11 @@ func (s *Session) onWrite(w io.Writer, r stack.Received, frag app.Fragment) erro
 				continue
 			}
 			recorded := objects.ParseTime48(data)
-			elapsed := s.appl.Now().Sub(s.recordedTime)
+			old := s.appl.Now()
+			elapsed := old.Sub(s.recordedTime)
 			if s.appl.WriteAbsoluteTime(recorded.Time.Add(elapsed)) {
 				s.clockSet()
+				s.auditTimeWrite(old, recorded.Time.Add(elapsed))
 				s.recordedTime = time.Time{}
 				s.log.Debug("clock set by the recorded-time procedure",
 					"recorded_at", recorded.Time, "elapsed", elapsed)
@@ -1543,8 +1552,10 @@ func (s *Session) onWrite(w io.Writer, r stack.Received, frag app.Fragment) erro
 				continue
 			}
 			ts := objects.ParseTime48(data)
+			old := s.appl.Now()
 			if s.appl.WriteAbsoluteTime(ts.Time) {
 				s.clockSet()
+				s.auditTimeWrite(old, ts.Time)
 				s.log.Debug("clock set by master", "time", ts.Time)
 			} else {
 				s.iin = s.iin.Set(app.IINParameterError)
@@ -1615,8 +1626,10 @@ func (s *Session) writeDeadbands(h app.ObjectHeader) {
 			s.iin = s.iin.Set(app.IINParameterError)
 			continue
 		}
+		old := cfg.Deadband
 		cfg.Deadband = value
 		s.db.Configure(dnp3.TypeAnalog, index, cfg)
+		s.auditDeadband(index, old, value)
 		s.log.Debug("deadband written", "index", index, "value", value)
 	}
 }

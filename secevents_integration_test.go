@@ -71,10 +71,16 @@ func (l *eventLog) policy() *secevent.Policy {
 // runOutstationOn starts an outstation on ch and returns the bound address.
 func runOutstationOn(t *testing.T, cfg outstation.Config, ch channel.Channel) string {
 	t.Helper()
+	return runOutstationWith(t, cfg, nil, ch)
+}
+
+// runOutstationWith is runOutstationOn with a command handler.
+func runOutstationWith(t *testing.T, cfg outstation.Config, cmds outstation.CommandHandler, ch channel.Channel) string {
+	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	t.Cleanup(func() { cancel(); <-done; _ = ch.Close() })
-	o := outstation.New(cfg, nil, nil)
+	o := outstation.New(cfg, nil, cmds)
 	go func() { defer close(done); _ = o.Run(ctx, ch) }()
 	for range 400 {
 		if a := channel.ServerAddr(ch); a != nil {

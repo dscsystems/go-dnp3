@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dscsystems/go-dnp3/internal/secmon"
 	"github.com/dscsystems/go-dnp3/netpeer"
 	"github.com/dscsystems/go-dnp3/secevent"
 )
@@ -22,6 +23,8 @@ type Hub struct {
 	base   *secevent.Emitter
 	done   func()
 	cur    atomic.Pointer[secevent.Emitter]
+	// shared is base, for the methods other goroutines call.
+	shared atomic.Pointer[secevent.Emitter]
 	since  time.Time
 
 	// linkSeen says the connection's first DNP3 source has been noted, and
@@ -29,8 +32,9 @@ type Hub struct {
 	linkSeen    bool
 	stopRecheck chan struct{}
 
-	// scan is the connection's probe detector.
+	// scan is the connection's probe detector; dups outlives connections.
 	scan scan
+	dups *secmon.DupWindow
 }
 
 // Start opens the policy's emitter for a session in role and attaches it to
@@ -38,6 +42,7 @@ type Hub struct {
 func (h *Hub) Start(p *secevent.Policy, role string, ch any) {
 	h.policy = p
 	h.base, h.done = p.Open(role)
+	h.shared.Store(h.base)
 	if a, ok := ch.(secevent.Attachable); ok && h.base != nil {
 		a.AttachSecurity(h.base)
 	}
@@ -101,21 +106,19 @@ func (h *Hub) Disconnected() time.Duration {
 }
 
 // Emitter returns the connection's emitter, or the session's between
-// connections, or nil when reporting is off.
+// connections, or nil when reporting is off. It is safe from any goroutine.
 func (h *Hub) Emitter() *secevent.Emitter {
 	if em := h.cur.Load(); em != nil {
 		return em
 	}
-	return h.base
+	return h.shared.Load()
 }
 
-// Emit submits an event.
-func (h *Hub) Emit(e secevent.Event) {
-	if h.base == nil {
-		return
-	}
-	h.Emitter().Emit(e)
-}
+// Emit submits an event. It is safe from any goroutine.
+func (h *Hub) Emit(e secevent.Event) { h.Emitter().Emit(e) }
+
+// AuditFromAnywhere is Audit for goroutines other than the session's.
+func (h *Hub) AuditFromAnywhere() bool { return h.Emitter().Policy().Audit() }
 
 // Peer returns the current connection's peer.
 func (h *Hub) Peer() (secevent.PeerInfo, bool) {
@@ -126,7 +129,7 @@ func (h *Hub) Peer() (secevent.PeerInfo, bool) {
 }
 
 // Stats returns the dispatcher's counters.
-func (h *Hub) Stats() secevent.Stats { return h.base.Dispatcher().Stats() }
+func (h *Hub) Stats() secevent.Stats { return h.shared.Load().Dispatcher().Stats() }
 
 // peersOwnMAC reports whether a MAC from this source is the peer's own rather
 // than a router's.
