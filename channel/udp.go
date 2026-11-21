@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
+
+	"github.com/dscsystems/go-dnp3/secevent"
 )
 
 // UDP is a legal DNP3 transport, and a genuinely awkward one.
@@ -57,6 +60,8 @@ type udpChannel struct {
 	// foreign counts datagrams that came from someone other than the peer,
 	// and dropped those PinPeer refused.
 	foreign, dropped atomic.Uint64
+
+	sec secHolder
 }
 
 func (c *udpChannel) Addr() net.Addr {
@@ -183,6 +188,7 @@ func (u *udpConn) Read(p []byte) (int, error) {
 
 		if !sameUDPAddr(addr, remote) {
 			u.ch.foreign.Add(1)
+			u.ch.foreignSource(addr, remote)
 			if u.ch.cfg.PinPeer {
 				u.ch.dropped.Add(1)
 				continue
@@ -262,3 +268,23 @@ func (u *udpConn) send(p []byte) (int, error) {
 // Close does not close the socket: the channel owns it, and a session
 // reconnecting must find it still there.
 func (u *udpConn) Close() error { return nil }
+
+// foreignSource reports a datagram from someone other than the peer.
+func (c *udpChannel) foreignSource(from, peer *net.UDPAddr) {
+	if !c.sec.enabled() {
+		return
+	}
+	action, what := secevent.Observed, "delivered"
+	if c.cfg.PinPeer {
+		action, what = secevent.Blocked, "dropped"
+	}
+	c.sec.emit(secevent.Event{
+		Kind: secevent.KindConnUDPForeignSource, Action: action,
+		Peer:   secevent.PeerInfo{Network: "udp", RemoteAddr: unmap(from.AddrPort())},
+		Detail: "datagram from " + from.String() + ", not the peer " + peer.String() + "; " + what,
+	})
+}
+
+func unmap(ap netip.AddrPort) netip.AddrPort {
+	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
+}

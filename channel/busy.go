@@ -19,15 +19,13 @@ type busyRejecter struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 
-	// rejected counts connections turned away, and onReject, when set, is
-	// told about each one.
+	// rejected counts connections turned away.
 	rejected atomic.Uint64
-	onReject func(net.Conn)
 }
 
 // start begins rejecting on l while served is open, and returns served wrapped
 // so that closing it stops the rejecting.
-func (b *busyRejecter) start(l *net.TCPListener, served net.Conn) net.Conn {
+func (b *busyRejecter) start(l *net.TCPListener, served net.Conn, sec *secHolder) net.Conn {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	b.mu.Lock()
@@ -37,13 +35,11 @@ func (b *busyRejecter) start(l *net.TCPListener, served net.Conn) net.Conn {
 	go func() {
 		defer close(done)
 		for {
-			conn, err := acceptContext(ctx, l)
+			conn, err := acceptContext(ctx, l, sec.acceptFailed)
 			if err != nil {
 				return
 			}
-			if f := b.onReject; f != nil {
-				f(conn)
-			}
+			sec.rejectedBusy(conn)
 			b.rejected.Add(1)
 			_ = conn.Close()
 		}

@@ -116,6 +116,7 @@ type tcpClient struct {
 
 	mu     sync.Mutex
 	closed bool
+	sec    secHolder
 }
 
 // TCPClient returns a channel that dials addr, retrying with backoff.
@@ -147,6 +148,7 @@ func (c *tcpClient) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		c.sec.dialFailed(c.addr, c.attempt, err)
 		if c.retry.Min <= 0 {
 			return nil, err
 		}
@@ -193,6 +195,7 @@ type tcpServer struct {
 	listener *net.TCPListener
 	closed   bool
 	busy     busyRejecter
+	sec      secHolder
 }
 
 // BusyPolicy says what a server channel, which serves one connection at a
@@ -274,12 +277,12 @@ func (s *tcpServer) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 	// before this accept starts: two accepts at once would race for the
 	// next connection.
 	s.busy.stop()
-	conn, err := acceptContext(ctx, l)
+	conn, err := acceptContext(ctx, l, s.sec.acceptFailed)
 	if err != nil {
 		return nil, err
 	}
 	if s.opts.Busy == BusyReject {
-		return s.busy.start(l, conn), nil
+		return s.busy.start(l, conn, &s.sec), nil
 	}
 	return conn, nil
 }
@@ -293,7 +296,9 @@ func (s *tcpServer) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 // policy, and the sessions treat a connect error as fatal, so returning one
 // would end an outstation for good over a moment's trouble. It waits and
 // accepts again instead, backing off as net/http's server does.
-func acceptContext(ctx context.Context, l *net.TCPListener) (net.Conn, error) {
+//
+// onErr, when not nil, is told about each error it rides out.
+func acceptContext(ctx context.Context, l *net.TCPListener, onErr func(error)) (net.Conn, error) {
 	var backoff time.Duration
 	for {
 		conn, err := acceptOnce(ctx, l)
@@ -302,6 +307,9 @@ func acceptContext(ctx context.Context, l *net.TCPListener) (net.Conn, error) {
 		}
 		if errors.Is(err, net.ErrClosed) {
 			return nil, ErrClosed
+		}
+		if onErr != nil {
+			onErr(err)
 		}
 		backoff = min(max(2*backoff, acceptMinBackoff), acceptMaxBackoff)
 		t := time.NewTimer(backoff)

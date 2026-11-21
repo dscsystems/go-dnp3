@@ -166,7 +166,7 @@ func (c *serialChannel) Connect(ctx context.Context) (io.ReadWriteCloser, error)
 			c.port = port
 			c.mu.Unlock()
 			c.attempt = 0
-			return &serialConn{port: port}, nil
+			return &serialConn{port: port, device: c.cfg.Device}, nil
 		}
 
 		if c.retry.Min <= 0 {
@@ -198,7 +198,10 @@ func (c *serialChannel) String() string {
 }
 
 // serialConn adapts a serial port to the channel's stream contract.
-type serialConn struct{ port serial.Port }
+type serialConn struct {
+	port   serial.Port
+	device string
+}
 
 // Read returns when octets arrive or the port's read timeout expires.
 //

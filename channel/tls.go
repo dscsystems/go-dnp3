@@ -112,6 +112,7 @@ type tlsClient struct {
 
 	mu     sync.Mutex
 	closed bool
+	sec    secHolder
 }
 
 func (c *tlsClient) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
@@ -139,6 +140,7 @@ func (c *tlsClient) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		c.sec.dialFailed(c.addr, c.attempt, err)
 		if c.retry.Min <= 0 {
 			return nil, err
 		}
@@ -178,6 +180,7 @@ type tlsServer struct {
 	handshakeTimeout time.Duration
 	busyPolicy       BusyPolicy
 	busy             busyRejecter
+	sec              secHolder
 
 	mu sync.Mutex
 	// The raw listener is kept rather than a tls.Listener so accepts can be
@@ -227,7 +230,7 @@ func (s *tlsServer) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 	}
 	s.busy.stop()
 	for {
-		raw, err := acceptContext(ctx, l)
+		raw, err := acceptContext(ctx, l, s.sec.acceptFailed)
 		if err != nil {
 			return nil, err
 		}
@@ -243,7 +246,7 @@ func (s *tlsServer) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 		cancel()
 		if err == nil {
 			if s.busyPolicy == BusyReject {
-				return s.busy.start(l, conn), nil
+				return s.busy.start(l, conn, &s.sec), nil
 			}
 			return conn, nil
 		}

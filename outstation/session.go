@@ -18,8 +18,10 @@ import (
 	"github.com/dscsystems/go-dnp3/internal/app"
 	"github.com/dscsystems/go-dnp3/internal/link"
 	"github.com/dscsystems/go-dnp3/internal/netio"
+	"github.com/dscsystems/go-dnp3/internal/sechub"
 	"github.com/dscsystems/go-dnp3/internal/stack"
 	"github.com/dscsystems/go-dnp3/objects"
+	"github.com/dscsystems/go-dnp3/secevent"
 )
 
 // Config parameterises an outstation session.
@@ -129,6 +131,10 @@ type Config struct {
 	// point is in local control when it comes up. They can be changed while
 	// running with [Session.SetIndication].
 	Indications Indication
+
+	// Security turns on security event reporting (see package secevent).
+	// Nil, the default, reports nothing and costs nothing.
+	Security *secevent.Policy
 
 	// Log receives protocol and session events. Nil discards them.
 	Log *slog.Logger
@@ -426,6 +432,9 @@ type Session struct {
 	restartPending atomic.Bool
 	mu             sync.Mutex
 	stats          Stats
+
+	// sec carries security events to the policy's sink.
+	sec sechub.Hub
 }
 
 // Stats counts what a session has done.
@@ -615,6 +624,11 @@ func (s *Session) Run(ctx context.Context, ch channel.Channel) error {
 		MaxRxFragment: s.cfg.MaxRxFragment,
 		SelfAddress:   s.cfg.SelfAddress,
 	})
+	if err := s.cfg.Security.Valid(); err != nil {
+		return err
+	}
+	s.sec.Start(s.cfg.Security, "outstation", ch)
+	defer s.sec.Stop()
 
 	// Cancelling the context is how Run is asked to stop, and a closed channel
 	// is the same instruction arriving from the other direction. Both end the
@@ -637,15 +651,17 @@ func (s *Session) Run(ctx context.Context, ch channel.Channel) error {
 		s.log.Info("connected", "channel", ch.String())
 
 		s.stack.Reset()
-		s.serve(ctx, conn)
+		s.connectionOpened(conn)
+		end := s.serve(ctx, conn)
 		_ = conn.Close()
+		s.connectionClosed(end)
 
 		s.log.Info("disconnected")
 	}
 }
 
 // serve runs one connection until it fails or the context ends.
-func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
+func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) ending {
 	// The read goroutine only moves octets. Everything that touches protocol
 	// state runs on this goroutine, so the stack needs no locking and a
 	// response can never interleave with the processing of an inbound frame.
@@ -703,13 +719,14 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return ending{reason: "shutdown"}
 
 		case err := <-readErr:
 			if err != nil && !errors.Is(err, io.EOF) {
 				s.log.Warn("read loop ended", "err", err)
+				return ending{reason: "read failed", err: err}
 			}
-			return
+			return ending{reason: "closed by the peer"}
 
 		case <-s.wake:
 			s.drainUpdates()
@@ -729,36 +746,34 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 				}
 			}); err != nil {
 				s.log.Warn("receive failed", "err", err)
-				return
+				return ending{reason: "receive failed", err: err}
 			}
 			if handleErr != nil {
 				s.log.Warn("request handling failed", "err", handleErr)
-				return
+				return ending{reason: "request handling failed", err: handleErr}
 			}
 			after, _ := s.stack.Stats()
 			idle.onReceive(time.Now(), after.FramesDecoded != before.FramesDecoded, s.stack.Buffered())
 			if err := s.advanceResponse(out); err != nil {
 				s.log.Warn("sending a queued response fragment failed", "err", err)
-				return
+				return ending{reason: "send failed", err: err}
 			}
 			if err := s.resumeDeferredRead(out); err != nil {
 				s.log.Warn("answering a deferred read failed", "err", err)
-				return
+				return ending{reason: "send failed", err: err}
 			}
 			if out.Stalled() {
-				s.log.Warn("write timed out; dropping the connection")
-				return
+				return s.writeStalled()
 			}
 
 		case <-ticker.C:
 			now := s.appl.Now()
 			if out.Stalled() {
-				s.log.Warn("write timed out; dropping the connection")
-				return
+				return s.writeStalled()
 			}
-			if reason := s.checkIdle(out, &idle, time.Now()); reason != "" {
-				s.log.Warn("dropping the connection", "reason", reason)
-				return
+			if end, drop := s.checkIdle(out, &idle, time.Now()); drop {
+				s.log.Warn("dropping the connection", "reason", end.reason)
+				return end
 			}
 			s.checkLinkTimeout(out)
 			s.checkConfirmTimeout()
@@ -768,11 +783,11 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 			s.expireSecurity()
 			if err := s.pollUnsolicited(out, now); err != nil {
 				s.log.Warn("unsolicited transmission failed", "err", err)
-				return
+				return ending{reason: "send failed", err: err}
 			}
 			if err := s.resumeDeferredRead(out); err != nil {
 				s.log.Warn("answering a deferred read failed", "err", err)
-				return
+				return ending{reason: "send failed", err: err}
 			}
 		}
 	}
@@ -827,34 +842,38 @@ func (st *idleState) onReceive(now time.Time, gotFrame bool, buffered int) {
 	}
 }
 
-// checkIdle applies IdleTimeout and FrameAssemblyTimeout, returning why the
-// connection should be dropped, or "" to keep it.
-func (s *Session) checkIdle(w io.Writer, st *idleState, now time.Time) string {
+// checkIdle applies IdleTimeout and FrameAssemblyTimeout, reporting whether
+// the connection should be dropped and why.
+func (s *Session) checkIdle(w io.Writer, st *idleState, now time.Time) (ending, bool) {
 	if d := s.cfg.FrameAssemblyTimeout; d > 0 && !st.partialSince.IsZero() && now.Sub(st.partialSince) > d {
-		return "a link frame did not finish arriving in time"
+		s.emit(secevent.Event{Kind: secevent.KindDoSSlowFrame, Action: secevent.Disconnected,
+			Detail: "a link frame started arriving and did not finish within FrameAssemblyTimeout"})
+		return ending{reason: "a link frame did not finish arriving in time"}, true
 	}
 	d := s.cfg.IdleTimeout
 	if d <= 0 || now.Sub(st.lastFrame) < d {
-		return ""
+		return ending{}, false
 	}
 	if st.probedAt.IsZero() {
 		if s.stack.Busy() {
 			// A response is still going out; probe once it has.
-			return ""
+			return ending{}, false
 		}
 		st.probedAt = now
 		if err := s.stack.SendLinkStatusRequest(w); err != nil {
-			return "the keep-alive probe could not be sent"
+			return ending{reason: "the keep-alive probe could not be sent", err: err}, true
 		}
 		s.linkDeadline = now.Add(s.cfg.LinkTimeout)
 		s.log.Debug("idle link; keep-alive sent")
-		return ""
+		return ending{}, false
 	}
 	// The probe and its retries have had their time.
 	if now.Sub(st.probedAt) > s.cfg.LinkTimeout*time.Duration(s.cfg.LinkRetries+1) {
-		return "idle and the keep-alive probe went unanswered"
+		s.emit(secevent.Event{Kind: secevent.KindConnIdleTimeout, Action: secevent.Disconnected,
+			Detail: "no valid link frame within IdleTimeout and the keep-alive probe went unanswered"})
+		return ending{reason: "idle and the keep-alive probe went unanswered"}, true
 	}
-	return ""
+	return ending{}, false
 }
 
 // checkLinkTimeout retransmits an unacknowledged link frame.

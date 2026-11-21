@@ -14,8 +14,10 @@ import (
 	"github.com/dscsystems/go-dnp3/channel"
 	"github.com/dscsystems/go-dnp3/internal/app"
 	"github.com/dscsystems/go-dnp3/internal/netio"
+	"github.com/dscsystems/go-dnp3/internal/sechub"
 	"github.com/dscsystems/go-dnp3/internal/stack"
 	"github.com/dscsystems/go-dnp3/objects"
+	"github.com/dscsystems/go-dnp3/secevent"
 )
 
 // Config parameterises a master session.
@@ -79,6 +81,10 @@ type Config struct {
 	// TLS).
 	WriteTimeout time.Duration
 
+	// Security turns on security event reporting (see package secevent).
+	// Nil, the default, reports nothing and costs nothing.
+	Security *secevent.Policy
+
 	// Log receives protocol and session events. Nil discards them.
 	Log *slog.Logger
 }
@@ -127,6 +133,9 @@ type Session struct {
 	handler Handler
 	log     *slog.Logger
 	stack   *stack.Stack
+
+	// sec carries security events to the policy's sink.
+	sec sechub.Hub
 
 	// seq is the application sequence number for solicited requests.
 	seq uint8
@@ -217,6 +226,11 @@ func (s *Session) Run(ctx context.Context, ch channel.Channel) error {
 		MaxRetries:    s.cfg.LinkRetries,
 		MaxRxFragment: s.cfg.MaxRxFragment,
 	})
+	if err := s.cfg.Security.Valid(); err != nil {
+		return err
+	}
+	s.sec.Start(s.cfg.Security, "master", ch)
+	defer s.sec.Stop()
 
 	// Cancelling the context is how Run is asked to stop, and a closed channel
 	// is the same instruction arriving from the other direction. Both end the
@@ -246,10 +260,12 @@ func (s *Session) Run(ctx context.Context, ch channel.Channel) error {
 		s.security = masterSecurity{}
 		s.startupSequence()
 
-		s.serve(ctx, conn)
+		s.connectionOpened(conn)
+		end := s.serve(ctx, conn)
 
 		s.setConnected(false)
 		_ = conn.Close()
+		s.connectionClosed(end)
 		s.failInflight(dnp3.ErrNoConnection)
 		s.log.Info("disconnected")
 	}
@@ -314,7 +330,7 @@ func (s *Session) enqueue(t *task) {
 }
 
 // serve runs one connection.
-func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
+func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) ending {
 	// The read goroutine only moves octets. Everything that touches protocol
 	// state — the link state machines, the reassembler, the scheduler — runs
 	// on this goroutine, so the stack needs no locking and a send can never
@@ -340,20 +356,20 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 	for {
 		s.runDueTask(out)
 		if out.Stalled() {
-			s.log.Warn("write timed out; dropping the connection")
-			return
+			return s.writeStalled()
 		}
 		resetTimer(timer, s.nextWakeup())
 
 		select {
 		case <-ctx.Done():
-			return
+			return ending{reason: "shutdown"}
 
 		case err := <-readErr:
 			if err != nil && !errors.Is(err, io.EOF) {
 				s.log.Warn("read loop ended", "err", err)
+				return ending{reason: "read failed", err: err}
 			}
-			return
+			return ending{reason: "closed by the peer"}
 
 		case t := <-s.submit:
 			s.enqueue(t)
@@ -364,7 +380,7 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 				s.onFragment(out, r)
 			}); err != nil {
 				s.log.Warn("receive failed", "err", err)
-				return
+				return ending{reason: "receive failed", err: err}
 			}
 
 		case <-timer.C:
@@ -373,7 +389,9 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 			}
 			if s.peerSilent {
 				s.peerSilent = false
-				return
+				s.emit(secevent.Event{Kind: secevent.KindConnKeepaliveFailed, Action: secevent.Disconnected,
+					Detail: "the keep-alive link status request went unanswered"})
+				return ending{reason: "keep-alive unanswered"}
 			}
 			s.checkTimeout()
 			s.checkKeepAlive(out)
