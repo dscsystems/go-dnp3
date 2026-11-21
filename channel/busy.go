@@ -39,6 +39,9 @@ func (b *busyRejecter) start(l *net.TCPListener, served net.Conn, sec *secHolder
 			if err != nil {
 				return
 			}
+			if !sec.admit(conn) {
+				continue // refused, and reported, already
+			}
 			sec.rejectedBusy(conn)
 			b.rejected.Add(1)
 			_ = conn.Close()

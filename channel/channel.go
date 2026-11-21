@@ -277,9 +277,15 @@ func (s *tcpServer) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 	// before this accept starts: two accepts at once would race for the
 	// next connection.
 	s.busy.stop()
-	conn, err := acceptContext(ctx, l, s.sec.acceptFailed)
-	if err != nil {
-		return nil, err
+	var conn net.Conn
+	for {
+		conn, err = acceptContext(ctx, l, s.sec.acceptFailed)
+		if err != nil {
+			return nil, err
+		}
+		if s.sec.admit(conn) {
+			break
+		}
 	}
 	if s.opts.Busy == BusyReject {
 		return s.busy.start(l, conn, &s.sec), nil

@@ -13,7 +13,8 @@ import (
 // events that happen before any session sees a connection: accept failures,
 // refused connections, failed dials and handshakes.
 type secHolder struct {
-	em atomic.Pointer[secevent.Emitter]
+	em  atomic.Pointer[secevent.Emitter]
+	adm admission
 }
 
 func (h *secHolder) attach(em *secevent.Emitter, transport string) {
@@ -62,13 +63,19 @@ const dialFailuresBeforeWarning = 5
 func (s *tcpServer) AttachSecurity(em *secevent.Emitter) { s.sec.attach(em, "tcp") }
 
 // AttachSecurity implements [secevent.Attachable].
-func (s *tlsServer) AttachSecurity(em *secevent.Emitter) { s.sec.attach(em, "tls") }
+func (s *tlsServer) AttachSecurity(em *secevent.Emitter) {
+	s.sec.attach(em, "tls")
+	s.sec.ownCertExpiry(s.cfg)
+}
 
 // AttachSecurity implements [secevent.Attachable].
 func (c *tcpClient) AttachSecurity(em *secevent.Emitter) { c.sec.attach(em, "tcp") }
 
 // AttachSecurity implements [secevent.Attachable].
-func (c *tlsClient) AttachSecurity(em *secevent.Emitter) { c.sec.attach(em, "tls") }
+func (c *tlsClient) AttachSecurity(em *secevent.Emitter) {
+	c.sec.attach(em, "tls")
+	c.sec.ownCertExpiry(c.cfg)
+}
 
 // AttachSecurity implements [secevent.Attachable].
 func (c *udpChannel) AttachSecurity(em *secevent.Emitter) { c.sec.attach(em, "udp") }

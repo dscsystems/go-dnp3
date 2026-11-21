@@ -76,6 +76,13 @@ func (h *Hub) identify(em *secevent.Emitter, peer secevent.PeerInfo, res netpeer
 		}
 	}
 
+	if t := peer.TLS; t != nil && !t.NotAfter.IsZero() {
+		if w := p.CertExpiry(); w > 0 && time.Until(t.NotAfter) < w {
+			em.Emit(secevent.Event{Kind: secevent.KindTLSCertExpiring,
+				Detail: fmt.Sprintf("the peer's certificate %q expires %s", t.Subject, t.NotAfter.Format(time.RFC3339))})
+		}
+	}
+
 	want, pinned := p.PeerBindings[ip]
 	if !pinned || bytes.Equal(want, peer.MAC) {
 		return true

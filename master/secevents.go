@@ -41,6 +41,15 @@ func (s *Session) connectionOpened(conn io.ReadWriteCloser) bool {
 }
 
 func (s *Session) connectionClosed(end ending) {
+	if end.err != nil {
+		// TLS 1.3 completes the handshake before the server has checked the
+		// client's certificate, so a refusal arrives as the first read's
+		// error rather than at connect.
+		if ev, ok := secevent.ClassifyTLS(end.err); ok {
+			ev.Action = secevent.Disconnected
+			s.emit(ev)
+		}
+	}
 	em := s.sec.Emitter()
 	took := s.sec.Disconnected()
 	em.Emit(secevent.Event{

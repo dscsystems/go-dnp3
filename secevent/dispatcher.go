@@ -290,11 +290,18 @@ func (d *Dispatcher) deliver(e Event) {
 // connection apart for aggregation: the same malformed request from the same
 // station is one event repeated, an unknown point at a different index is
 // another event.
+//
+// Events not tied to a connection — a refused connection, a failed accept —
+// are told apart by the peer's address instead.
 func aggregationKey(e Event) string {
-	if e.Fields&(HasLinkAddrs|HasAppFunc|HasObject|HasIndex|HasUser) == 0 {
-		return ""
+	var peer string
+	if e.ConnID == 0 && e.Peer.RemoteAddr.IsValid() {
+		peer = e.Peer.RemoteAddr.Addr().String()
 	}
-	return fmt.Sprintf("%d/%d/%d/%d.%d/%d/%d", e.LinkSrc, e.LinkDest, e.AppFunc, e.Group, e.Variation, e.Index, e.User)
+	if e.Fields&(HasLinkAddrs|HasAppFunc|HasObject|HasIndex|HasUser) == 0 {
+		return peer
+	}
+	return fmt.Sprintf("%s/%d/%d/%d/%d.%d/%d/%d", peer, e.LinkSrc, e.LinkDest, e.AppFunc, e.Group, e.Variation, e.Index, e.User)
 }
 
 // syncSink marks a sink for synchronous delivery.

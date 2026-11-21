@@ -68,6 +68,76 @@ type Policy struct {
 	PeerBindings map[netip.Addr]net.HardwareAddr
 	// RejectBindingMismatch closes such a connection as soon as it opens.
 	RejectBindingMismatch bool
+
+	// AllowedPeers lists the addresses a server channel expects connections
+	// from. A connection from anywhere else is reported. Nil allows any.
+	AllowedPeers []netip.Prefix
+	// RejectUnlisted closes such a connection at once, before any TLS
+	// handshake and before a session sees it.
+	RejectUnlisted bool
+	// AcceptRate bounds new connections from one IP address, and
+	// GlobalAcceptRate new connections from everywhere. Going over is
+	// reported as a connection storm or scan. Zero uses the defaults (10 per
+	// 10s per IP, 50 per 10s overall); a negative N turns the check off.
+	AcceptRate, GlobalAcceptRate Rate
+	// RejectOverRate closes connections over the rate instead of only
+	// reporting them.
+	RejectOverRate bool
+	// CertExpiryWarning reports a certificate, the peer's or our own, that
+	// expires within this long. Zero uses 30 days; negative turns it off.
+	CertExpiryWarning time.Duration
+}
+
+// Rate is N events per period.
+type Rate struct {
+	N   int
+	Per time.Duration
+}
+
+// Defaults for the policy's rates and durations.
+var (
+	DefaultAcceptRate       = Rate{N: 10, Per: 10 * time.Second}
+	DefaultGlobalAcceptRate = Rate{N: 50, Per: 10 * time.Second}
+)
+
+// DefaultCertExpiryWarning is how far ahead a certificate's expiry is reported.
+const DefaultCertExpiryWarning = 30 * 24 * time.Hour
+
+// Or returns r, or def when r is the zero Rate. A negative N means off and is
+// returned as is.
+func (r Rate) Or(def Rate) Rate {
+	if r == (Rate{}) {
+		return def
+	}
+	return r
+}
+
+// Off reports whether the rate is turned off.
+func (r Rate) Off() bool { return r.N < 0 || r.Per <= 0 }
+
+// CertExpiry returns the effective certificate expiry warning, zero when off.
+func (p *Policy) CertExpiry() time.Duration {
+	switch {
+	case p == nil || p.CertExpiryWarning < 0:
+		return 0
+	case p.CertExpiryWarning == 0:
+		return DefaultCertExpiryWarning
+	}
+	return p.CertExpiryWarning
+}
+
+// PeerAllowed reports whether AllowedPeers admits ip.
+func (p *Policy) PeerAllowed(ip netip.Addr) bool {
+	if p == nil || p.AllowedPeers == nil {
+		return true
+	}
+	ip = ip.Unmap()
+	for _, pre := range p.AllowedPeers {
+		if pre.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // DefaultMACLookupTimeout bounds a MAC lookup when the policy does not.
@@ -94,6 +164,11 @@ func (p *Policy) Valid() error {
 	}
 	if p.DisconnectOnMACChange && p.MACRecheckInterval <= 0 {
 		return fmt.Errorf("%w: secevent: DisconnectOnMACChange needs MACRecheckInterval", dnp3.ErrBadConfig)
+	}
+	for _, pre := range p.AllowedPeers {
+		if !pre.IsValid() {
+			return fmt.Errorf("%w: secevent: AllowedPeers holds an invalid prefix", dnp3.ErrBadConfig)
+		}
 	}
 	for ip, mac := range p.PeerBindings {
 		if !ip.IsValid() || len(mac) == 0 {

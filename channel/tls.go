@@ -10,6 +10,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/dscsystems/go-dnp3/secevent"
 )
 
 // TLSConfig describes a mutually authenticated TLS channel.
@@ -134,6 +136,9 @@ func (c *tlsClient) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 
 		conn, err := dialer.DialContext(ctx, "tcp", c.addr)
 		if err == nil {
+			if tc, ok := conn.(*tls.Conn); ok {
+				c.sec.tlsEstablished(tc)
+			}
 			c.attempt = 0
 			return closeIfClosed(&c.mu, &c.closed, conn)
 		}
@@ -141,6 +146,9 @@ func (c *tlsClient) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 			return nil, ctx.Err()
 		}
 		c.sec.dialFailed(c.addr, c.attempt, err)
+		if _, isTLS := secevent.ClassifyTLS(err); isTLS {
+			c.sec.tlsFailed(nil, err)
+		}
 		if c.retry.Min <= 0 {
 			return nil, err
 		}
@@ -234,6 +242,9 @@ func (s *tlsServer) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 		if err != nil {
 			return nil, err
 		}
+		if !s.sec.admit(raw) {
+			continue
+		}
 		// Handshake before handing the connection over. tls.Server alone
 		// defers it to the first read or write, so the caller would be given
 		// a peer that has presented no certificate, and a peer that connected
@@ -245,6 +256,7 @@ func (s *tlsServer) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 		err = conn.HandshakeContext(hctx)
 		cancel()
 		if err == nil {
+			s.sec.tlsEstablished(conn)
 			if s.busyPolicy == BusyReject {
 				return s.busy.start(l, conn, &s.sec), nil
 			}
@@ -254,6 +266,7 @@ func (s *tlsServer) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		s.sec.tlsFailed(raw, err)
 	}
 }
 
