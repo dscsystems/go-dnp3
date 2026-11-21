@@ -176,6 +176,10 @@ func (s *Session) challengeRequest(w io.Writer, r stack.Received, frag app.Fragm
 	r.Fragment = append([]byte(nil), r.Fragment...)
 	s.security.pending = &authenticationPending{received: r, challenge: data, sequence: s.security.sequence, until: s.appl.Now().Add(s.securityReplyTimeout())}
 	s.countSecurity(8)
+	if s.sec.Enabled() {
+		s.sec.Flood(secevent.KindFloodAuthChallenges, s.cfg.Security.EffectiveLimits().AuthChallenges, 1, true,
+			appEvent("", r, &frag.Header))
+	}
 	s.authEvent(secevent.KindAuthChallenge, r, 0, secevent.Observed, "",
 		fmt.Sprintf("%s challenged", frag.Header.Func))
 	return nil

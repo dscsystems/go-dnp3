@@ -142,6 +142,9 @@ func (h *Hub) secondaryNote(em *secevent.Emitter, o stack.Observation) {
 			// TCP does not duplicate frames.
 			e.Severity = secevent.Warning
 		}
+		if h.Over("fcb", h.policy.EffectiveLimits().FCBRepeats) {
+			e.Severity = secevent.Alert
+		}
 		e.Detail = "confirmed user data repeating the frame count bit; acknowledged, not delivered"
 	case link.NoteTestNack:
 		e = linkEvent(secevent.KindSeqTestLinkNack, o.Header)
@@ -155,9 +158,15 @@ func (h *Hub) secondaryNote(em *secevent.Emitter, o stack.Observation) {
 		e = linkEvent(secevent.KindLinkInvalidControl, o.Header)
 		e.Action = secevent.Ignored
 		e.Detail = "broadcast of a link function other than user data"
+	case link.NoteResetLinkStates:
+		h.Flood(secevent.KindFloodLinkReset, h.policy.EffectiveLimits().LinkReset, 1, true,
+			linkEvent("", o.Header))
+		return
+	case link.NoteRequestLinkStatus:
+		h.Flood(secevent.KindFloodLinkStatus, h.policy.EffectiveLimits().LinkStatus, 1, true,
+			linkEvent("", o.Header))
+		return
 	default:
-		// Resets and status requests are ordinary; flood detection (P8)
-		// counts them.
 		return
 	}
 	em.Emit(e)
@@ -190,4 +199,12 @@ func (h *Hub) transportDiscard(em *secevent.Emitter, o stack.Observation, shared
 		return
 	}
 	em.Emit(e)
+}
+
+// Frames counts n link frames received against the frame rate.
+func (h *Hub) Frames(n int) {
+	if h.base == nil || n == 0 {
+		return
+	}
+	h.Flood(secevent.KindFloodFrames, h.policy.EffectiveLimits().Frames, n, false, secevent.Event{})
 }

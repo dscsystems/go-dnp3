@@ -37,6 +37,8 @@ type Hub struct {
 	dups *secmon.DupWindow
 	// rates are the connection's rate detectors, by name.
 	rates map[string]*rateState
+	// drop names a flood whose policy is to disconnect.
+	drop string
 }
 
 // Start opens the policy's emitter for a session in role and attaches it to
@@ -79,6 +81,7 @@ func (h *Hub) Connected(conn io.ReadWriteCloser, opened secevent.Kind) bool {
 	h.linkSeen = false
 	h.scan = scan{}
 	h.rates = nil
+	h.drop = ""
 
 	detail := "connection opened"
 	if peer.MAC != nil {

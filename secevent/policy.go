@@ -136,6 +136,21 @@ type Policy struct {
 	// failures one connection may cause before auth.brute_force. Zero uses
 	// 5 a minute; a negative N turns it off.
 	AuthFailureRate Rate
+
+	// Limits are the flood thresholds; zero rates use DefaultLimits.
+	Limits Limits
+	// FloodAction is what happens to traffic beyond a limit: Observed
+	// (report only, the default), Throttled — a throttled control is
+	// answered ThrottleStatus, any other request PARAMETER_ERROR, and
+	// neither is executed — or Disconnected. Link status requests,
+	// confirmations, link resets and authentication are only ever reported.
+	FloodAction Action
+	// ThrottleStatus answers a throttled control. Zero uses TOO_MANY_OPS.
+	ThrottleStatus dnp3.CommandStatus
+	// ConfirmWithheldAfter is how many confirmations in a row the master
+	// may let time out before dos.confirm_withheld. Zero uses 3; negative
+	// turns it off.
+	ConfirmWithheldAfter int
 }
 
 // CommandGuard decides whether a control may reach the command handler:
@@ -296,6 +311,9 @@ func (p *Policy) Valid() error {
 			return fmt.Errorf("%w: secevent: AllowedPeers holds an invalid prefix", dnp3.ErrBadConfig)
 		}
 	}
+	if err := p.validFlood(); err != nil {
+		return err
+	}
 	if p.LinkTopology > SharedBus {
 		return fmt.Errorf("%w: secevent: unknown LinkTopology %d", dnp3.ErrBadConfig, p.LinkTopology)
 	}
@@ -345,7 +363,8 @@ func (p *Policy) Open(role string) (*Emitter, func()) {
 func (p *Policy) enforces() bool {
 	return p.RejectUnlisted || p.RejectOverRate || p.RejectBindingMismatch ||
 		p.DisconnectOnMACChange || p.RejectUnexpectedMaster || p.RejectBroadcastMisuse ||
-		p.Functions != nil || p.CommandGuard != nil
+		p.Functions != nil || p.CommandGuard != nil || p.FloodAction == Throttled ||
+		p.FloodAction == Disconnected
 }
 
 // Audit reports whether audit-trail events are wanted.

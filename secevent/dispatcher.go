@@ -291,6 +291,9 @@ func (d *Dispatcher) deliver(e Event) {
 // station is one event repeated, an unknown point at a different index is
 // another event.
 //
+// So is an outcome: a control accepted and the same control refused, or a
+// failure for a different reason, are not repeats of each other.
+//
 // Events not tied to a connection — a refused connection, a failed accept —
 // are told apart by the peer's address instead.
 func aggregationKey(e Event) string {
@@ -298,10 +301,12 @@ func aggregationKey(e Event) string {
 	if e.ConnID == 0 && e.Peer.RemoteAddr.IsValid() {
 		peer = e.Peer.RemoteAddr.Addr().String()
 	}
-	if e.Fields&(HasLinkAddrs|HasAppFunc|HasObject|HasIndex|HasUser) == 0 {
+	if e.Fields&(HasLinkAddrs|HasAppFunc|HasObject|HasIndex|HasUser|HasCommandStatus|HasControlCode) == 0 &&
+		e.Value == "" && e.Action == Observed {
 		return peer
 	}
-	return fmt.Sprintf("%s/%d/%d/%d/%d.%d/%d/%d", peer, e.LinkSrc, e.LinkDest, e.AppFunc, e.Group, e.Variation, e.Index, e.User)
+	return fmt.Sprintf("%s/%d/%d/%d/%d.%d/%d/%d/%d/%d/%d/%s", peer, e.LinkSrc, e.LinkDest, e.AppFunc,
+		e.Group, e.Variation, e.Index, e.User, e.CommandStatus, e.ControlCode, e.Action, e.Value)
 }
 
 // syncSink marks a sink for synchronous delivery.

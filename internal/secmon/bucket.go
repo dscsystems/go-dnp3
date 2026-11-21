@@ -45,6 +45,24 @@ func (b *Bucket) Allow(now time.Time) bool {
 	return true
 }
 
+// AllowN takes n tokens at once, reporting false — and taking none — when
+// fewer are left.
+func (b *Bucket) AllowN(now time.Time, n int) bool {
+	if b.max == 0 {
+		return true
+	}
+	if !b.last.IsZero() {
+		b.tokens = min(b.max, b.tokens+now.Sub(b.last).Seconds()*b.perSec)
+	}
+	b.last = now
+	if b.tokens < float64(n) {
+		b.tokens = 0
+		return false
+	}
+	b.tokens -= float64(n)
+	return true
+}
+
 // Keyed holds one bucket per key, at most max of them; the least recently
 // used is forgotten to make room. It is not safe for concurrent use.
 type Keyed[K comparable] struct {

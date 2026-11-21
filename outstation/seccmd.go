@@ -58,6 +58,10 @@ func (s *Session) guardCommand(fc app.FuncCode, group, variation uint8, index ui
 		s.commandFieldInvalid(group, variation, index, 0, "analog output value "+strconv.FormatFloat(v, 'g', -1, 64))
 	}
 
+	if s.commandFlooded(group, variation, index) {
+		return p.Throttle()
+	}
+
 	status, detail := dnp3.CommandSuccess, ""
 	switch {
 	case p.Functions.Blocks(uint8(fc)):
@@ -157,6 +161,11 @@ func (s *Session) auditCommands(r stack.Received, frag app.Fragment, op OperateT
 			e.Action, e.Value = secevent.Rejected, o.status.String()
 			e.Detail = "control refused: " + o.status.String()
 			s.emit(e)
+			if s.sec.Exceeded("cmd.rejected", s.cfg.Security.EffectiveLimits().CommandRejects) {
+				b := s.commandEvent(secevent.KindCmdBruteForce, o.group, o.variation, o.index, o.status)
+				b.Detail = "refused controls from this connection exceed the policy's rate: guessing points or codes?"
+				s.emit(b)
+			}
 		}
 	}
 

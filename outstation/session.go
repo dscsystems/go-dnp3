@@ -442,6 +442,7 @@ type Session struct {
 	sec sechub.Hub
 	// secReq tracks the request being handled, for its security events.
 	secReq secRequest
+	secDoS secDoS
 }
 
 // Stats counts what a session has done.
@@ -766,6 +767,12 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) ending {
 			}
 			after, _ := s.stack.Stats()
 			idle.onReceive(time.Now(), after.FramesDecoded != before.FramesDecoded, s.stack.Buffered())
+			s.sec.Frames(int(after.FramesDecoded - before.FramesDecoded))
+			s.checkOverflow()
+			if class, drop := s.sec.Drop(); drop {
+				s.log.Warn("dropping the connection: flood", "class", class)
+				return ending{reason: "flood: " + class}
+			}
 			if err := s.advanceResponse(out); err != nil {
 				s.log.Warn("sending a queued response fragment failed", "err", err)
 				return ending{reason: "send failed", err: err}
@@ -787,6 +794,8 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) ending {
 				s.log.Warn("dropping the connection", "reason", end.reason)
 				return end
 			}
+			s.checkBacklog(len(rx), cap(rx), time.Now())
+			s.checkOverflow()
 			s.checkLinkTimeout(out)
 			s.checkConfirmTimeout()
 			s.checkFileTimeout(now)
@@ -901,6 +910,8 @@ func (s *Session) checkLinkTimeout(w io.Writer) {
 	s.linkDeadline = time.Now().Add(s.cfg.LinkTimeout)
 	if failed {
 		s.log.Warn("link layer gave up on a response")
+		s.emit(secevent.Event{Kind: secevent.KindDoSLinkRetriesExhausted,
+			Detail: "the link layer gave up: the peer did not acknowledge after every retry"})
 	}
 }
 
@@ -919,6 +930,7 @@ func (s *Session) checkConfirmTimeout() {
 	s.pendingIndex = 0
 	n := s.db.events.Unselect()
 	s.bump(func(st *Stats) { st.ConfirmTimeouts++ })
+	s.confirmMissed(false)
 	s.log.Warn("application confirm timed out; events requeued", "events", n)
 }
 
@@ -1050,8 +1062,14 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 			s.log.Debug("repeated request; re-sending the previous response",
 				"seq", frag.Header.Control.Seq)
 			s.secReq.replay = true
-			s.emitApp(secevent.KindSeqRepeatRequest, r, &frag.Header, secevent.Observed,
-				"repeated request answered from the cache, not executed again", nil)
+			if s.sec.Enabled() {
+				e := appEvent(secevent.KindSeqRepeatRequest, r, &frag.Header)
+				e.Detail = "repeated request answered from the cache, not executed again"
+				if s.sec.Over("repeat", s.cfg.Security.EffectiveLimits().Repeats) {
+					e.Severity = secevent.Warning
+				}
+				s.emit(e)
+			}
 			return s.replayResponse(w, r, frag.Header)
 		}
 		if s.lastReqValid && r.Source == s.lastReqSource && frag.Header.Control.Seq == s.lastReqSeq {
@@ -1102,6 +1120,14 @@ func (s *Session) handleAuthenticated(w io.Writer, r stack.Received, authenticat
 	// here, before any handler sees it.
 	if s.cfg.Security != nil && !isCommandFunc(frag.Header.Func) && s.blockedByPolicy(r, frag) {
 		s.iin = s.iin.Set(app.IINNoFuncCodeSupport)
+		if frag.Header.Func.NoReply() || r.Broadcast {
+			return nil
+		}
+		return s.respond(w, r, frag.Header, nil)
+	}
+
+	if s.flooded(r, frag) {
+		s.iin = s.iin.Set(app.IINParameterError)
 		if frag.Header.Func.NoReply() || r.Broadcast {
 			return nil
 		}
@@ -1322,9 +1348,11 @@ func (s *Session) onConfirm(h app.Header) {
 		// A confirm for a response we are not waiting on. Ignoring it is
 		// right: acting on it would drop events the master never received.
 		s.log.Debug("unexpected confirm", "seq", h.Control.Seq, "awaiting", s.awaitingConfirm)
+		s.unexpectedConfirm(h, false)
 		return
 	}
 	s.awaitingConfirm = false
+	s.confirmed()
 	if s.pendingIndex >= len(s.pendingBodies) {
 		// The last fragment is confirmed, so the response is done now, not
 		// when advanceResponse next runs. A request in the same read as the
