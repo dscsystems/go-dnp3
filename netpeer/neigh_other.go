@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !windows && !darwin && !dragonfly && !freebsd && !netbsd && !openbsd
 
 package netpeer
 

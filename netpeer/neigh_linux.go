@@ -141,15 +141,6 @@ func parseNeighMsg(b []byte) (Neighbor, int32, bool) {
 	return n, ifindex, true
 }
 
-func isZeroMAC(m net.HardwareAddr) bool {
-	for _, b := range m {
-		if b != 0 {
-			return false
-		}
-	}
-	return true
-}
-
 // parseProcARP reads /proc/net/arp. Only complete entries (flag 0x2) count.
 func parseProcARP(b []byte) []Neighbor {
 	var out []Neighbor

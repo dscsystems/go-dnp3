@@ -252,3 +252,12 @@ func SetDefaultResolver(r Resolver) {
 
 // gatewayFor finds the next hop for an off-link address; replaceable in tests.
 var gatewayFor = defaultGateway
+
+func isZeroMAC(m net.HardwareAddr) bool {
+	for _, b := range m {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
