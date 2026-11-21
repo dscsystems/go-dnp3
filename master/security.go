@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/dscsystems/go-dnp3/internal/security"
 	"github.com/dscsystems/go-dnp3/internal/stack"
 	"github.com/dscsystems/go-dnp3/objects"
+	"github.com/dscsystems/go-dnp3/secevent"
 )
 
 // SecureAuthenticationConfig enables the symmetric SAv5 master exchange.
@@ -81,6 +83,7 @@ func (s *Session) newSessionKeysTask(next *task) *task {
 		h, ok := singleAuthObject(f, 5)
 		if !ok {
 			change.failure = security.ErrAuthentication
+			s.authResponseRefused(f)
 			return
 		}
 		data, err := app.FirstFreeFormatObject(h)
@@ -91,6 +94,7 @@ func (s *Session) newSessionKeysTask(next *task) *task {
 		v, err := objects.ParseAuthKeyStatus(data)
 		if err != nil || v.User != cfg.User || v.Status != 1 || v.Algorithm != 4 || !hmac.Equal(v.MAC, security.MAC(monitor, changeASDU)) {
 			change.failure = security.ErrAuthentication
+			s.authFailed(f, "key change refused: the outstation's key status does not confirm it")
 			return
 		}
 		clear(s.security.control)
@@ -103,6 +107,8 @@ func (s *Session) newSessionKeysTask(next *task) *task {
 			ttl = 10 * time.Minute
 		}
 		s.security.until = time.Now().Add(ttl)
+		s.emit(secevent.Event{Kind: secevent.KindAuthMasterKeyChange, Fields: secevent.HasUser, User: cfg.User,
+			Detail: fmt.Sprintf("session keys changed for user %d", cfg.User)})
 	}
 	change.next = func() *task { return next }
 	request := &task{name: "auth-key-status", funcCode: app.FuncAuthRequest, priority: priorityStartup, startup: next.startup}
@@ -116,6 +122,7 @@ func (s *Session) newSessionKeysTask(next *task) *task {
 		h, ok := singleAuthObject(f, 5)
 		if !ok {
 			request.failure = security.ErrAuthentication
+			s.authResponseRefused(f)
 			return
 		}
 		data, err := app.FirstFreeFormatObject(h)
@@ -126,6 +133,7 @@ func (s *Session) newSessionKeysTask(next *task) *task {
 		status, err = objects.ParseAuthKeyStatus(data)
 		if err != nil || status.User != cfg.User || (status.WrapAlgorithm != 1 && status.WrapAlgorithm != 2) || (status.WrapAlgorithm == 1 && len(cfg.UpdateKey) != 16) || (status.WrapAlgorithm == 2 && len(cfg.UpdateKey) != 32) {
 			request.failure = security.ErrAuthentication
+			s.authFailed(f, "key status unusable: wrong user or key wrap algorithm")
 		}
 	}
 	request.next = func() *task { return change }
@@ -152,6 +160,7 @@ func (s *Session) onAuthenticationResponse(w io.Writer, r stack.Received, f app.
 	}
 	h, ok := singleAuthObject(f, 1)
 	if !ok {
+		s.authResponseRefused(f)
 		s.inflight = nil
 		s.completeTask(t, security.ErrAuthentication)
 		return
@@ -164,6 +173,11 @@ func (s *Session) onAuthenticationResponse(w io.Writer, r stack.Received, f app.
 	}
 	c, err := objects.ParseAuthChallenge(data)
 	if err != nil || !s.securityReady() || c.Algorithm != 4 || c.Reason != 1 || (c.User != 0 && c.User != s.cfg.SecureAuthentication.User) || len(c.Data) != 32 {
+		why := "challenge not answerable"
+		if !s.securityReady() {
+			why = "challenged with no valid session keys"
+		}
+		s.authFailed(f, why)
 		s.inflight = nil
 		s.completeTask(t, security.ErrAuthentication)
 		return
@@ -185,4 +199,28 @@ func (s *Session) onAuthenticationResponse(w io.Writer, r stack.Received, f app.
 		return
 	}
 	t.deadline = time.Now().Add(s.cfg.ResponseTimeout)
+}
+
+// authFailed reports that the outstation's authentication exchange could
+// not be completed.
+func (s *Session) authFailed(f app.Fragment, why string) {
+	s.emit(secevent.Event{Kind: secevent.KindAuthMasterChallengeFailed,
+		Fields: secevent.HasAppFunc | secevent.HasAppSeq, AppFunc: uint8(f.Header.Func), AppSeq: f.Header.Control.Seq,
+		Detail: why})
+}
+
+// authResponseRefused reports an authentication response that is not the
+// challenge expected: an error object is the outstation refusing us.
+func (s *Session) authResponseRefused(f app.Fragment) {
+	if len(f.Objects) == 1 && f.Objects[0].Group == 120 && f.Objects[0].Variation == 7 {
+		detail := "the outstation refused our authentication"
+		if data, err := app.FirstFreeFormatObject(f.Objects[0]); err == nil && len(data) >= 9 {
+			detail = fmt.Sprintf("the outstation refused our authentication with error code %d", data[8])
+		}
+		s.emit(secevent.Event{Kind: secevent.KindAuthMasterErrorReceived,
+			Fields: secevent.HasAppFunc | secevent.HasAppSeq, AppFunc: uint8(f.Header.Func), AppSeq: f.Header.Control.Seq,
+			Detail: detail})
+		return
+	}
+	s.authFailed(f, "authentication response is not a challenge")
 }

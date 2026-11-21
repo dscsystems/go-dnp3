@@ -35,6 +35,8 @@ type Hub struct {
 	// scan is the connection's probe detector; dups outlives connections.
 	scan scan
 	dups *secmon.DupWindow
+	// rates are the connection's rate detectors, by name.
+	rates map[string]*rateState
 }
 
 // Start opens the policy's emitter for a session in role and attaches it to
@@ -76,6 +78,7 @@ func (h *Hub) Connected(conn io.ReadWriteCloser, opened secevent.Kind) bool {
 	h.since = time.Now()
 	h.linkSeen = false
 	h.scan = scan{}
+	h.rates = nil
 
 	detail := "connection opened"
 	if peer.MAC != nil {

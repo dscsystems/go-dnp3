@@ -131,6 +131,11 @@ type Policy struct {
 	// it is reported as ctrl.clock_step. Zero uses a minute; negative turns
 	// it off.
 	ClockStepThreshold time.Duration
+
+	// AuthFailureRate is how many SAv5 authentication or key change
+	// failures one connection may cause before auth.brute_force. Zero uses
+	// 5 a minute; a negative N turns it off.
+	AuthFailureRate Rate
 }
 
 // CommandGuard decides whether a control may reach the command handler:
@@ -218,6 +223,7 @@ type Rate struct {
 var (
 	DefaultAcceptRate       = Rate{N: 10, Per: 10 * time.Second}
 	DefaultGlobalAcceptRate = Rate{N: 50, Per: 10 * time.Second}
+	DefaultAuthFailureRate  = Rate{N: 5, Per: time.Minute}
 )
 
 // DefaultCertExpiryWarning is how far ahead a certificate's expiry is reported.

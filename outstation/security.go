@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/dscsystems/go-dnp3/internal/security"
 	"github.com/dscsystems/go-dnp3/internal/stack"
 	"github.com/dscsystems/go-dnp3/objects"
+	"github.com/dscsystems/go-dnp3/secevent"
 )
 
 // SecureAuthenticationConfig enables the symmetric SAv5 challenge/reply path.
@@ -144,13 +146,21 @@ func (s *Session) authenticationError(w io.Writer, r stack.Received, seq uint8, 
 func (s *Session) challengeRequest(w io.Writer, r stack.Received, frag app.Fragment) error {
 	if r.Broadcast {
 		s.countSecurity(9)
+		s.authEvent(secevent.KindAuthBroadcastCritical, r, 0, secevent.Rejected, "",
+			fmt.Sprintf("%s broadcast: a critical request cannot be challenged, so it is dropped", frag.Header.Func))
 		return nil
+	}
+	if !criticalFunction(frag.Header.Func) {
+		s.authEvent(secevent.KindAuthObjectSmuggled, r, 0, secevent.Observed, "",
+			fmt.Sprintf("authentication object under %s; challenged", frag.Header.Func))
 	}
 	ready := false
 	for _, u := range s.security.users {
 		ready = ready || s.securityKeyValid(u, r.Source)
 	}
 	if !ready {
+		s.authEvent(secevent.KindAuthFailure, r, 0, secevent.Rejected, "no_session_keys",
+			fmt.Sprintf("critical %s from a master with no valid session keys", frag.Header.Func))
 		return s.authenticationError(w, r, frag.Header.Control.Seq, 0, 1)
 	}
 	s.security.sequence++
@@ -166,6 +176,8 @@ func (s *Session) challengeRequest(w io.Writer, r stack.Received, frag app.Fragm
 	r.Fragment = append([]byte(nil), r.Fragment...)
 	s.security.pending = &authenticationPending{received: r, challenge: data, sequence: s.security.sequence, until: s.appl.Now().Add(s.securityReplyTimeout())}
 	s.countSecurity(8)
+	s.authEvent(secevent.KindAuthChallenge, r, 0, secevent.Observed, "",
+		fmt.Sprintf("%s challenged", frag.Header.Func))
 	return nil
 }
 
@@ -183,6 +195,8 @@ func (s *Session) onAuthentication(w io.Writer, r stack.Received, frag app.Fragm
 		// This code carries errors and must never execute an operation.
 		s.security.pending = nil
 		s.countSecurity(11)
+		s.authEvent(secevent.KindAuthErrorReceived, r, 0, secevent.Observed, "",
+			"master sent an authentication error")
 		return nil
 	}
 	if r.Broadcast || len(frag.Objects) != 1 {
@@ -199,6 +213,8 @@ func (s *Session) onAuthentication(w io.Writer, r stack.Received, frag app.Fragm
 		user := binary.LittleEndian.Uint16(h.Data)
 		u := s.security.users[user]
 		if u == nil {
+			s.authEvent(secevent.KindAuthUnknownUser, r, user, secevent.Rejected, "",
+				fmt.Sprintf("key status request for user %d, who does not exist", user))
 			return s.authenticationError(w, r, seq, user, 11)
 		}
 		return s.sendKeyStatus(w, r, seq, user, u)
@@ -218,16 +234,22 @@ func (s *Session) onAuthentication(w io.Writer, r stack.Received, frag app.Fragm
 		}
 		u := s.security.users[v.User]
 		if u == nil {
+			s.authEvent(secevent.KindAuthUnknownUser, r, v.User, secevent.Rejected, "",
+				fmt.Sprintf("key change for user %d, who does not exist", v.User))
 			return s.authenticationError(w, r, seq, v.User, 11)
 		}
 		status := u.status
 		u.status = nil // status challenges are single-use, including failures
 		if len(status) < 11 || v.Sequence != binary.LittleEndian.Uint32(status) || u.statusSource != r.Source || !s.appl.Now().Before(u.statusUntil) {
+			s.authEvent(secevent.KindAuthKeyChangeFailed, r, v.User, secevent.Rejected, "stale_key_status",
+				"key change without a matching, current key status challenge")
 			return s.authenticationError(w, r, seq, v.User, 1)
 		}
 		plain, err := security.Unwrap(u.update, v.Wrapped)
 		if err != nil {
 			s.countSecurity(14)
+			s.authEvent(secevent.KindAuthKeyChangeFailed, r, v.User, secevent.Rejected, "unwrap_failed",
+				"key change did not unwrap: wrong update key, or tampering")
 			return s.authenticationError(w, r, seq, v.User, 1)
 		}
 		defer clear(plain)
@@ -238,6 +260,8 @@ func (s *Session) onAuthentication(w io.Writer, r stack.Received, frag app.Fragm
 		end := 2 + 2*n
 		if n < 16 || n > 64 || end+len(status) > len(plain) || len(plain)-end-len(status) > 7 || !hmac.Equal(plain[end:end+len(status)], status) {
 			s.countSecurity(14)
+			s.authEvent(secevent.KindAuthKeyChangeFailed, r, v.User, secevent.Rejected, "status_mismatch",
+				"key change carries the wrong key status: replay or tampering")
 			return s.authenticationError(w, r, seq, v.User, 1)
 		}
 		clear(u.control)
@@ -250,17 +274,24 @@ func (s *Session) onAuthentication(w io.Writer, r stack.Received, frag app.Fragm
 		u.messages = 0
 		s.security.pending = nil
 		s.countSecurity(13)
+		s.authEvent(secevent.KindAuthKeyChange, r, v.User, secevent.Observed, "",
+			fmt.Sprintf("session keys changed for user %d", v.User))
 		return s.sendKeyStatus(w, r, seq, v.User, u)
 	case 2:
 		v, err := objects.ParseAuthReply(data)
 		p := s.security.pending
 		if err != nil || p == nil {
+			s.authEvent(secevent.KindAuthFailure, r, v.User, secevent.Rejected, "no_challenge",
+				"challenge reply with no challenge outstanding")
 			return s.authenticationError(w, r, seq, 0, 1)
 		}
 		s.security.pending = nil
 		u := s.security.users[v.User]
-		if v.Sequence != p.sequence || r.Source != p.received.Source || !s.appl.Now().Before(p.until) || !s.securityKeyValid(u, r.Source) || !hmac.Equal(v.MAC, security.MAC(u.control, p.challenge, p.received.Fragment)) {
+		seqOK, srcOK, inTime := v.Sequence == p.sequence, r.Source == p.received.Source, s.appl.Now().Before(p.until)
+		keysOK := s.securityKeyValid(u, r.Source)
+		if !seqOK || !srcOK || !inTime || !keysOK || !hmac.Equal(v.MAC, security.MAC(u.control, p.challenge, p.received.Fragment)) {
 			s.countSecurity(2)
+			s.authFailed(r, v.User, seqOK, srcOK, inTime, keysOK)
 			return s.authenticationError(w, r, seq, v.User, 1)
 		}
 		original, err := app.ParseRequest(nil, p.received.Fragment)
@@ -269,10 +300,16 @@ func (s *Session) onAuthentication(w io.Writer, r stack.Received, frag app.Fragm
 		}
 		if authorize := s.cfg.SecureAuthentication.Authorize; authorize != nil && !authorize(v.User, uint8(original.Header.Func)) {
 			s.countSecurity(1)
+			s.authEvent(secevent.KindAuthAuthorizationDenied, p.received, v.User, secevent.Rejected, "",
+				fmt.Sprintf("user %d is not authorized for %s", v.User, original.Header.Func))
 			return s.authenticationError(w, r, seq, v.User, 7)
 		}
 		u.messages++
 		s.countSecurity(12)
+		if s.sec.Audit() {
+			s.authEvent(secevent.KindAuthSuccess, p.received, v.User, secevent.Observed, "",
+				fmt.Sprintf("%s authenticated for user %d", original.Header.Func, v.User))
+		}
 		return s.handleAuthenticated(w, p.received, true)
 	default:
 		return s.authenticationError(w, r, seq, 0, 4)
@@ -359,9 +396,19 @@ func (s *Session) expireSecurity() {
 		s.security.pending = nil
 		s.countSecurity(3)
 		s.countSecurity(9)
+		s.authEvent(secevent.KindAuthReplyTimeout, p.received, 0, secevent.Observed, "",
+			"challenge expired unanswered; the request was not executed")
 	}
-	for _, u := range s.security.users {
+	for id, u := range s.security.users {
 		if !s.appl.Now().Before(u.until) || u.messages >= s.securityMaxMessages() {
+			if u.control != nil && s.sec.Enabled() {
+				why := "time"
+				if u.messages >= s.securityMaxMessages() {
+					why = "message count"
+				}
+				s.emit(secevent.Event{Kind: secevent.KindAuthKeyExpired, Fields: secevent.HasUser, User: id,
+					Detail: fmt.Sprintf("session keys of user %d expired by %s", id, why)})
+			}
 			clear(u.control)
 			u.control = nil
 		}
