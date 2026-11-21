@@ -17,6 +17,7 @@ import (
 	"github.com/dscsystems/go-dnp3/channel"
 	"github.com/dscsystems/go-dnp3/internal/app"
 	"github.com/dscsystems/go-dnp3/internal/link"
+	"github.com/dscsystems/go-dnp3/internal/netio"
 	"github.com/dscsystems/go-dnp3/internal/stack"
 	"github.com/dscsystems/go-dnp3/objects"
 )
@@ -100,6 +101,28 @@ type Config struct {
 	// LinkTimeout is how long to wait for a link-layer acknowledgement before
 	// retransmitting. It matters only when UseLinkConfirms is set.
 	LinkTimeout time.Duration
+
+	// IdleTimeout ends a connection that has gone quiet. When no valid link
+	// frame has arrived for this long, the outstation probes the master with
+	// a link status request, and closes the connection if that is not
+	// answered within LinkTimeout. Zero, the default, never times out.
+	//
+	// A TCP or TLS server channel serves one connection at a time, so without
+	// this a peer that connects and says nothing holds the only slot for good
+	// and every real master is locked out.
+	IdleTimeout time.Duration
+
+	// FrameAssemblyTimeout ends a connection on which a link frame has
+	// started arriving and not finished within this long: a peer trickling
+	// octets to hold the connection open. Zero, the default, never times out.
+	FrameAssemblyTimeout time.Duration
+
+	// WriteTimeout bounds each write to the connection. A peer that stops
+	// reading would otherwise block the session goroutine in a write for good,
+	// stopping its timers and its updates with it. Zero, the default, never
+	// times out. It applies to connections that support write deadlines (TCP
+	// and TLS).
+	WriteTimeout time.Duration
 
 	// Indications are the device-controlled internal indications asserted from
 	// the start, for a device that already knows its configuration is bad or a
@@ -637,6 +660,11 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 	readErr := make(chan error, 1)
 	go readInto(readCtx, conn, rx, readErr)
 
+	// Everything the session writes goes through out, which bounds each write
+	// when WriteTimeout is set.
+	out := netio.WithWriteTimeout(conn, s.cfg.WriteTimeout)
+	idle := idleState{lastFrame: time.Now()}
+
 	s.connected = true
 	// Cached application replies belong to this connection, including file
 	// authentication keys and requests with device side effects.
@@ -663,7 +691,7 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 	// waiting for the first tick would let the master's own startup sequence
 	// clear the restart indication first — leaving the announcement carrying
 	// nothing worth announcing.
-	if err := s.pollUnsolicited(conn, s.appl.Now()); err != nil {
+	if err := s.pollUnsolicited(out, s.appl.Now()); err != nil {
 		s.log.Warn("initial unsolicited transmission failed", "err", err)
 	}
 
@@ -694,9 +722,10 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 			s.drainUpdates()
 
 			var handleErr error
-			if err := s.stack.Receive(conn, data, func(r stack.Received) {
+			before, _ := s.stack.Stats()
+			if err := s.stack.Receive(out, data, func(r stack.Received) {
 				if handleErr == nil {
-					handleErr = s.handle(conn, r)
+					handleErr = s.handle(out, r)
 				}
 			}); err != nil {
 				s.log.Warn("receive failed", "err", err)
@@ -706,28 +735,42 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 				s.log.Warn("request handling failed", "err", handleErr)
 				return
 			}
-			if err := s.advanceResponse(conn); err != nil {
+			after, _ := s.stack.Stats()
+			idle.onReceive(time.Now(), after.FramesDecoded != before.FramesDecoded, s.stack.Buffered())
+			if err := s.advanceResponse(out); err != nil {
 				s.log.Warn("sending a queued response fragment failed", "err", err)
 				return
 			}
-			if err := s.resumeDeferredRead(conn); err != nil {
+			if err := s.resumeDeferredRead(out); err != nil {
 				s.log.Warn("answering a deferred read failed", "err", err)
+				return
+			}
+			if out.Stalled() {
+				s.log.Warn("write timed out; dropping the connection")
 				return
 			}
 
 		case <-ticker.C:
 			now := s.appl.Now()
-			s.checkLinkTimeout(conn)
+			if out.Stalled() {
+				s.log.Warn("write timed out; dropping the connection")
+				return
+			}
+			if reason := s.checkIdle(out, &idle, time.Now()); reason != "" {
+				s.log.Warn("dropping the connection", "reason", reason)
+				return
+			}
+			s.checkLinkTimeout(out)
 			s.checkConfirmTimeout()
 			s.checkFileTimeout(now)
 			s.clockDue()
 			s.runFreezes(now)
 			s.expireSecurity()
-			if err := s.pollUnsolicited(conn, now); err != nil {
+			if err := s.pollUnsolicited(out, now); err != nil {
 				s.log.Warn("unsolicited transmission failed", "err", err)
 				return
 			}
-			if err := s.resumeDeferredRead(conn); err != nil {
+			if err := s.resumeDeferredRead(out); err != nil {
 				s.log.Warn("answering a deferred read failed", "err", err)
 				return
 			}
@@ -755,6 +798,63 @@ func readInto(ctx context.Context, r io.Reader, out chan<- []byte, errc chan<- e
 			return
 		}
 	}
+}
+
+// idleState tracks what the idle and frame-assembly timeouts measure.
+type idleState struct {
+	// lastFrame is when the last valid link frame arrived.
+	lastFrame time.Time
+	// partialSince is when a link frame started arriving and has not yet
+	// finished; zero when nothing is part-received.
+	partialSince time.Time
+	// probedAt is when a keep-alive probe went out for the current idle
+	// spell; zero when none has.
+	probedAt time.Time
+}
+
+func (st *idleState) onReceive(now time.Time, gotFrame bool, buffered int) {
+	if gotFrame {
+		st.lastFrame = now
+		st.probedAt = time.Time{}
+	}
+	switch {
+	case buffered == 0:
+		st.partialSince = time.Time{}
+	case gotFrame || st.partialSince.IsZero():
+		// A frame finished and another has begun, or the first octets of one
+		// have just arrived.
+		st.partialSince = now
+	}
+}
+
+// checkIdle applies IdleTimeout and FrameAssemblyTimeout, returning why the
+// connection should be dropped, or "" to keep it.
+func (s *Session) checkIdle(w io.Writer, st *idleState, now time.Time) string {
+	if d := s.cfg.FrameAssemblyTimeout; d > 0 && !st.partialSince.IsZero() && now.Sub(st.partialSince) > d {
+		return "a link frame did not finish arriving in time"
+	}
+	d := s.cfg.IdleTimeout
+	if d <= 0 || now.Sub(st.lastFrame) < d {
+		return ""
+	}
+	if st.probedAt.IsZero() {
+		if s.stack.Busy() {
+			// A response is still going out; probe once it has.
+			return ""
+		}
+		st.probedAt = now
+		if err := s.stack.SendLinkStatusRequest(w); err != nil {
+			return "the keep-alive probe could not be sent"
+		}
+		s.linkDeadline = now.Add(s.cfg.LinkTimeout)
+		s.log.Debug("idle link; keep-alive sent")
+		return ""
+	}
+	// The probe and its retries have had their time.
+	if now.Sub(st.probedAt) > s.cfg.LinkTimeout*time.Duration(s.cfg.LinkRetries+1) {
+		return "idle and the keep-alive probe went unanswered"
+	}
+	return ""
 }
 
 // checkLinkTimeout retransmits an unacknowledged link frame.

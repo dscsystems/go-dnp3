@@ -13,6 +13,7 @@ import (
 	"github.com/dscsystems/go-dnp3"
 	"github.com/dscsystems/go-dnp3/channel"
 	"github.com/dscsystems/go-dnp3/internal/app"
+	"github.com/dscsystems/go-dnp3/internal/netio"
 	"github.com/dscsystems/go-dnp3/internal/stack"
 	"github.com/dscsystems/go-dnp3/objects"
 )
@@ -70,6 +71,13 @@ type Config struct {
 	// away: both are silent. Without a probe, a master notices only when its
 	// next poll times out, which on a slow schedule can be minutes.
 	KeepAlive time.Duration
+
+	// WriteTimeout bounds each write to the connection. An outstation that
+	// stops reading would otherwise block the session goroutine in a write
+	// for good, and every request with it. Zero, the default, never times
+	// out. It applies to connections that support write deadlines (TCP and
+	// TLS).
+	WriteTimeout time.Duration
 
 	// Log receives protocol and session events. Nil discards them.
 	Log *slog.Logger
@@ -322,11 +330,19 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 	readErr := make(chan error, 1)
 	go readInto(readCtx, conn, rx, readErr)
 
+	// Everything the session writes goes through out, which bounds each write
+	// when WriteTimeout is set.
+	out := netio.WithWriteTimeout(conn, s.cfg.WriteTimeout)
+
 	timer := time.NewTimer(time.Hour)
 	defer timer.Stop()
 
 	for {
-		s.runDueTask(conn)
+		s.runDueTask(out)
+		if out.Stalled() {
+			s.log.Warn("write timed out; dropping the connection")
+			return
+		}
 		resetTimer(timer, s.nextWakeup())
 
 		select {
@@ -344,15 +360,15 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 
 		case data := <-rx:
 			s.lastRx = time.Now()
-			if err := s.stack.Receive(conn, data, func(r stack.Received) {
-				s.onFragment(conn, r)
+			if err := s.stack.Receive(out, data, func(r stack.Received) {
+				s.onFragment(out, r)
 			}); err != nil {
 				s.log.Warn("receive failed", "err", err)
 				return
 			}
 
 		case <-timer.C:
-			if s.checkLinkTimeout(conn) {
+			if s.checkLinkTimeout(out) {
 				continue
 			}
 			if s.peerSilent {
@@ -360,7 +376,7 @@ func (s *Session) serve(ctx context.Context, conn io.ReadWriteCloser) {
 				return
 			}
 			s.checkTimeout()
-			s.checkKeepAlive(conn)
+			s.checkKeepAlive(out)
 		}
 	}
 }

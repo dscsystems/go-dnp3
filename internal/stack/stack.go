@@ -117,6 +117,11 @@ func (s *Stack) Stats() (link.Stats, transport.Stats) {
 	return s.parser.Stats(), s.reasm.Stats()
 }
 
+// Buffered reports how many received octets are held waiting to complete a
+// link frame. Nonzero between reads means a frame has started and not yet
+// finished arriving.
+func (s *Stack) Buffered() int { return s.parser.Buffered() }
+
 // Pending reports whether a confirmed frame is awaiting acknowledgement.
 //
 // A session arms its link timer while this is true and calls [Stack.OnTimeout]

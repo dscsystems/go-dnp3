@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 )
 
 // UDP is a legal DNP3 transport, and a genuinely awkward one.
@@ -31,6 +32,13 @@ type UDPConfig struct {
 	// RemoteAddr is where to send. Empty means reply to whoever writes first,
 	// which is what an outstation normally wants.
 	RemoteAddr string
+
+	// PinPeer drops datagrams from anyone but the peer: RemoteAddr when it is
+	// set, otherwise whoever wrote first. Without it a datagram socket takes
+	// requests from any host that can reach the port, while its replies keep
+	// going to the first peer — so anyone can operate the outstation without
+	// ever seeing an answer.
+	PinPeer bool
 }
 
 // UDPChannel returns a channel over a UDP socket.
@@ -45,6 +53,10 @@ type udpChannel struct {
 	conn   *net.UDPConn
 	remote *net.UDPAddr
 	closed bool
+
+	// foreign counts datagrams that came from someone other than the peer,
+	// and dropped those PinPeer refused.
+	foreign, dropped atomic.Uint64
 }
 
 func (c *udpChannel) Addr() net.Addr {
@@ -166,7 +178,16 @@ func (u *udpConn) Read(p []byte) (int, error) {
 		if u.ch.remote == nil {
 			u.ch.remote = addr
 		}
+		remote := u.ch.remote
 		u.ch.mu.Unlock()
+
+		if !sameUDPAddr(addr, remote) {
+			u.ch.foreign.Add(1)
+			if u.ch.cfg.PinPeer {
+				u.ch.dropped.Add(1)
+				continue
+			}
+		}
 
 		u.pending = u.rbuf[:n] // an empty datagram loops round for the next
 	}
@@ -174,6 +195,12 @@ func (u *udpConn) Read(p []byte) (int, error) {
 	n := copy(p, u.pending)
 	u.pending = u.pending[n:]
 	return n, nil
+}
+
+// sameUDPAddr compares two UDP addresses by IP and port, treating an
+// IPv4-mapped IPv6 address as the IPv4 address it carries.
+func sameUDPAddr(a, b *net.UDPAddr) bool {
+	return a.Port == b.Port && a.IP.Equal(b.IP)
 }
 
 // BeginMessage starts gathering writes into one datagram. A message is one
