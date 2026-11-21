@@ -292,8 +292,9 @@ func TestFileInfo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("info: %v", err)
 	}
-	if info.Name != "settings.xml" {
-		t.Errorf("name %q, want settings.xml", info.Name)
+	// IEEE 1815-2012 4.4.18: the answer carries the name of the request.
+	if info.Name != "/settings.xml" {
+		t.Errorf("name %q, want /settings.xml", info.Name)
 	}
 	if info.Size != 33 {
 		t.Errorf("size %d, want 33", info.Size)
