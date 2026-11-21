@@ -187,7 +187,7 @@ no socket and no hardware:
 ```console
 $ dnp3-explorer -demo
 dnp3-explorer  demo (in-process outstation)  ● connected      up 1:36  13.4/s  12:04:29
- 1 Overview  2 Points  3 Events  4 Log  5 Files  6 Help                   20 points
+ 1 Overview  2 Points  3 Events  4 Log  5 Files  6 Security  7 Help       20 points
 ────────────────────────────────────────────────────────────────────────────────────
  POINT ▲          VALUE TREND        QUALITY                AGE TIMESTAMP
  BI 0                ON ▁▁▁▁████████ ONLINE                 0s  12:04:29.375
@@ -202,8 +202,9 @@ dnp3-explorer  demo (in-process outstation)  ● connected      up 1:36  13.4/s 
  ↑↓ move · enter act · d inspect · / filter · < > r sort · b deadband · ? help
 ```
 
-Six screens: an overview of the session and the device's health, the point
-table, the sequence of events, the activity log, file transfer, and a reference. Points can be
+Seven screens: an overview of the session and the device's health, the point
+table, the sequence of events, the activity log, file transfer, the security
+events the master saw, and a reference. Points can be
 filtered on anything in the row, sorted by value or by quality — worst first,
 which is how you find the broken points in a device with a thousand good ones —
 and inspected one at a time, with the flags named, the trend drawn and the

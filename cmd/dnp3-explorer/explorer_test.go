@@ -345,8 +345,12 @@ func TestScreenNavigation(t *testing.T) {
 		t.Errorf("tab from Log gave %v, want Files", m.screen)
 	}
 	m = press(m, "tab")
+	if m.screen != ScreenSecurity {
+		t.Errorf("tab from Files gave %v, want Security", m.screen)
+	}
+	m = press(m, "tab")
 	if m.screen != ScreenHelp {
-		t.Errorf("tab from Files gave %v, want Help", m.screen)
+		t.Errorf("tab from Security gave %v, want Help", m.screen)
 	}
 	// And it wraps rather than sticking at the end.
 	m = press(m, "tab")

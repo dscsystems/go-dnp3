@@ -1190,8 +1190,9 @@ $ dnp3-explorer -demo                        # a full outstation in-process, no 
 $ dnp3-explorer -host 10.0.0.5:20000 -remote 10 -poll 2s
 ```
 
-Six screens: session overview, the point table, the sequence of events, the
-activity log, the device's files, and a key reference. Points can be filtered on
+Seven screens: session overview, the point table, the sequence of events, the
+activity log, the device's files, the security events the master saw, and a key
+reference. Points can be filtered on
 anything in the row and sorted by value or by quality — worst first, which is how
 you find the broken points in a device with a thousand good ones. `e` exports
 what is on screen, after the filter and the sort, as CSV.

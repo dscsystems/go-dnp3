@@ -84,6 +84,7 @@ const (
 	colClass
 	colSource
 	colLevel
+	colKind
 	colMessage
 	colFileName
 	colFileSize

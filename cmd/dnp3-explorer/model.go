@@ -23,6 +23,7 @@ import (
 	"github.com/dscsystems/go-dnp3"
 	"github.com/dscsystems/go-dnp3/master"
 	"github.com/dscsystems/go-dnp3/objects"
+	"github.com/dscsystems/go-dnp3/secevent"
 )
 
 // The concurrency rule this whole file is built around: the DNP3 session runs
@@ -42,19 +43,20 @@ const (
 	ScreenEvents
 	ScreenLog
 	ScreenFiles
+	ScreenSecurity
 	ScreenHelp
 	numScreens
 )
 
-var screenNames = [numScreens]string{"Overview", "Points", "Events", "Log", "Files", "Help"}
+var screenNames = [numScreens]string{"Overview", "Points", "Events", "Log", "Files", "Security", "Help"}
 
 // isTable reports whether the screen draws a scrollable list.
 func (s Screen) isTable() bool {
-	return s == ScreenPoints || s == ScreenEvents || s == ScreenLog || s == ScreenFiles
+	return s == ScreenPoints || s == ScreenEvents || s == ScreenLog || s == ScreenFiles || s == ScreenSecurity
 }
 
 // follows reports whether the screen has a newest row worth pinning to.
-func (s Screen) follows() bool { return s == ScreenEvents || s == ScreenLog }
+func (s Screen) follows() bool { return s == ScreenEvents || s == ScreenLog || s == ScreenSecurity }
 
 // scrolls reports whether the screen has more content than fits, which the
 // help screen does on a short terminal even though it is not a list.
@@ -164,8 +166,12 @@ type Model struct {
 
 	events []eventRow
 	logs   []logRow
-	files  filesState
-	device deviceState
+	// security holds the session's security events; secAlerts counts those
+	// at Warning or above, for the overview.
+	security  []secRow
+	secAlerts int
+	files     filesState
+	device    deviceState
 
 	// One cursor and scroll offset per screen, so moving between tabs does not
 	// lose the operator's place in a list they were reading.
@@ -346,6 +352,8 @@ func (m *Model) applySessionMsg(msg tea.Msg) tea.Cmd {
 		return m.applyStatus(msg)
 	case logMsg:
 		m.addLog(msg.level, msg.text)
+	case secEventMsg:
+		m.addSecEvent(secevent.Event(msg))
 	}
 	return nil
 }
@@ -436,7 +444,7 @@ func (m *Model) HandleKey(key string) (tea.Model, tea.Cmd) {
 		return m, m.setScreen((m.screen + 1) % numScreens)
 	case "shift+tab", "left":
 		return m, m.setScreen((m.screen + numScreens - 1) % numScreens)
-	case "1", "2", "3", "4", "5", "6":
+	case "1", "2", "3", "4", "5", "6", "7":
 		return m, m.setScreen(Screen(key[0] - '1'))
 	case "?":
 		return m, m.setScreen(ScreenHelp)
@@ -602,6 +610,9 @@ func (m *Model) clearList() {
 	case ScreenLog:
 		m.logs = nil
 		m.cursor[ScreenLog], m.offset[ScreenLog] = 0, 0
+	case ScreenSecurity:
+		m.security, m.secAlerts = nil, 0
+		m.cursor[ScreenSecurity], m.offset[ScreenSecurity] = 0, 0
 	case ScreenPoints:
 		// Forgetting the points is how an operator re-reads a device after
 		// changing its configuration, rather than restarting the tool.
@@ -951,6 +962,8 @@ func (m *Model) rowCount() int {
 		return len(m.visibleEvents())
 	case ScreenLog:
 		return len(m.visibleLogs())
+	case ScreenSecurity:
+		return len(m.visibleSecurity())
 	case ScreenFiles:
 		if m.files.showingPreview() {
 			return len(m.files.preview)

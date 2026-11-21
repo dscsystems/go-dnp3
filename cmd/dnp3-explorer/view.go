@@ -158,6 +158,8 @@ func (m *Model) viewBody(l layout) []string {
 		body = m.viewEvents(l)
 	case ScreenLog:
 		body = m.viewLog(l)
+	case ScreenSecurity:
+		body = m.viewSecurity(l)
 	case ScreenFiles:
 		body = m.viewFiles(l)
 	case ScreenHelp:
@@ -252,7 +254,7 @@ func (m *Model) footerButtons() []button {
 			{label: "Export", key: "e"},
 			{label: "Help", key: "?"},
 		}
-	case ScreenLog:
+	case ScreenLog, ScreenSecurity:
 		return []button{
 			{label: "Follow", key: "f", on: m.follow},
 			{label: "Filter", key: "/"},
@@ -339,7 +341,7 @@ func (m *Model) viewHint(l layout) string {
 		hint = "↑↓ move · enter act · d inspect · / filter · < > r sort · b deadband · s range scan · ? help"
 	case ScreenEvents:
 		hint = "↑↓ move · f follow · x clear · / filter · p poll · ? help"
-	case ScreenLog:
+	case ScreenLog, ScreenSecurity:
 		hint = "↑↓ move · f follow · x clear · / filter · ? help"
 	case ScreenFiles:
 		if m.files.showingPreview() {
@@ -487,6 +489,7 @@ func (m *Model) overviewTraffic() []string {
 		field("restarts seen", countText(st.RestartsSeen)),
 		field("connections", fmt.Sprint(st.Connections)),
 		field("update rate", m.rateText()),
+		field("security", m.securityText()),
 	}
 	if dropped := m.conn.dropped.Load(); dropped > 0 {
 		lines = append(lines, field("dropped",
@@ -710,6 +713,13 @@ func columnsFor(s Screen) []column {
 			{id: colQuality, title: "QUALITY", min: 10, flex: true},
 			{id: colSource, title: "SOURCE", width: 7, prio: 4},
 			{id: colStamp, title: "TIMESTAMP", width: 12, prio: 1},
+		}
+	case ScreenSecurity:
+		return []column{
+			{id: colReceived, title: "TIME", width: 12},
+			{id: colLevel, title: "SEVERITY", width: 8},
+			{id: colKind, title: "KIND", width: 30, prio: 1},
+			{id: colMessage, title: "DETAIL", min: 20, flex: true},
 		}
 	case ScreenFiles:
 		return []column{
@@ -1083,7 +1093,7 @@ func (m *Model) viewHelp(l layout) []string {
 // last third does not exist.
 func (m *Model) helpLines(b rect) []string {
 	keys := [][2]string{
-		{"1 – 6, tab", "change screen"},
+		{"1 – 7, tab", "change screen"},
 		{"↑ ↓ j k", "move the cursor"},
 		{"pgup pgdn", "move a page"},
 		{"home end g G", "first and last row"},

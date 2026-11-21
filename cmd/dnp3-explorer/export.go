@@ -69,6 +69,14 @@ func (m *Model) export() tea.Cmd {
 			rows = append(rows, []string{l.At.Format(time.RFC3339Nano), l.Level, l.Text})
 		}
 
+	case ScreenSecurity:
+		name = "dnp3-security-" + stamp + ".csv"
+		rows = append(rows, []string{"time", "severity", "kind", "action", "count", "detail"})
+		for _, r := range m.visibleSecurity() {
+			rows = append(rows, []string{r.At.Format(time.RFC3339Nano), r.Severity.String(),
+				string(r.Kind), r.Action.String(), fmt.Sprint(max(r.Count, 1)), r.Text})
+		}
+
 	default:
 		return func() tea.Msg {
 			return commandResultMsg{text: "nothing to export from this screen"}
